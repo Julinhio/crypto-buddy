@@ -54,7 +54,10 @@ export function clampAllocation(
       .filter(([asset]) => asset !== reserveAsset)
       .reduce((sum, [, pct]) => sum + pct, 0);
     if (coinTotal > 0) {
-      const scale = (coinTotal - deficit) / coinTotal;
+      // max(_, 0): startup config validation already rules out a negative scale
+      // (it needs minCash >= 100), but don't assume the caller pre-validated the
+      // allocation — a malformed input could otherwise flip coins negative.
+      const scale = Math.max((coinTotal - deficit) / coinTotal, 0);
       for (const [asset, pct] of Object.entries(applied)) {
         if (asset !== reserveAsset) applied[asset] = pct * scale;
       }

@@ -48,6 +48,9 @@ create table if not exists public.executions (
 
 create index if not exists executions_decision_id_idx on public.executions (decision_id);
 create index if not exists executions_created_at_idx on public.executions (created_at);
+-- Serves the portfolio replay query: filter validation_status = 'executed',
+-- ordered by id — no filesort as the journal grows.
+create index if not exists executions_status_id_idx on public.executions (validation_status, id);
 
 comment on table public.executions is
   'Append-only execution journal — the single source of truth the virtual portfolio is derived from. One row per asset movement, full lifecycle. No orders placed in PR A (modeled fills); exchange_* filled in PR B.';
