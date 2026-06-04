@@ -1,4 +1,4 @@
-import { Decimal, ZERO } from '../money.js';
+import { Decimal, ONE, ZERO } from '../money.js';
 import type { VirtualPortfolio, PriceLookup } from '../portfolio/derive.js';
 import type { ExecutionInsert } from '../persistence/executions.js';
 
@@ -52,15 +52,23 @@ export function computeMovements(
       continue;
     }
 
-    const notional = deltaValue.abs();
+    const isBuy = deltaValue.gt(0);
+    const grossDelta = deltaValue.abs();
+    // Fees come out of the COIN side, never the sacred cash reserve. Sizing a
+    // buy net of fees makes its cash outlay (notional + fee) equal the intended
+    // move, so the cash floor still holds after fees — the coin just lands a
+    // hair under its target. A sell removes exactly the over-target coin value;
+    // its fee reduces the cash it returns (cash only rises, so the floor is safe).
+    const notional = isBuy ? grossDelta.div(ONE.plus(feeRate)) : grossDelta;
+    const fee = notional.times(feeRate);
     movements.push({
       symbol: `${asset}/${portfolio.reserveAsset}`,
       asset,
-      side: deltaValue.gt(0) ? 'buy' : 'sell',
+      side: isBuy ? 'buy' : 'sell',
       qty: notional.div(price),
       price,
       notional,
-      fee: notional.times(feeRate),
+      fee,
     });
   }
 
