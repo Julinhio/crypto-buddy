@@ -37,6 +37,25 @@ export interface CacheConfig {
   maintenanceLookbackCandles: number;
 }
 
+/**
+ * Decision layer (brick 3) tuning. The allocation universe itself is NOT here —
+ * it is derived from `tradableAssets()` (tradable base assets + the reserve
+ * quote, i.e. USDT), so the assets the AI may allocate to always stay in sync
+ * with the tradable pairs above.
+ */
+export interface DecisionConfig {
+  /** Default model when ANTHROPIC_MODEL is unset. Haiku for cheap plumbing tests. */
+  defaultModel: string;
+  maxTokens: number;
+  /** How many recent `decided` rows to feed back for coherence / anti yo-yo. */
+  recentDecisionsToLoad: number;
+  /** Delay bounds the code clamps the AI's requested next-wake to. */
+  minDelayMinutes: number;
+  maxDelayMinutes: number;
+  /** Allowed deviation from 100 when validating the allocation sum. */
+  allocationTolerancePercent: number;
+}
+
 export interface AppConfig {
   tradablePairs: string[];
   referencePairs: string[];
@@ -46,6 +65,7 @@ export interface AppConfig {
   longTermLimit: number;
   indicators: IndicatorConfig;
   cache: CacheConfig;
+  decision: DecisionConfig;
 }
 
 export const config: AppConfig = {
@@ -74,6 +94,17 @@ export const config: AppConfig = {
     stalenessDays: 30,
     // Recent daily candles scanned to catch intraday extremes between runs.
     maintenanceLookbackCandles: 30,
+  },
+
+  decision: {
+    // Cheap model for validating the plumbing; switch to 'claude-sonnet-4-6'
+    // for real decision quality via the ANTHROPIC_MODEL env var.
+    defaultModel: 'claude-haiku-4-5',
+    maxTokens: 4096,
+    recentDecisionsToLoad: 5,
+    minDelayMinutes: 15,
+    maxDelayMinutes: 240,
+    allocationTolerancePercent: 0.5,
   },
 };
 
