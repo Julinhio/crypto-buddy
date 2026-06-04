@@ -13,13 +13,17 @@ export interface RangeLevels {
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Highest high / lowest low across a candle series.
+ * Highest high / lowest low across a candle series, with the date of each
+ * extreme.
  *
  * Returns `null` on an empty series instead of throwing, so a pair with
  * missing data degrades gracefully rather than taking down the whole loop.
  * The caller knows the symbol, so it owns the warning log.
+ *
+ * Exported because the ATH/ATL cache reuses it to derive the recent-candle
+ * extremes used to maintain the cached value between runs.
  */
-function rangeHighLow(candles: Candle[]): RangeLevels | null {
+export function extremesOf(candles: Candle[]): RangeLevels | null {
   if (candles.length === 0) return null;
   let high = candles[0]!;
   let low = candles[0]!;
@@ -41,11 +45,11 @@ function sliceLastDays(candles: Candle[], days: number): Candle[] {
 }
 
 export function yearLevels(primary: Candle[]): RangeLevels | null {
-  return rangeHighLow(sliceLastDays(primary, 365));
+  return extremesOf(sliceLastDays(primary, 365));
 }
 
 export function monthLevels(primary: Candle[]): RangeLevels | null {
-  return rangeHighLow(sliceLastDays(primary, 30));
+  return extremesOf(sliceLastDays(primary, 30));
 }
 
 /**
@@ -58,5 +62,5 @@ export function monthLevels(primary: Candle[]): RangeLevels | null {
  * series every run.
  */
 export function allTimeLevels(longTerm: Candle[]): RangeLevels | null {
-  return rangeHighLow(longTerm);
+  return extremesOf(longTerm);
 }
