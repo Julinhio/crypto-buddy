@@ -1,0 +1,14 @@
+# Gemini Code Assist configuration.
+#
+# We use Codex as the PR reviewer. Gemini was a bonus while it lasts (the
+# product is scheduled to shut down 2026-07-17) — and on PR #3 its automatic
+# review posted several confidently-wrong "critical" flags (claiming GA
+# Anthropic features like structured outputs / current model IDs don't exist),
+# which is noise for human reviewers. So turn OFF its automatic PR review,
+# summary, and help comment. A manual `/gemini review` still works if invoked.
+have_fun: false
+code_review:
+  pull_request_opened:
+    summary: false
+    code_review: false
+    help: false
