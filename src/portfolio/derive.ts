@@ -76,9 +76,21 @@ export function derivePortfolio(
         .div(newQty);
       lot.qty = newQty;
     } else {
-      // Sell: reduce qty, keep avgCost. Fully closed → reset.
+      // Sell: reduce qty, keep avgCost.
       lot.qty = lot.qty.plus(entry.baseDelta);
-      if (lot.qty.abs().lte(DUST)) {
+      if (lot.qty.lt(DUST.neg())) {
+        // A spot position can NEVER be genuinely negative. If the journal
+        // produces one, that's a real accounting bug upstream we want to SEE,
+        // not silence — so log it loudly, then clamp to 0 so derivation survives.
+        console.error(
+          `[CRITICAL] ${base}: replaying the journal produced a NEGATIVE position ` +
+            `(qty ${lot.qty.toString()}). Spot positions can't go negative — this signals ` +
+            `a journal/accounting bug upstream. Clamping to 0; investigate.`,
+        );
+        lot.qty = ZERO;
+        lot.avgCost = ZERO;
+      } else if (lot.qty.lte(DUST)) {
+        // Fully closed (within dust) → reset, silently (this is normal).
         lot.qty = ZERO;
         lot.avgCost = ZERO;
       }

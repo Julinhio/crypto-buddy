@@ -56,7 +56,10 @@ export async function loadLedger(supabase: SupabaseClient | null): Promise<Ledge
       .from(TABLE)
       .select('symbol, side, valuation_price, ledger_base_delta, ledger_quote_delta')
       .eq('validation_status', 'executed')
-      .order('created_at', { ascending: true });
+      // Replay in insertion order via the monotonic bigint id, NOT created_at —
+      // two fills from the same cycle can share a timestamp, and replay order
+      // must be deterministic.
+      .order('id', { ascending: true });
     if (error) throw new Error(error.message);
 
     return (data ?? []).map((row) => ({
