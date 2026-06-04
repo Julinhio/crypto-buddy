@@ -2,7 +2,7 @@
   "name": "crypto-buddy",
   "version": "0.1.0",
   "private": true,
-  "description": "Autonomous crypto trading bot — market data engine (brick 1)",
+  "description": "Autonomous crypto trading bot — market data engine + Supabase persistence (bricks 1-2)",
   "type": "module",
   "scripts": {
     "start": "tsx src/index.ts",
@@ -12,6 +12,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.107.0",
     "ccxt": "^4.4.0",
     "dotenv": "^16.4.5",
     "technicalindicators": "^3.1.0"
