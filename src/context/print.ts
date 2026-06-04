@@ -47,7 +47,9 @@ function printPair(p: PairContext): void {
   }
 
   const a = p.levels.allTime;
-  const allTimeSuffix = a ? `   [${a.source.candles} × ${a.source.timeframe}]` : '';
+  const allTimeSuffix = a
+    ? `   [${a.source.candles} × ${a.source.timeframe} · ${a.source.origin}]`
+    : '';
   console.log(levelLine('month', p.levels.month));
   console.log(levelLine('year', p.levels.year));
   console.log(levelLine('ATH/ATL', a, allTimeSuffix));

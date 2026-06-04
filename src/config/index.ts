@@ -21,6 +21,22 @@ export interface IndicatorConfig {
   emaPeriods: number[];
 }
 
+/**
+ * ATH/ATL cache tuning. The two windows are deliberately aligned:
+ *
+ *   - between re-seeds, the cache is maintained from the live price + the
+ *     extremes of the last `maintenanceLookbackCandles` daily candles, which
+ *     catches any intraday spike from the recent past (the daily candle
+ *     records the day's true high/low even if price reverted since);
+ *   - if an entry is older than `stalenessDays`, we re-seed it fully from the
+ *     long series. A downtime longer than the lookback therefore triggers a
+ *     re-seed that recomputes everything, so no extreme can be lost for good.
+ */
+export interface CacheConfig {
+  stalenessDays: number;
+  maintenanceLookbackCandles: number;
+}
+
 export interface AppConfig {
   tradablePairs: string[];
   referencePairs: string[];
@@ -29,6 +45,7 @@ export interface AppConfig {
   longTermTimeframe: Timeframe;
   longTermLimit: number;
   indicators: IndicatorConfig;
+  cache: CacheConfig;
 }
 
 export const config: AppConfig = {
@@ -50,6 +67,13 @@ export const config: AppConfig = {
     rsiPeriod: 14,
     smaPeriods: [50, 200],
     emaPeriods: [21],
+  },
+
+  cache: {
+    // Re-seed an entry from the long series once it gets this old (safety net).
+    stalenessDays: 30,
+    // Recent daily candles scanned to catch intraday extremes between runs.
+    maintenanceLookbackCandles: 30,
   },
 };
 

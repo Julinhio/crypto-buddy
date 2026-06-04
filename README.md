@@ -2,10 +2,11 @@
 
 Autonomous crypto trading bot — work in progress.
 
-This first brick is a **read-only market data engine**. It connects to
-Binance, builds a structured "market context" object for a configurable list
-of pairs, and prints it to the console for visual inspection. No LLM call,
-no orders, no trading logic yet.
+So far it is a **read-only market data engine** with a **Supabase persistence
+layer**. It connects to Binance, builds a structured "market context" object
+for a configurable list of pairs, caches the rarely-changing ATH/ATL in
+Supabase, and prints the context to the console for visual inspection. No LLM
+call, no orders, no trading logic yet.
 
 ## What it does
 
@@ -22,11 +23,10 @@ For every pair in **both** families:
 - Pulls the current spot price and a primary candle series (default: 500 × 1d)
   from the **public Binance mainnet** endpoint — real market data, no API key
   needed.
-- Pulls a long-term weekly series (default: 1000 × 1w) to compute true
-  ATH / ATL across the deepest history available.
 - Computes a snapshot of indicators in code: RSI(14), SMA(50), SMA(200),
   EMA(21) — via `technicalindicators`.
-- Computes price levels: month high/low, year high/low, ATH/ATL.
+- Computes price levels: month high/low, year high/low, and ATH/ATL served
+  from the cache (see [Persistence](#persistence-ath--atl-cache)).
 
 It also reads the authenticated **Binance testnet** account, keeping only the
 **relevant balances** — the quote currency (USDT) and the base assets of
@@ -40,6 +40,46 @@ prices); only the account side is sandboxed.
 Everything is assembled into one `MarketContext` object, printed in a
 human-readable summary plus raw JSON.
 
+## Persistence (ATH / ATL cache)
+
+ATH/ATL barely moves, yet recomputing it means pulling a long weekly history.
+Doing that every run is wasteful, so it is **cached in Supabase** (one row per
+pair) and the long series is fetched only when needed:
+
+- **No entry yet** (first pass / new pair) → fetch the long weekly series,
+  compute ATH/ATL, store it. This is the only time the long series is pulled.
+- **Entry present** → read it, and push it **only** if a new extreme appears.
+  The maintenance signal is the live price **plus the high/low of recent daily
+  candles** (already fetched for indicators). Because a daily candle records
+  its day's true intraday high/low, an intraday spike that reverted between two
+  runs is still captured — no extra request.
+- **Safety re-seed** → if an entry is older than `cache.stalenessDays`
+  (default 30), it is re-seeded fully from the long series. This window is
+  aligned with `cache.maintenanceLookbackCandles` (default 30 daily candles):
+  any downtime longer than the lookback triggers a full recompute, so no
+  extreme can be lost for good.
+
+The `allTime` field of the context is tagged with its origin — `seed`,
+`reseed`, `cache`, `bumped`, or `fallback` — visible in the printed output
+(e.g. `[460 × 1w · cache]`).
+
+**Resilience:** the cache is an optimization, never a single point of failure.
+If Supabase is unconfigured or unreachable, the bot logs a warning and falls
+back to computing ATH/ATL from the long series for that run — exactly the
+pre-cache behavior.
+
+### Applying the migration
+
+The schema is versioned in
+[`supabase/migrations/0001_ath_atl_cache.sql`](supabase/migrations/0001_ath_atl_cache.sql).
+To apply it: open the Supabase dashboard → **SQL Editor** → **New query**,
+paste the file's contents, and **Run**. (The same file also works with the
+Supabase CLI via `supabase db push` if you adopt it later.)
+
+The table has **RLS enabled with no policies**: the backend reaches it with
+the service role key (which bypasses RLS), while any anon/public key is denied
+— the secure default for a single-user server-side backend.
+
 ## Setup
 
 ```sh
@@ -52,6 +92,12 @@ npm install
 # 3. Copy the env template and fill in your keys
 cp .env.example .env
 #   edit .env with your BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET
+
+# 4. (Optional but recommended) Set up Supabase persistence:
+#    - create a project at https://supabase.com
+#    - apply supabase/migrations/0001_ath_atl_cache.sql (see Persistence above)
+#    - add SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY to .env
+#    Without these, the bot still runs and computes ATH/ATL each run.
 ```
 
 ## Run
@@ -79,8 +125,10 @@ All knobs live in [`src/config/index.ts`](src/config/index.ts):
   read without ever trading or tracking it.
 - `primaryTimeframe` / `primaryLimit` — series used for indicators and
   month/year levels.
-- `longTermTimeframe` / `longTermLimit` — series used for ATH/ATL only.
+- `longTermTimeframe` / `longTermLimit` — series used to seed ATH/ATL.
 - `indicators` — RSI period, list of SMA periods, list of EMA periods.
+- `cache` — `stalenessDays` (re-seed threshold) and
+  `maintenanceLookbackCandles` (recent daily candles scanned for new extremes).
 
 The set of balance-tracked assets is derived from `tradablePairs` via
 `tradableAssets()` — no separate asset list to maintain. The core code never
@@ -91,22 +139,30 @@ needs to be touched to add a pair or tune an indicator.
 ```
 src/
 ├── index.ts                 # entry point
-├── config/index.ts          # tradable/reference pairs, timeframes, indicators
+├── config/index.ts          # pairs, timeframes, indicators, cache tuning
 ├── exchanges/binance.ts     # public mainnet + authenticated testnet clients
 ├── market/
 │   ├── klines.ts            # candle + ticker fetch
 │   ├── indicators.ts        # RSI / SMA / EMA snapshot
-│   └── levels.ts            # month / year / ATH-ATL (isolated)
+│   └── levels.ts            # month / year / ATH-ATL (isolated extremesOf)
 ├── account/balances.ts      # testnet balances, filtered to tradable assets
+├── persistence/
+│   ├── supabase.ts          # service-role client factory (null if unset)
+│   └── athAtlCache.ts       # ATH/ATL seed / maintain / fallback logic
 └── context/
     ├── build.ts             # assembles MarketContext
     └── print.ts             # human-readable console output
+
+supabase/
+└── migrations/
+    └── 0001_ath_atl_cache.sql   # versioned cache table + RLS
 ```
 
 ## Coming next (not in this brick)
 
-- Persistence layer: cache the long-term series + cached ATH/ATL, refresh
-  incrementally instead of re-fetching every run.
 - LLM decision step: send `MarketContext` + portfolio target spec to a model.
 - Execution layer: place orders on testnet to reach the target allocation,
   with hard-coded risk guardrails.
+- More persistence: decision journal, orders, portfolio snapshots, bot state
+  (deliberately **not** created yet — this brick adds only the connection and
+  the ATH/ATL cache).
