@@ -54,12 +54,16 @@ export function computeMovements(
 
     const isBuy = deltaValue.gt(0);
     const grossDelta = deltaValue.abs();
-    // Fees come out of the COIN side, never the sacred cash reserve. Sizing a
-    // buy net of fees makes its cash outlay (notional + fee) equal the intended
-    // move, so the cash floor still holds after fees — the coin just lands a
-    // hair under its target. A sell removes exactly the over-target coin value;
-    // its fee reduces the cash it returns (cash only rises, so the floor is safe).
-    const notional = isBuy ? grossDelta.div(ONE.plus(feeRate)) : grossDelta;
+    // Fees are absorbed by the COIN side, never the sacred cash reserve —
+    // SYMMETRICALLY on both sides. A buy spends (notional + fee) = grossDelta;
+    // a sell returns (notional − fee) = grossDelta. So each side moves cash by
+    // EXACTLY the intended delta, leaving cash at its target % of (pre-fee)
+    // equity; equity then shrinks by the fees, so the cash % only rises — the
+    // floor holds after the fills for ANY rebalance (buy, sell, or mixed).
+    // (feeRate < 1 is guaranteed by the startup config validation.)
+    const notional = isBuy
+      ? grossDelta.div(ONE.plus(feeRate))
+      : grossDelta.div(ONE.minus(feeRate));
     const fee = notional.times(feeRate);
     movements.push({
       symbol: `${asset}/${portfolio.reserveAsset}`,

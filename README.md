@@ -257,10 +257,11 @@ AI's proposed allocation and reasoning, then the **virtual portfolio**, the
 **risk-wrapper** result (proposed vs applied), and the **dry-run movements** it
 would make (journaled as modeled fills — no real order).
 
-## Type check only
+## Type check & tests
 
 ```sh
 npm run typecheck
+npm test          # money invariants (e.g. cash floor holds after fees, any rebalance)
 ```
 
 ## Configuration

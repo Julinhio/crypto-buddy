@@ -7,7 +7,8 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "decide": "tsx src/decide.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx src/test/invariants.ts"
   },
   "engines": {
     "node": ">=20"
