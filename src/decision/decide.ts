@@ -52,22 +52,11 @@ export async function decide(): Promise<DecideResult> {
 
   const context = await buildMarketContext();
 
-  // Edge case 1 — empty context: no tradable pair returned usable data. Never
-  // let the AI decide on zero data.
-  if (context.market.tradable.length === 0) {
-    const skipReason =
-      'no tradable pairs returned usable market data — refusing to decide on an empty universe';
-    console.error(`[CRITICAL] Wake-up skipped: ${skipReason}. The LLM was not called.`);
-    const row = makeRow(context, gitSha, { status: 'skipped', skip_reason: skipReason });
-    const { persisted, id } = await insertDecision(supabase, row);
-    return emptyResult('skipped', persisted, id, row, null);
-  }
-
-  const presentSymbols = context.market.tradable.map((pair) => pair.symbol);
-  const assets = allocatableUniverse(presentSymbols, config);
+  // Derive the virtual portfolio + decision context UP FRONT so EVERY row stores
+  // the same market_context shape (the virtual book, not the raw testnet
+  // balances) — including a skipped one. With no tradable pairs there are no live
+  // prices, so any held position falls back to avgCost (priceStale) — no crash.
   const reserveStable = reserveStables(config)[0] ?? 'USDT';
-
-  // Derive the virtual portfolio from the journal (empty → 100% starting cash).
   const priceOf = buildPriceLookup(context, reserveStable);
   const ledger = await loadLedger(supabase);
   const portfolio = derivePortfolio(ledger, {
@@ -75,9 +64,22 @@ export async function decide(): Promise<DecideResult> {
     reserveAsset: reserveStable,
     priceOf,
   });
-
   // The AI sees the virtual book, not the testnet balances.
   const decisionContext = toDecisionContext(context, portfolio);
+
+  // Edge case 1 — empty context: no tradable pair returned usable data. Never
+  // let the AI decide on zero data.
+  if (context.market.tradable.length === 0) {
+    const skipReason =
+      'no tradable pairs returned usable market data — refusing to decide on an empty universe';
+    console.error(`[CRITICAL] Wake-up skipped: ${skipReason}. The LLM was not called.`);
+    const row = makeRow(decisionContext, gitSha, { status: 'skipped', skip_reason: skipReason });
+    const { persisted, id } = await insertDecision(supabase, row);
+    return emptyResult('skipped', persisted, id, row, portfolio);
+  }
+
+  const presentSymbols = context.market.tradable.map((pair) => pair.symbol);
+  const assets = allocatableUniverse(presentSymbols, config);
   const recentDecisions = await loadRecentDecisions(
     supabase,
     config.decision.recentDecisionsToLoad,

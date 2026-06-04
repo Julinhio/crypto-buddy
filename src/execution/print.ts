@@ -39,6 +39,10 @@ export function printEconomics(result: DecideResult): void {
     }
   }
 
+  // The book is shown for every status; the risk wrapper + movements only exist
+  // for a decided cycle (skip / error / parse_failed have no allocation).
+  if (result.status !== 'decided') return;
+
   if (clamp) {
     section(clamp.clamped ? 'Risk wrapper: CLAMPED' : 'Risk wrapper: within caps');
     if (clamp.clamped) console.log(`   ${clamp.reason}`);
