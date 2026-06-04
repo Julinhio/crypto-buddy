@@ -1,12 +1,19 @@
 # crypto-buddy
 
-Autonomous crypto trading bot — work in progress.
+Autonomous crypto trading bot — work in progress. The guiding principle is
+**the AI proposes, the code disposes**: a model suggests a target allocation,
+deterministic code decides what to do with it. The AI never places orders.
 
-So far it is a **read-only market data engine** with a **Supabase persistence
-layer**. It connects to Binance, builds a structured "market context" object
-for a configurable list of pairs, caches the rarely-changing ATH/ATL in
-Supabase, and prints the context to the console for visual inspection. No LLM
-call, no orders, no trading logic yet.
+So far it has three bricks:
+
+1. A **read-only market data engine** — connects to Binance and builds a
+   structured "market context" object (prices, indicators, reference levels,
+   balances) for a configurable list of pairs.
+2. A **Supabase persistence layer** — caches the rarely-changing ATH/ATL.
+3. An **LLM decision layer** — at each wake-up, sends the context to Claude,
+   gets back a target allocation + reasoning, validates it, and journals it.
+
+Still **read-only on trading**: no orders are placed yet.
 
 ## What it does
 
@@ -80,6 +87,68 @@ The table has **RLS enabled with no policies**: the backend reaches it with
 the service role key (which bypasses RLS), while any anon/public key is denied
 — the secure default for a single-user server-side backend.
 
+## Decision layer (the brain)
+
+`npm run decide` runs one **wake-up**: build the market context, ask Claude for
+a target allocation, validate it, and journal everything to the `decisions`
+table (one row per wake-up). **Decide-and-log only — no orders are placed**, and
+the allocation guardrails (position caps, max deployed) belong to the later
+execution brick, where they'll gate real orders.
+
+**What the model is told.** A frozen system prompt (the mandate, versioned as
+`prompt_version`) sets a balanced, disciplined temperament — protect capital
+first, act rarely but well — around five principles: doing nothing is the
+default; enter/exit in steps; reference levels are the compass (accumulate
+toward lows, lighten toward highs); a trade must beat fees + spread; stay
+consistent with past decisions and keep small caps on a shorter leash. The
+user message carries the volatile data: the allowed assets, the market context,
+and the last few decisions (for coherence and to fill `what_changed`).
+
+**What the model returns** — strict JSON, enforced by Anthropic structured
+outputs and re-validated in code:
+
+```json
+{
+  "target_allocation": { "BTC": 20, "ETH": 15, "USDT": 65 },
+  "action_type": "rebalance",
+  "what_changed": "short note",
+  "confidence": "medium",
+  "market_state": "range",
+  "reasoning": "longer free text",
+  "next_delay_minutes": 60
+}
+```
+
+Validation: `target_allocation` keys are **exactly** the tradable universe —
+the tradable base assets plus the reserve stable, derived from
+`tradableAssets()` (currently `BTC`, `ETH`, `USDT`). The reserve stable is
+**USDT** (the quote we actually hold and trade against on the testnet), not the
+USDC shown in early drafts. Reference/watchlist assets (SOL, BNB) are context
+only and can never appear — the structured-output schema fixes the keys, so the
+model can't even emit them. Percentages must sum to 100 (small rounding
+tolerance), each ≥ 0; `next_delay_minutes` is clamped by code to `[15, 240]`
+(raw value kept in `requested_delay_minutes`, clamped in `applied_delay_minutes`).
+
+**Three outcomes** (the row's `status`):
+
+- `decided` — valid response; the full decision is stored.
+- `parse_failed` — the response didn't parse or violated the schema/rules; the
+  raw response is stored, no decision is made, and a clear error is logged.
+- `skipped` — no tradable pair returned usable data; the LLM is **not** called
+  (the AI never decides on an empty universe), `skip_reason` is set, and a
+  critical error is logged.
+
+**Resilience.** A missing `ANTHROPIC_API_KEY` stops the run with a clear error
+(the LLM is the whole point of this brick). If Supabase is down, the decision is
+still produced and printed — it just isn't journaled, and a warning says so.
+
+### Applying the migration
+
+Same flow as brick 2: paste
+[`supabase/migrations/0002_decisions.sql`](supabase/migrations/0002_decisions.sql)
+into the Supabase **SQL Editor** and **Run**. RLS is enabled with no policies
+(deny-all), same posture as the cache table.
+
 ## Setup
 
 ```sh
@@ -95,19 +164,27 @@ cp .env.example .env
 
 # 4. (Optional but recommended) Set up Supabase persistence:
 #    - create a project at https://supabase.com
-#    - apply supabase/migrations/0001_ath_atl_cache.sql (see Persistence above)
+#    - apply supabase/migrations/0001_ath_atl_cache.sql (ATH/ATL cache)
+#    - apply supabase/migrations/0002_decisions.sql   (decision journal)
 #    - add SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY to .env
-#    Without these, the bot still runs and computes ATH/ATL each run.
+#    Without these, `npm start` still runs; `npm run decide` still decides but
+#    won't journal.
+
+# 5. (For the decision layer) Add your Anthropic API key to .env:
+#    - ANTHROPIC_API_KEY=sk-ant-...   (required for `npm run decide`)
+#    - ANTHROPIC_MODEL is optional (defaults to claude-haiku-4-5)
 ```
 
 ## Run
 
 ```sh
-npm start
+npm start         # brick 1-2: build + print the market context
+npm run decide    # brick 3: one decision wake-up (build → ask Claude → journal)
 ```
 
-You should see a formatted summary per pair, followed by your testnet
-balances, followed by the raw JSON of the full context object.
+`npm start` prints a formatted summary per pair, your testnet balances, then the
+raw JSON of the full context. `npm run decide` prints the AI's target allocation,
+reasoning, and status (or the skip/parse-failure detail).
 
 ## Type check only
 
@@ -129,17 +206,22 @@ All knobs live in [`src/config/index.ts`](src/config/index.ts):
 - `indicators` — RSI period, list of SMA periods, list of EMA periods.
 - `cache` — `stalenessDays` (re-seed threshold) and
   `maintenanceLookbackCandles` (recent daily candles scanned for new extremes).
+- `decision` — `defaultModel` (overridden by `ANTHROPIC_MODEL`), `maxTokens`,
+  `recentDecisionsToLoad`, delay bounds (`minDelayMinutes` / `maxDelayMinutes`),
+  and `allocationTolerancePercent`.
 
-The set of balance-tracked assets is derived from `tradablePairs` via
-`tradableAssets()` — no separate asset list to maintain. The core code never
-needs to be touched to add a pair or tune an indicator.
+The set of balance-tracked assets — and the AI's allocation universe — are both
+derived from `tradablePairs` via `tradableAssets()`; there's no separate asset
+list to maintain. The core code never needs to be touched to add a pair or tune
+an indicator.
 
 ## Project layout
 
 ```
 src/
-├── index.ts                 # entry point
-├── config/index.ts          # pairs, timeframes, indicators, cache tuning
+├── index.ts                 # brick 1-2 entry — build + print market context
+├── decide.ts                # brick 3 entry — one decision wake-up
+├── config/index.ts          # pairs, timeframes, indicators, cache + decision tuning
 ├── exchanges/binance.ts     # public mainnet + authenticated testnet clients
 ├── market/
 │   ├── klines.ts            # candle + ticker fetch
@@ -148,21 +230,30 @@ src/
 ├── account/balances.ts      # testnet balances, filtered to tradable assets
 ├── persistence/
 │   ├── supabase.ts          # service-role client factory (null if unset)
-│   └── athAtlCache.ts       # ATH/ATL seed / maintain / fallback logic
-└── context/
-    ├── build.ts             # assembles MarketContext
-    └── print.ts             # human-readable console output
+│   ├── athAtlCache.ts       # ATH/ATL seed / maintain / fallback logic
+│   └── decisions.ts         # load recent + insert decision rows (resilient)
+├── context/
+│   ├── build.ts             # assembles MarketContext
+│   └── print.ts             # human-readable context output
+└── decision/
+    ├── schema.ts            # structured-output schema + business validation
+    ├── prompt.ts            # frozen mandate (system) + per-run user prompt
+    ├── llm.ts               # Anthropic client, structured call, token/latency capture
+    ├── gitSha.ts            # commit SHA for traceability (env → git → null)
+    ├── decide.ts            # orchestrator: context → LLM → validate → journal
+    └── print.ts             # human-readable decision output
 
 supabase/
 └── migrations/
-    └── 0001_ath_atl_cache.sql   # versioned cache table + RLS
+    ├── 0001_ath_atl_cache.sql   # versioned cache table + RLS
+    └── 0002_decisions.sql       # decision journal table + RLS
 ```
 
 ## Coming next (not in this brick)
 
-- LLM decision step: send `MarketContext` + portfolio target spec to a model.
 - Execution layer: place orders on testnet to reach the target allocation,
-  with hard-coded risk guardrails.
-- More persistence: decision journal, orders, portfolio snapshots, bot state
-  (deliberately **not** created yet — this brick adds only the connection and
-  the ATH/ATL cache).
+  with the hard allocation guardrails (per-position cap, max deployed) gating
+  the orders.
+- Scheduler: wake the bot on a cadence (using `applied_delay_minutes`) and send
+  real alerts (Telegram). For now an alert is just a critical log line.
+- More persistence: orders, portfolio snapshots, bot state.
