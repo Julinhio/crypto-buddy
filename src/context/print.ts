@@ -1,4 +1,5 @@
 import type { MarketContext, PairContext } from './build.js';
+import type { RangeLevels } from '../market/levels.js';
 
 function fmtPrice(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return 'n/a';
@@ -10,13 +11,23 @@ function fmtNum(n: number | null | undefined, digits = 2): string {
   return n.toFixed(digits);
 }
 
-function fmtDate(iso: string): string {
+function fmtDate(iso: string | null | undefined): string {
+  if (iso == null) return 'n/a';
   return iso.slice(0, 10);
 }
 
 function sectionHeader(label: string): void {
   console.log('');
   console.log(`── ${label} `.padEnd(72, '─'));
+}
+
+function levelLine(label: string, range: RangeLevels | null, suffix = ''): string {
+  const tag = label.padEnd(8, ' ');
+  if (!range) return `   ${tag}n/a`;
+  return (
+    `   ${tag}high ${fmtPrice(range.high.price)} (${fmtDate(range.high.at)})  ` +
+    `low ${fmtPrice(range.low.price)} (${fmtDate(range.low.at)})${suffix}`
+  );
 }
 
 function printPair(p: PairContext): void {
@@ -35,22 +46,11 @@ function printPair(p: PairContext): void {
     console.log(`   EMA(${period.padStart(3, ' ')})        ${fmtPrice(value)}`);
   }
 
-  const m = p.levels.month;
-  const y = p.levels.year;
   const a = p.levels.allTime;
-  console.log(
-    `   month   high ${fmtPrice(m.high.price)} (${fmtDate(m.high.at)})  ` +
-      `low ${fmtPrice(m.low.price)} (${fmtDate(m.low.at)})`,
-  );
-  console.log(
-    `   year    high ${fmtPrice(y.high.price)} (${fmtDate(y.high.at)})  ` +
-      `low ${fmtPrice(y.low.price)} (${fmtDate(y.low.at)})`,
-  );
-  console.log(
-    `   ATH/ATL high ${fmtPrice(a.high.price)} (${fmtDate(a.high.at)})  ` +
-      `low ${fmtPrice(a.low.price)} (${fmtDate(a.low.at)})   ` +
-      `[${a.source.candles} × ${a.source.timeframe}]`,
-  );
+  const allTimeSuffix = a ? `   [${a.source.candles} × ${a.source.timeframe}]` : '';
+  console.log(levelLine('month', p.levels.month));
+  console.log(levelLine('year', p.levels.year));
+  console.log(levelLine('ATH/ATL', a, allTimeSuffix));
 }
 
 export function printMarketContext(ctx: MarketContext): void {

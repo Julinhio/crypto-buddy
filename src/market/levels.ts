@@ -12,10 +12,15 @@ export interface RangeLevels {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-function rangeHighLow(candles: Candle[]): RangeLevels {
-  if (candles.length === 0) {
-    throw new Error('Cannot compute high/low on empty candle series');
-  }
+/**
+ * Highest high / lowest low across a candle series.
+ *
+ * Returns `null` on an empty series instead of throwing, so a pair with
+ * missing data degrades gracefully rather than taking down the whole loop.
+ * The caller knows the symbol, so it owns the warning log.
+ */
+function rangeHighLow(candles: Candle[]): RangeLevels | null {
+  if (candles.length === 0) return null;
   let high = candles[0]!;
   let low = candles[0]!;
   for (const c of candles) {
@@ -35,22 +40,23 @@ function sliceLastDays(candles: Candle[], days: number): Candle[] {
   return candles.filter((c) => c.timestamp >= cutoff);
 }
 
-export function yearLevels(primary: Candle[]): RangeLevels {
+export function yearLevels(primary: Candle[]): RangeLevels | null {
   return rangeHighLow(sliceLastDays(primary, 365));
 }
 
-export function monthLevels(primary: Candle[]): RangeLevels {
+export function monthLevels(primary: Candle[]): RangeLevels | null {
   return rangeHighLow(sliceLastDays(primary, 30));
 }
 
 /**
- * ATH / ATL across the longest series we can fetch.
+ * ATH / ATL across the longest series we can fetch. Returns `null` if the
+ * series is empty (e.g. the long-term fetch came back empty).
  *
  * Isolated on purpose: when the persistence layer lands, this is the function
  * we'll seed once and then maintain incrementally (compare live high/low to
  * the cached value at each wake-up) instead of re-fetching the full long
  * series every run.
  */
-export function allTimeLevels(longTerm: Candle[]): RangeLevels {
+export function allTimeLevels(longTerm: Candle[]): RangeLevels | null {
   return rangeHighLow(longTerm);
 }
