@@ -3,27 +3,32 @@ import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { config } from '../config/index.js';
 import { buildDecisionSchema, type DecisionOutput } from './schema.js';
 
-// Memoized client (the SDK reads ANTHROPIC_API_KEY from the environment).
+// Memoized client.
 let client: Anthropic | null = null;
 
+const MISSING_KEY_MESSAGE =
+  'Missing ANTHROPIC_API_KEY — set it in .env to run the decision layer. ' +
+  'This is a configuration error to fix before running (the LLM is the brain of the bot).';
+
 /**
- * A missing API key is a CONFIGURATION error, not a journaled outcome — the LLM
- * is the whole point of this layer. Callers run this up front so the process
- * fails fast (non-zero exit) instead of recording an `error` row.
+ * A missing OR blank API key is a CONFIGURATION error, not a journaled outcome —
+ * the LLM is the whole point of this layer. A whitespace-only value is a typo,
+ * not a key, so it's treated as absent and fails fast (non-zero exit) up front
+ * rather than reaching the API and becoming an `error` row.
  */
 export function assertAnthropicConfigured(): void {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error(
-      'Missing ANTHROPIC_API_KEY — set it in .env to run the decision layer. ' +
-        'This is a configuration error to fix before running (the LLM is the brain of the bot).',
-    );
+  if (!process.env.ANTHROPIC_API_KEY?.trim()) {
+    throw new Error(MISSING_KEY_MESSAGE);
   }
 }
 
 function getClient(): Anthropic {
   if (client) return client;
-  assertAnthropicConfigured();
-  client = new Anthropic();
+  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+  if (!apiKey) throw new Error(MISSING_KEY_MESSAGE);
+  // Pass the trimmed key explicitly so accidental surrounding whitespace in
+  // .env doesn't slip through to the API as a malformed credential.
+  client = new Anthropic({ apiKey });
   return client;
 }
 
