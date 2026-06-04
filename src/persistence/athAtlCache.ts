@@ -87,8 +87,12 @@ export async function resolveAllTimeLevels(
     const row = data as CacheRow | null;
 
     // First pass / new pair → seed and store.
+    // NB: `return await` (not bare `return`) so a rejection from the write —
+    // e.g. Supabase going unreachable mid-seed — is caught by THIS try/catch
+    // and falls back to long-series computation, instead of escaping to
+    // safeBuildPair and dropping the whole pair.
     if (!row) {
-      return seed(p, nowIso, 'seed');
+      return await seed(p, nowIso, 'seed');
     }
 
     // Safety re-seed: a stale entry is refreshed fully from the long series.
@@ -98,11 +102,11 @@ export async function resolveAllTimeLevels(
       console.warn(
         `[warn] ${p.symbol}: ATH/ATL cache older than ${p.cache.stalenessDays}d — re-seeding from the long series.`,
       );
-      return seed(p, nowIso, 'reseed');
+      return await seed(p, nowIso, 'reseed');
     }
 
     // Normal path: maintain from data already in hand, no long-series fetch.
-    return maintain(p, row, nowIso);
+    return await maintain(p, row, nowIso);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(
