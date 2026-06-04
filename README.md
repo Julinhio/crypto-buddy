@@ -119,28 +119,35 @@ outputs and re-validated in code:
 }
 ```
 
-Validation: `target_allocation` keys are **exactly** the tradable universe —
-the tradable base assets plus the reserve stable, derived from
-`tradableAssets()` (currently `BTC`, `ETH`, `USDT`). The reserve stable is
-**USDT** (the quote we actually hold and trade against on the testnet), not the
-USDC shown in early drafts. Reference/watchlist assets (SOL, BNB) are context
-only and can never appear — the structured-output schema fixes the keys, so the
-model can't even emit them. Percentages must sum to 100 (small rounding
-tolerance), each ≥ 0; `next_delay_minutes` is clamped by code to `[15, 240]`
-(raw value kept in `requested_delay_minutes`, clamped in `applied_delay_minutes`).
+Validation: `target_allocation` keys are **exactly** this cycle's allocatable
+universe — the base assets of the tradable pairs that **actually returned data
+this cycle**, plus the reserve stable (always allocatable). It is derived from
+the live context, not from config: if the data engine dropped a pair (no
+price/indicators), that asset is **not** offered to the model — same spirit as
+the skip rule, so we never journal a `decided` on an asset we know nothing
+about. The reserve stable is **USDT** (the quote we actually hold and trade
+against on the testnet), not the USDC shown in early drafts. Reference/watchlist
+assets (SOL, BNB) are context only and can never appear — the structured-output
+schema fixes the keys, so the model can't even emit them. Percentages must sum
+to 100 (small rounding tolerance), each ≥ 0; `next_delay_minutes` is clamped by
+code to `[15, 240]` (raw value kept in `requested_delay_minutes`, clamped in
+`applied_delay_minutes`).
 
-**Three outcomes** (the row's `status`):
+**Four outcomes** (the row's `status`):
 
 - `decided` — valid response; the full decision is stored.
-- `parse_failed` — the response didn't parse or violated the schema/rules; the
-  raw response is stored, no decision is made, and a clear error is logged.
+- `parse_failed` — the model answered, but the output didn't parse or violated
+  the schema/rules; the raw response is stored, no decision is made, clear error.
+- `error` — the LLM **call itself** failed (API down, rate-limited, 5xx). This
+  is distinct from `parse_failed`: the model never answered. The error detail is
+  stored (in `raw_response`) and logged; no decision is made.
 - `skipped` — no tradable pair returned usable data; the LLM is **not** called
-  (the AI never decides on an empty universe), `skip_reason` is set, and a
-  critical error is logged.
+  (the AI never decides on an empty universe), `skip_reason` is set, critical log.
 
-**Resilience.** A missing `ANTHROPIC_API_KEY` stops the run with a clear error
-(the LLM is the whole point of this brick). If Supabase is down, the decision is
-still produced and printed — it just isn't journaled, and a warning says so.
+**Resilience.** A missing `ANTHROPIC_API_KEY` is a configuration error, not a
+status: the run exits hard (non-zero) up front. Transient API failures become
+`error` rows instead of crashing. If Supabase is down, the decision is still
+produced and printed — it just isn't journaled, and a warning says so.
 
 ### Applying the migration
 
