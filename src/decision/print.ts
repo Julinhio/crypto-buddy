@@ -26,6 +26,14 @@ export function printDecision(result: DecideResult): void {
     return;
   }
 
+  if (status === 'error') {
+    console.log('The LLM call failed (technical error — see above). No decision made.');
+    console.log('');
+    console.log('Error detail:');
+    console.log(row.raw_response ?? '(none)');
+    return;
+  }
+
   if (status === 'parse_failed') {
     console.log('The LLM response could not be used (see the error above).');
     console.log('');

@@ -2,7 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 const TABLE = 'decisions';
 
-export type DecisionStatus = 'decided' | 'skipped' | 'parse_failed';
+export type DecisionStatus = 'decided' | 'skipped' | 'parse_failed' | 'error';
 
 /** Compact view of a past `decided` row, fed back to the model for coherence. */
 export interface DecisionSummary {

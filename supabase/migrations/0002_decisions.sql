@@ -13,9 +13,13 @@ create table if not exists public.decisions (
   id                       bigint generated always as identity primary key,
   created_at               timestamptz not null default now(),
 
-  -- Wake-up status
+  -- Wake-up status:
+  --   decided      valid response, full decision stored
+  --   skipped      empty context (no tradable data) — LLM not called
+  --   parse_failed model answered but the output was invalid
+  --   error        the LLM call itself failed (API down, rate-limited, …)
   status                   text not null
-                             check (status in ('decided', 'skipped', 'parse_failed')),
+                             check (status in ('decided', 'skipped', 'parse_failed', 'error')),
   skip_reason              text,              -- set only when status = 'skipped'
 
   -- The decision produced by the AI. NULL unless status = 'decided', because a
@@ -43,7 +47,7 @@ create table if not exists public.decisions (
   model                    text,              -- model that decided (NULL if no LLM call)
   prompt_version           text not null,     -- versioned mandate, e.g. 'v1'
   git_sha                  text,              -- commit that produced the decision (NULL if unknown)
-  raw_response             text,              -- raw LLM text before parsing (debug parse failures)
+  raw_response             text,              -- raw LLM text before parsing; for status='error', the error detail
   latency_ms               integer,           -- LLM call duration
   input_tokens             integer,           -- cost is recomputed later from token counts
   output_tokens            integer,

@@ -6,14 +6,23 @@ import { buildDecisionSchema, type DecisionOutput } from './schema.js';
 // Memoized client (the SDK reads ANTHROPIC_API_KEY from the environment).
 let client: Anthropic | null = null;
 
-function getClient(): Anthropic {
-  if (client) return client;
+/**
+ * A missing API key is a CONFIGURATION error, not a journaled outcome — the LLM
+ * is the whole point of this layer. Callers run this up front so the process
+ * fails fast (non-zero exit) instead of recording an `error` row.
+ */
+export function assertAnthropicConfigured(): void {
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new Error(
       'Missing ANTHROPIC_API_KEY — set it in .env to run the decision layer. ' +
-        'This is the brain of the bot; without it there is no decision to make.',
+        'This is a configuration error to fix before running (the LLM is the brain of the bot).',
     );
   }
+}
+
+function getClient(): Anthropic {
+  if (client) return client;
+  assertAnthropicConfigured();
   client = new Anthropic();
   return client;
 }
@@ -25,9 +34,11 @@ export function resolveModel(): string {
 }
 
 export interface LlmResult {
-  /** Schema-valid decision, or null if the model returned nothing usable. */
+  /** Schema-valid decision, or null if the response couldn't be parsed/validated. */
   parsed: DecisionOutput | null;
-  /** Raw model text before parsing — always captured, for debugging parse failures. */
+  /** Why parsing failed (null on success) — for a clear, visible log. */
+  parseError: string | null;
+  /** Raw model text — ALWAYS captured, including on the failure path. */
   rawResponse: string;
   model: string;
   latencyMs: number;
@@ -36,6 +47,21 @@ export interface LlmResult {
   stopReason: string | null;
 }
 
+/**
+ * Calls Claude with the decision schema enforced as a structured output, then
+ * parses the response ourselves.
+ *
+ * Error separation, by design:
+ *   - API failure (down, rate-limited, auth) → `messages.create` THROWS; the
+ *     caller catches it and records status='error'. We never reach the parse.
+ *   - Invalid output (not JSON, or fails the schema) → `safeParse` does NOT
+ *     throw; we return parsed=null + parseError, and rawResponse is always set.
+ *
+ * Structured outputs (output_config.format + zodOutputFormat) constrain the
+ * response at the API boundary — the allocation keys are fixed, so the model
+ * cannot emit a non-tradable asset. We keep `messages.create` (not
+ * `messages.parse`) only so the raw text is in hand on the failure path too.
+ */
 export async function runDecision(params: {
   systemPrompt: string;
   userPrompt: string;
@@ -46,17 +72,15 @@ export async function runDecision(params: {
   const schema = buildDecisionSchema(params.assets);
 
   const start = Date.now();
-  const message = await anthropic.messages.parse({
+  const message = await anthropic.messages.create({
     model,
     max_tokens: config.decision.maxTokens,
-    // Frozen mandate, cache_control'd so it can be reused across runs (the
-    // volatile context lives in the user turn, after this cached prefix).
+    // Frozen mandate, cache_control'd for reuse across runs (volatile context
+    // lives in the user turn, after this cached prefix).
     system: [
       { type: 'text', text: params.systemPrompt, cache_control: { type: 'ephemeral' } },
     ],
     messages: [{ role: 'user', content: params.userPrompt }],
-    // Structured output: forces the response to match the schema (fixed
-    // allocation keys → the model can't allocate to a non-tradable asset).
     output_config: { format: zodOutputFormat(schema) },
   });
   const latencyMs = Date.now() - start;
@@ -66,8 +90,25 @@ export async function runDecision(params: {
     .join('')
     .trim();
 
+  let parsed: DecisionOutput | null = null;
+  let parseError: string | null = null;
+  try {
+    const json: unknown = JSON.parse(rawResponse);
+    const result = schema.safeParse(json);
+    if (result.success) {
+      parsed = result.data as DecisionOutput;
+    } else {
+      parseError = result.error.issues
+        .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+        .join('; ');
+    }
+  } catch (err) {
+    parseError = `response is not valid JSON: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
   return {
-    parsed: (message.parsed_output as DecisionOutput | null) ?? null,
+    parsed,
+    parseError,
     rawResponse,
     model: message.model ?? model,
     latencyMs,
