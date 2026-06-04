@@ -1,3 +1,4 @@
+import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   config,
   tradableAssets,
@@ -6,13 +7,13 @@ import {
 import { publicMainnetClient, testnetAccountClient } from '../exchanges/binance.js';
 import { fetchCandles, fetchSpotPrice } from '../market/klines.js';
 import { computeIndicators, type IndicatorSnapshot } from '../market/indicators.js';
-import {
-  allTimeLevels,
-  monthLevels,
-  yearLevels,
-  type RangeLevels,
-} from '../market/levels.js';
+import { monthLevels, yearLevels, type RangeLevels } from '../market/levels.js';
 import { fetchRelevantBalances, type AssetBalance } from '../account/balances.js';
+import { createSupabaseClient } from '../persistence/supabase.js';
+import {
+  resolveAllTimeLevels,
+  type AllTimeLevels,
+} from '../persistence/athAtlCache.js';
 
 export interface PairContext {
   symbol: string;
@@ -26,7 +27,9 @@ export interface PairContext {
   levels: {
     month: RangeLevels | null;
     year: RangeLevels | null;
-    allTime: (RangeLevels & { source: { timeframe: string; candles: number } }) | null;
+    // Served from the Supabase cache (or a long-series fallback). See
+    // src/persistence/athAtlCache.ts.
+    allTime: AllTimeLevels | null;
   };
 }
 
@@ -58,22 +61,20 @@ export interface MarketContext {
  */
 async function buildPairContext(
   publicClient: ReturnType<typeof publicMainnetClient>,
+  supabase: SupabaseClient | null,
   symbol: string,
   kind: PairKind,
 ): Promise<PairContext | null> {
-  const [price, primaryCandles, longTermCandles] = await Promise.all([
+  // The long weekly series is NOT fetched here anymore. It is pulled lazily by
+  // the cache (only on seed / re-seed / fallback) via the thunk below, so a
+  // normal cached run touches only the spot price and the daily series.
+  const [price, primaryCandles] = await Promise.all([
     fetchSpotPrice(publicClient, symbol),
     fetchCandles(
       publicClient,
       symbol,
       config.primaryTimeframe,
       config.primaryLimit,
-    ),
-    fetchCandles(
-      publicClient,
-      symbol,
-      config.longTermTimeframe,
-      config.longTermLimit,
     ),
   ]);
 
@@ -84,12 +85,21 @@ async function buildPairContext(
     return null;
   }
 
-  const at = allTimeLevels(longTermCandles);
-  if (!at) {
-    console.warn(
-      `[warn] ${symbol} (${kind}): long-term series is empty — ATH/ATL unavailable.`,
-    );
-  }
+  const allTime = await resolveAllTimeLevels({
+    supabase,
+    symbol,
+    livePrice: price,
+    primaryCandles,
+    longTermTimeframe: config.longTermTimeframe,
+    fetchLongTerm: () =>
+      fetchCandles(
+        publicClient,
+        symbol,
+        config.longTermTimeframe,
+        config.longTermLimit,
+      ),
+    cache: config.cache,
+  });
 
   return {
     symbol,
@@ -103,15 +113,7 @@ async function buildPairContext(
     levels: {
       month: monthLevels(primaryCandles),
       year: yearLevels(primaryCandles),
-      allTime: at
-        ? {
-            ...at,
-            source: {
-              timeframe: config.longTermTimeframe,
-              candles: longTermCandles.length,
-            },
-          }
-        : null,
+      allTime,
     },
   };
 }
@@ -123,11 +125,12 @@ async function buildPairContext(
  */
 async function safeBuildPair(
   publicClient: ReturnType<typeof publicMainnetClient>,
+  supabase: SupabaseClient | null,
   symbol: string,
   kind: PairKind,
 ): Promise<PairContext | null> {
   try {
-    return await buildPairContext(publicClient, symbol, kind);
+    return await buildPairContext(publicClient, supabase, symbol, kind);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(
@@ -140,16 +143,17 @@ async function safeBuildPair(
 export async function buildMarketContext(): Promise<MarketContext> {
   const publicClient = publicMainnetClient();
   const accountClient = testnetAccountClient();
+  const supabase = createSupabaseClient();
 
   const [tradableRaw, referenceRaw, balances] = await Promise.all([
     Promise.all(
       config.tradablePairs.map((symbol) =>
-        safeBuildPair(publicClient, symbol, 'tradable'),
+        safeBuildPair(publicClient, supabase, symbol, 'tradable'),
       ),
     ),
     Promise.all(
       config.referencePairs.map((symbol) =>
-        safeBuildPair(publicClient, symbol, 'reference'),
+        safeBuildPair(publicClient, supabase, symbol, 'reference'),
       ),
     ),
     fetchRelevantBalances(accountClient, tradableAssets(config)),
