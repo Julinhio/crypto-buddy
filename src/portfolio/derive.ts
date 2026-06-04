@@ -64,7 +64,18 @@ export function derivePortfolio(
   const lots = new Map<string, Lot>();
 
   for (const entry of ledger) {
-    const base = entry.symbol.split('/')[0] ?? entry.symbol;
+    const [base, quote] = entry.symbol.split('/');
+    if (!base || quote !== reserveAsset) {
+      // The cash ledger is single-currency (the reserve stable). A fill whose
+      // quote is something else (ETH/BTC, BTC/FDUSD…) would wrongly add its
+      // quote delta to the reserve cash. Fail LOUD and skip rather than corrupt
+      // the accounting silently — this is an unsupported journal entry today.
+      console.error(
+        `[CRITICAL] execution ${entry.symbol}: quote is not the reserve asset (${reserveAsset}). ` +
+          `Skipping it to avoid silently corrupting the cash ledger; investigate.`,
+      );
+      continue;
+    }
     const lot = lots.get(base) ?? { qty: ZERO, avgCost: ZERO };
 
     if (entry.baseDelta.gt(0)) {
