@@ -71,22 +71,29 @@ export function allocatableUniverse(
 }
 
 /**
- * Builds the structured-output schema. `target_allocation`'s keys are fixed to
- * EXACTLY the allowed assets (z.object is strict → additionalProperties:false in
- * the emitted JSON schema), so the model cannot invent a key — reference assets
- * can't appear at the API boundary. Numeric/sum rules are not expressible in
- * JSON schema and are enforced by validateDecision() below.
+ * Builds the structured-output schema, with the allocation keys fixed to EXACTLY
+ * this cycle's allowed assets.
+ *
+ * Both objects are STRICT (`z.strictObject`): a client-side `safeParse` REJECTS
+ * any unknown key. This is the real guard against the model allocating to a
+ * non-tradable asset — a plain `z.object()` would silently STRIP unknown keys,
+ * so an extra "SOL" would vanish before `validateDecision` could see it (and if
+ * the remaining keys summed to 100 we'd wrongly journal `decided`).
+ * `zodOutputFormat` also emits `additionalProperties:false` to the API, but we
+ * have never verified the API actually enforces it (no real run yet) — so the
+ * rejection lives in code, per our "code disposes, never trust the model/API to
+ * self-constrain" principle. Numeric bounds and the sum rule are checked in
+ * validateDecision() below.
  */
 export function buildDecisionSchema(assets: string[]) {
   const allocationShape: Record<string, z.ZodNumber> = {};
-  // Per-asset bounds (0..100). zodOutputFormat strips numeric/length keywords
-  // the API can't enforce and validates them client-side instead — so these are
-  // belt-and-suspenders. The sum-to-100 rule is cross-field and stays in code
-  // (validateDecision), which remains the real guard.
+  // Per-asset bounds (0..100). zodOutputFormat strips the keywords the API can't
+  // enforce and validates them client-side, so these are belt-and-suspenders;
+  // the cross-field sum-to-100 rule stays in validateDecision (the real guard).
   for (const asset of assets) allocationShape[asset] = z.number().min(0).max(100);
 
-  return z.object({
-    target_allocation: z.object(allocationShape),
+  return z.strictObject({
+    target_allocation: z.strictObject(allocationShape),
     action_type: actionTypeSchema,
     what_changed: z.string().min(1),
     confidence: confidenceSchema,
