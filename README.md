@@ -4,7 +4,7 @@ Autonomous crypto trading bot — work in progress. The guiding principle is
 **the AI proposes, the code disposes**: a model suggests a target allocation,
 deterministic code decides what to do with it. The AI never places orders.
 
-So far it has three bricks:
+So far it has four bricks:
 
 1. A **read-only market data engine** — connects to Binance and builds a
    structured "market context" object (prices, indicators, reference levels,
@@ -12,8 +12,13 @@ So far it has three bricks:
 2. A **Supabase persistence layer** — caches the rarely-changing ATH/ATL.
 3. An **LLM decision layer** — at each wake-up, sends the context to Claude,
    gets back a target allocation + reasoning, validates it, and journals it.
+4. An **execution layer — the economic brain (dry-run / paper trading)** —
+   the bot runs its own virtual portfolio valued at real prices, shows it to
+   the AI, bounds the AI's allocation to hard risk caps, and computes the
+   movements to get there. It journals **modeled** fills so the portfolio
+   evolves, but places **no real orders** yet (that's the next brick).
 
-Still **read-only on trading**: no orders are placed yet.
+Still **no real orders**: the execution brick is paper trading only.
 
 ## What it does
 
@@ -156,6 +161,58 @@ Same flow as brick 2: paste
 into the Supabase **SQL Editor** and **Run**. RLS is enabled with no policies
 (deny-all), same posture as the cache table.
 
+## Execution layer (the economic brain)
+
+The decision cycle now runs a **dry-run / paper-trading** economic brain. No
+real orders are placed; the bot computes (and journals as *modeled* fills) what
+it *would* do.
+
+**Sovereign capital, not the testnet basket.** The testnet account is inflated
+(~$76k fake) and resets monthly, so it's ignored as an economic source of
+truth. The bot manages its own **virtual portfolio** seeded with
+`STARTING_CAPITAL_USD` (default $500), valued at the **real** market prices we
+already fetch.
+
+**One source of truth: the `executions` journal.** The whole portfolio — cash,
+positions, weighted-average cost, equity, deployed %, realized/unrealized P&L —
+is **derived live** by replaying the append-only journal. There's no positions
+table kept in parallel (duplicated state always drifts). Money is exact
+`numeric` end to end (`decimal.js`), never float.
+
+- **Weighted-average cost.** A buy blends the average cost with the buy price
+  (fees excluded from cost basis); a sell realizes P&L and leaves the average
+  untouched. Unrealized = `qty·(price − avgCost)`; realized is derived as
+  `(equity − capital) − unrealized`, which makes every fee fall out as a
+  realized cost with no double-counting.
+- **Fees** are modeled (`FEE_PERCENT`, default 0.1% per movement).
+
+**Risk wrapper — the AI proposes, the code disposes.** After the AI answers, the
+code bounds the allocation to hard caps and writes the result onto the decision
+(`applied_allocation`, `clamped`, `clamp_reason`). Every overage is "too much
+risk", so the surplus always goes to **cash** (USDT), never to another coin:
+
+- at most **35%** per large-cap (BTC, ETH);
+- at most **15%** per small-cap (more volatile, shorter leash — dormant until a
+  small cap is added);
+- at least **30%** in cash — sacred capital protection.
+
+Caps are configurable per coin class in [`src/config/index.ts`](src/config/index.ts).
+
+**Dry-run movements.** The cycle computes the buys/sells to move from the
+current book to the bounded allocation, sized on equity at real prices, prints
+them, and journals them as modeled fills (`validation_status='executed'`,
+`exchange_*` null) so the portfolio evolves next cycle. **No Binance order is
+placed** — that, plus validation against the exchange's real filters
+(min-notional, lot size), is the next brick (PR B).
+
+### Applying the migrations
+
+Paste each into the Supabase **SQL Editor** and **Run**, in order:
+[`0003_executions.sql`](supabase/migrations/0003_executions.sql) (the execution
+journal) and
+[`0004_extend_decisions.sql`](supabase/migrations/0004_extend_decisions.sql)
+(the bounded-allocation columns). Both follow the same RLS-deny-all posture.
+
 ## Setup
 
 ```sh
@@ -169,34 +226,42 @@ npm install
 cp .env.example .env
 #   edit .env with your BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET
 
-# 4. (Optional but recommended) Set up Supabase persistence:
-#    - create a project at https://supabase.com
-#    - apply supabase/migrations/0001_ath_atl_cache.sql (ATH/ATL cache)
-#    - apply supabase/migrations/0002_decisions.sql   (decision journal)
+# 4. (Optional but recommended) Set up Supabase persistence and apply the
+#    migrations in order (SQL Editor → New query → Run):
+#    - 0001_ath_atl_cache.sql     (ATH/ATL cache)
+#    - 0002_decisions.sql         (decision journal)
+#    - 0003_executions.sql        (execution journal — virtual portfolio)
+#    - 0004_extend_decisions.sql  (bounded-allocation columns)
 #    - add SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY to .env
-#    Without these, `npm start` still runs; `npm run decide` still decides but
-#    won't journal.
+#    Without these, `npm start` still runs; `npm run decide` still decides and
+#    paper-trades but won't journal (the portfolio stays at 100% cash).
 
 # 5. (For the decision layer) Add your Anthropic API key to .env:
 #    - ANTHROPIC_API_KEY=sk-ant-...   (required for `npm run decide`)
 #    - ANTHROPIC_MODEL is optional (defaults to claude-haiku-4-5)
+
+# 6. (Optional) Tune the economic brain in .env:
+#    - STARTING_CAPITAL_USD (default 500), FEE_PERCENT (default 0.1)
 ```
 
 ## Run
 
 ```sh
 npm start         # brick 1-2: build + print the market context
-npm run decide    # brick 3: one decision wake-up (build → ask Claude → journal)
+npm run decide    # bricks 3-4: one wake-up — decide, bound to caps, paper-trade
 ```
 
 `npm start` prints a formatted summary per pair, your testnet balances, then the
-raw JSON of the full context. `npm run decide` prints the AI's target allocation,
-reasoning, and status (or the skip/parse-failure detail).
+raw JSON of the full context. `npm run decide` runs a full cycle: it prints the
+AI's proposed allocation and reasoning, then the **virtual portfolio**, the
+**risk-wrapper** result (proposed vs applied), and the **dry-run movements** it
+would make (journaled as modeled fills — no real order).
 
-## Type check only
+## Type check & tests
 
 ```sh
 npm run typecheck
+npm test          # money invariants (e.g. cash floor holds after fees, any rebalance)
 ```
 
 ## Configuration
@@ -216,6 +281,9 @@ All knobs live in [`src/config/index.ts`](src/config/index.ts):
 - `decision` — `defaultModel` (overridden by `ANTHROPIC_MODEL`), `maxTokens`,
   `recentDecisionsToLoad`, delay bounds (`minDelayMinutes` / `maxDelayMinutes`),
   and `allocationTolerancePercent`.
+- `execution` — `startingCapitalUsd` (env `STARTING_CAPITAL_USD`), `feePercent`
+  (env `FEE_PERCENT`), the per-class `caps` (big / small / `minCashPercent`), and
+  `coinClass` (tag a coin `big`/`small`; unlisted defaults to `small`).
 
 The set of balance-tracked assets — and the AI's allocation universe — are both
 derived from `tradablePairs` via `tradableAssets()`; there's no separate asset
@@ -235,32 +303,44 @@ src/
 │   ├── indicators.ts        # RSI / SMA / EMA snapshot
 │   └── levels.ts            # month / year / ATH-ATL (isolated extremesOf)
 ├── account/balances.ts      # testnet balances, filtered to tradable assets
+├── money.ts                 # exact-decimal helpers (decimal.js) — money, never float
 ├── persistence/
 │   ├── supabase.ts          # service-role client factory (null if unset)
 │   ├── athAtlCache.ts       # ATH/ATL seed / maintain / fallback logic
-│   └── decisions.ts         # load recent + insert decision rows (resilient)
+│   ├── decisions.ts         # load recent + insert decision rows (resilient)
+│   └── executions.ts        # execution journal: load ledger + insert modeled fills
+├── portfolio/
+│   └── derive.ts            # derive the virtual portfolio + weighted-avg P&L from the journal
+├── risk/
+│   └── clamp.ts             # risk wrapper: bound allocation to caps (surplus → cash)
+├── execution/
+│   ├── movements.ts         # dry-run movement sizing + modeled fills
+│   └── print.ts             # portfolio / clamp / movements output
 ├── context/
 │   ├── build.ts             # assembles MarketContext
 │   └── print.ts             # human-readable context output
 └── decision/
     ├── schema.ts            # structured-output schema + business validation
-    ├── prompt.ts            # frozen mandate (system) + per-run user prompt
+    ├── prompt.ts            # frozen mandate v2 (caps + portfolio) + per-run user prompt
+    ├── context.ts           # decision context: portfolio in place of testnet balances
     ├── llm.ts               # Anthropic client, structured call, token/latency capture
     ├── gitSha.ts            # commit SHA for traceability (env → git → null)
-    ├── decide.ts            # orchestrator: context → LLM → validate → journal
+    ├── decide.ts            # orchestrator: derive → decide → clamp → movements → journal
     └── print.ts             # human-readable decision output
 
 supabase/
 └── migrations/
-    ├── 0001_ath_atl_cache.sql   # versioned cache table + RLS
-    └── 0002_decisions.sql       # decision journal table + RLS
+    ├── 0001_ath_atl_cache.sql     # versioned cache table + RLS
+    ├── 0002_decisions.sql         # decision journal table + RLS
+    ├── 0003_executions.sql        # execution journal (virtual portfolio source of truth)
+    └── 0004_extend_decisions.sql  # bounded-allocation columns on decisions
 ```
 
 ## Coming next (not in this brick)
 
-- Execution layer: place orders on testnet to reach the target allocation,
-  with the hard allocation guardrails (per-position cap, max deployed) gating
-  the orders.
+- **PR B — real execution.** Place the movements as real testnet orders, fill
+  the `exchange_*` columns with the real fill, and validate against the
+  exchange's filters (min-notional, lot size) before placing.
 - Scheduler: wake the bot on a cadence (using `applied_delay_minutes`) and send
   real alerts (Telegram). For now an alert is just a critical log line.
-- More persistence: orders, portfolio snapshots, bot state.
+- More persistence: portfolio snapshots, bot state.

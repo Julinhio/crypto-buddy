@@ -1,23 +1,31 @@
-import type { MarketContext } from '../context/build.js';
+import { config } from '../config/index.js';
+import type { DecisionContext } from './context.js';
 import type { DecisionSummary } from '../persistence/decisions.js';
 
 /**
  * Bump this whenever the mandate below changes, so decisions stay traceable to
- * the exact instructions that produced them.
+ * the exact instructions that produced them. v2 adds the portfolio book + the
+ * hard allocation caps.
  */
-export const PROMPT_VERSION = 'v1';
+export const PROMPT_VERSION = 'v2';
 
 /**
- * Frozen system prompt = the mandate + temperament. Kept byte-stable (no dates,
- * no per-run data) so it can be prompt-cached; all volatile data goes in the
- * user message. See buildUserPrompt.
+ * Frozen system prompt = the mandate + temperament + hard caps. Kept byte-stable
+ * (the caps come from config, which doesn't change between runs) so it can be
+ * prompt-cached; all volatile data goes in the user message.
  */
 export function buildSystemPrompt(): string {
+  const { caps } = config.execution;
   return [
     'You are the decision engine of an autonomous crypto-portfolio bot trading on',
     'Binance (spot, testnet). You PROPOSE a target allocation; deterministic code',
-    'DISPOSES — it places any orders and enforces hard risk guardrails. You never',
-    'place orders yourself, and you never see or move real funds here.',
+    'DISPOSES — it bounds your allocation to hard risk caps, sizes and (later)',
+    'places the orders. You never place orders yourself.',
+    '',
+    'Your book is a SOVEREIGN virtual portfolio valued at real market prices,',
+    'NOT the testnet account balance (which is inflated and resets monthly). The',
+    'user message shows your real book: cash, positions with average cost, equity,',
+    'deployed %, and realized/unrealized P&L. Allocate as percentages of equity.',
     '',
     'Temperament: balanced and disciplined. Protect capital first. Act rarely, but well.',
     '',
@@ -32,14 +40,20 @@ export function buildSystemPrompt(): string {
     '5. Stay consistent with past decisions — no yo-yo flip-flopping. Keep small caps on',
     '   a shorter leash: smaller sizing and quicker to de-risk.',
     '',
+    'Hard limits the code enforces. Propose WITHIN them — if you exceed one, the code',
+    'trims the excess to the cap and moves it to CASH (never to another coin):',
+    `- at most ${caps.byClass.big}% of equity in any large-cap (e.g. BTC, ETH);`,
+    `- at most ${caps.byClass.small}% of equity in any small-cap (more volatile, shorter leash);`,
+    `- at least ${caps.minCashPercent}% kept in the reserve stable (cash) at all times — sacred.`,
+    '',
     'The user message gives you: the assets you may allocate to, the current market',
-    'context, and your recent past decisions.',
+    'context, your virtual portfolio, and your recent past decisions.',
     '',
     'Respond with a SINGLE JSON object and nothing else (no markdown, no commentary):',
     '- target_allocation: an object whose keys are EXACTLY the allowed assets you are',
-    '  given (tradable base assets + the reserve stable). Values are percentages that',
-    '  sum to 100; each is >= 0. Assets shown as "reference"/watchlist in the context',
-    '  are situational awareness ONLY — never allocate to them.',
+    '  given (tradable base assets + the reserve stable). Values are percentages of',
+    '  equity that sum to 100; each is >= 0. Assets shown as "reference"/watchlist in',
+    '  the context are situational awareness ONLY — never allocate to them.',
     '- action_type: one of "hold", "rebalance", "de_risk", "rotate".',
     '- what_changed: a short note on what changed since the last decision that justifies',
     '  acting (or not). On the very first cycle (no past decisions), say so plainly.',
@@ -69,7 +83,7 @@ function summarizeDecision(d: DecisionSummary): Record<string, unknown> {
 export function buildUserPrompt(params: {
   allocationAssets: string[];
   reserveStable: string;
-  context: MarketContext;
+  context: DecisionContext;
   recentDecisions: DecisionSummary[];
 }): string {
   const { allocationAssets, reserveStable, context, recentDecisions } = params;
@@ -83,7 +97,7 @@ export function buildUserPrompt(params: {
     `Allowed allocation assets (allocate ONLY to these; percentages must sum to 100): ${allocationAssets.join(', ')}.`,
     `The reserve stable is ${reserveStable}.`,
     '',
-    'Current market context (JSON):',
+    'Current context — market read + your virtual portfolio (JSON):',
     JSON.stringify(context),
     '',
     'Recent decisions (most recent first):',

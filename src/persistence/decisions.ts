@@ -15,11 +15,16 @@ export interface DecisionSummary {
   reasoning: string;
 }
 
-/** A full row to insert — mirrors the 0002_decisions migration. */
+/** A full row to insert — mirrors migrations 0002 + 0004. */
 export interface DecisionRow {
   status: DecisionStatus;
   skip_reason: string | null;
   target_allocation: Record<string, number> | null;
+  // Risk-wrapper result (migration 0004): what the code kept after bounding the
+  // AI's proposal to the caps, written in the same cycle.
+  applied_allocation: Record<string, number> | null;
+  clamped: boolean | null;
+  clamp_reason: string | null;
   action_type: string | null;
   what_changed: string | null;
   confidence: string | null;
@@ -35,6 +40,12 @@ export interface DecisionRow {
   latency_ms: number | null;
   input_tokens: number | null;
   output_tokens: number | null;
+}
+
+export interface InsertDecisionResult {
+  persisted: boolean;
+  /** The new row's id — needed as the FK for this cycle's executions. */
+  id: number | null;
 }
 
 /**
@@ -69,30 +80,31 @@ export async function loadRecentDecisions(
 }
 
 /**
- * Persists one wake-up. Returns whether it was actually written. A missing or
- * failing Supabase does NOT crash the run — the decision is still produced and
- * printed; we just warn loudly that it was not journaled.
+ * Persists one wake-up and returns its new id (the FK this cycle's executions
+ * reference). A missing or failing Supabase does NOT crash the run — the
+ * decision is still produced and printed; we warn that it wasn't journaled, and
+ * with no id the cycle skips writing executions (the portfolio won't evolve).
  */
 export async function insertDecision(
   supabase: SupabaseClient | null,
   row: DecisionRow,
-): Promise<boolean> {
+): Promise<InsertDecisionResult> {
   if (!supabase) {
     console.warn(
       '[warn] Supabase not configured — decision NOT journaled (printed to console only).',
     );
-    return false;
+    return { persisted: false, id: null };
   }
 
   try {
-    const { error } = await supabase.from(TABLE).insert(row);
+    const { data, error } = await supabase.from(TABLE).insert(row).select('id').single();
     if (error) throw new Error(error.message);
-    return true;
+    return { persisted: true, id: (data?.id as number | undefined) ?? null };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(
       `[error] failed to journal decision (${msg}) — the decision was made but NOT persisted.`,
     );
-    return false;
+    return { persisted: false, id: null };
   }
 }
