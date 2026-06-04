@@ -9,7 +9,7 @@ import { fetchCandles, fetchSpotPrice } from '../market/klines.js';
 import { computeIndicators, type IndicatorSnapshot } from '../market/indicators.js';
 import { monthLevels, yearLevels, type RangeLevels } from '../market/levels.js';
 import { fetchRelevantBalances, type AssetBalance } from '../account/balances.js';
-import { createSupabaseClient } from '../persistence/supabase.js';
+import { getSupabaseClient } from '../persistence/supabase.js';
 import {
   resolveAllTimeLevels,
   type AllTimeLevels,
@@ -143,7 +143,7 @@ async function safeBuildPair(
 export async function buildMarketContext(): Promise<MarketContext> {
   const publicClient = publicMainnetClient();
   const accountClient = testnetAccountClient();
-  const supabase = createSupabaseClient();
+  const supabase = getSupabaseClient();
 
   const [tradableRaw, referenceRaw, balances] = await Promise.all([
     Promise.all(
