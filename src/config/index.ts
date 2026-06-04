@@ -167,6 +167,37 @@ export function coinClassOf(asset: string, cfg: AppConfig = config): CoinClass {
 }
 
 /**
+ * Fails fast on an incoherent execution config so the risk wrapper's invariants
+ * hold BY CONSTRUCTION. In particular, the cash-floor pass can only produce a
+ * negative scale when `minCashPercent >= 100` (since the allocation sums to 100,
+ * `coinTotal − deficit = 100 − minCashPercent`); forbidding that here is cleaner
+ * than guarding an impossible case at runtime.
+ */
+function validateExecutionConfig(cfg: ExecutionConfig): void {
+  const { startingCapitalUsd, feePercent, caps } = cfg;
+  const problems: string[] = [];
+  if (!(startingCapitalUsd > 0)) {
+    problems.push(`startingCapitalUsd must be > 0 (got ${startingCapitalUsd})`);
+  }
+  if (!(feePercent >= 0 && feePercent < 100)) {
+    problems.push(`feePercent must be in [0, 100) (got ${feePercent})`);
+  }
+  if (!(caps.minCashPercent > 0 && caps.minCashPercent < 100)) {
+    problems.push(`caps.minCashPercent must be in (0, 100) (got ${caps.minCashPercent})`);
+  }
+  for (const [cls, cap] of Object.entries(caps.byClass)) {
+    if (!(cap >= 0 && cap <= 100)) {
+      problems.push(`caps.byClass.${cls} must be in [0, 100] (got ${cap})`);
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(`Invalid execution config: ${problems.join('; ')}`);
+  }
+}
+
+validateExecutionConfig(config.execution);
+
+/**
  * Assets worth tracking in balances: every side of every tradable pair,
  * which naturally includes the quote currency (e.g. USDT). Reference pairs
  * contribute nothing — we never hold or allocate them.
