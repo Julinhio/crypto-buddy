@@ -16,14 +16,29 @@ export interface Movement {
 // This is just float/dust noise, NOT the exchange's min-notional filter (PR B).
 const DUST_NOTIONAL = new Decimal('0.01');
 
+interface Leg {
+  asset: string;
+  price: Decimal;
+  grossDelta: Decimal; // |target − current| in quote (USDT)
+}
+
 /**
  * Computes the movements that would take the virtual portfolio from its current
  * state to the bounded allocation, sized on the virtual book (equity at real
  * prices). Pure calculation — nothing is placed.
  *
- * Target value per asset = appliedAllocation% × equity. The delta vs the current
- * position value becomes a buy (delta > 0) or sell (delta < 0). The reserve
- * stable (cash) is the residual of all the coin moves and is never traded.
+ * Fees are absorbed by the COIN (deployed) side, never the sacred cash reserve,
+ * so the cash floor holds after the fills for ANY rebalance and ANY config.
+ * Two passes make this robust without special cases:
+ *
+ *   1. SELLS — sell exactly down to the target (notional = current − target).
+ *      Since target ≥ 0, this is always ≤ what we hold, so we never over-sell
+ *      (no impossible fill, no negative position). The fee comes out of proceeds.
+ *   2. BUYS — deploy only the cash that sits ABOVE the target reserve
+ *      (buyBudget = cash-after-sells − targetReserve), split across the buys.
+ *      That budget already nets out every sell fee, so all fees land on the coin
+ *      side and cash ends at exactly its target %: cash% = appliedReserve% ·
+ *      (equity_before / equity_after) ≥ appliedReserve% ≥ floor.
  */
 export function computeMovements(
   portfolio: VirtualPortfolio,
@@ -32,14 +47,17 @@ export function computeMovements(
   feePercent: number,
 ): Movement[] {
   const equity = portfolio.equity;
+  const reserve = portfolio.reserveAsset;
+  const feeRate = new Decimal(feePercent).div(100);
+
   const currentValue = new Map<string, Decimal>();
   for (const p of portfolio.positions) currentValue.set(p.asset, p.value);
 
-  const feeRate = new Decimal(feePercent).div(100);
-  const movements: Movement[] = [];
-
+  // Split the coins into sells and buys (the reserve/cash is never traded).
+  const sells: Leg[] = [];
+  const buys: Leg[] = [];
   for (const [asset, pct] of Object.entries(appliedAllocation)) {
-    if (asset === portfolio.reserveAsset) continue; // cash is the residual
+    if (asset === reserve) continue;
 
     const targetValue = equity.times(pct).div(100);
     const current = currentValue.get(asset) ?? ZERO;
@@ -51,29 +69,49 @@ export function computeMovements(
       console.warn(`[warn] no live price for ${asset} — cannot size its movement this cycle, skipping.`);
       continue;
     }
+    (deltaValue.gt(0) ? buys : sells).push({ asset, price, grossDelta: deltaValue.abs() });
+  }
 
-    const isBuy = deltaValue.gt(0);
-    const grossDelta = deltaValue.abs();
-    // Fees are absorbed by the COIN side, never the sacred cash reserve —
-    // SYMMETRICALLY on both sides. A buy spends (notional + fee) = grossDelta;
-    // a sell returns (notional − fee) = grossDelta. So each side moves cash by
-    // EXACTLY the intended delta, leaving cash at its target % of (pre-fee)
-    // equity; equity then shrinks by the fees, so the cash % only rises — the
-    // floor holds after the fills for ANY rebalance (buy, sell, or mixed).
-    // (feeRate < 1 is guaranteed by the startup config validation.)
-    const notional = isBuy
-      ? grossDelta.div(ONE.plus(feeRate))
-      : grossDelta.div(ONE.minus(feeRate));
+  const movements: Movement[] = [];
+
+  // Pass 1 — sells to target (≤ holdings by construction; fee from proceeds).
+  let cashFromSells = ZERO;
+  for (const s of sells) {
+    const notional = s.grossDelta; // coin value to remove
     const fee = notional.times(feeRate);
+    cashFromSells = cashFromSells.plus(notional.minus(fee));
     movements.push({
-      symbol: `${asset}/${portfolio.reserveAsset}`,
-      asset,
-      side: isBuy ? 'buy' : 'sell',
-      qty: notional.div(price),
-      price,
+      symbol: `${s.asset}/${reserve}`,
+      asset: s.asset,
+      side: 'sell',
+      qty: notional.div(s.price),
+      price: s.price,
       notional,
       fee,
     });
+  }
+
+  // Pass 2 — buys deploy the cash above the target reserve (absorbs all fees).
+  const targetReserve = equity.times(appliedAllocation[reserve] ?? 0).div(100);
+  const buyBudget = Decimal.max(portfolio.cash.plus(cashFromSells).minus(targetReserve), ZERO);
+  const totalBuyGross = buys.reduce((sum, b) => sum.plus(b.grossDelta), ZERO);
+
+  if (totalBuyGross.gt(0) && buyBudget.gt(0)) {
+    for (const b of buys) {
+      const cashOutlay = buyBudget.times(b.grossDelta).div(totalBuyGross); // share incl. fee
+      if (cashOutlay.lt(DUST_NOTIONAL)) continue;
+      const notional = cashOutlay.div(ONE.plus(feeRate)); // coin value bought
+      const fee = notional.times(feeRate);
+      movements.push({
+        symbol: `${b.asset}/${reserve}`,
+        asset: b.asset,
+        side: 'buy',
+        qty: notional.div(b.price),
+        price: b.price,
+        notional,
+        fee,
+      });
+    }
   }
 
   return movements;
