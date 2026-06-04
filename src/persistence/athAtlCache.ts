@@ -180,6 +180,11 @@ async function seed(
  * cached ATH/ATL only if the live price or a recent daily candle prints a new
  * extreme. The daily candles (already fetched) record each day's true intraday
  * high/low, so a spike that reverted between two runs is still captured.
+ *
+ * The persisted value is monotone: ATH only ever rises, ATL only ever falls.
+ * The write is a compare-and-set guarded by the row's current value (see
+ * bumpHigh/bumpLow), so a stale read can never regress an extreme another
+ * maintainer already pushed.
  */
 async function maintain(
   p: ResolveAllTimeParams,
@@ -216,30 +221,70 @@ async function maintain(
     return withSource(levels, row.source_timeframe, row.source_candles, 'cache');
   }
 
-  // Tag which signal moved the value (live price vs a past daily candle).
-  const movedByLive =
-    (highChanged && newHigh.at === nowIso) || (lowChanged && newLow.at === nowIso);
-  const lastUpdateSource = movedByLive ? 'live' : 'daily';
-
-  const { error } = await p.supabase!
-    .from(TABLE)
-    .update({
-      ath_price: newHigh.price,
-      ath_at: newHigh.at,
-      atl_price: newLow.price,
-      atl_at: newLow.at,
-      updated_at: nowIso,
-      last_update_source: lastUpdateSource,
-    })
-    .eq('symbol', p.symbol);
-
-  if (error) {
-    console.warn(
-      `[warn] ${p.symbol}: failed to update ATH/ATL cache (${error.message}) — value still used for this run.`,
-    );
+  // Persist each extreme as a MONOTONE compare-and-set at the DB level: a new
+  // high only replaces the stored ATH on a row whose ath_price is still below
+  // it (.lt), a new low only replaces the stored ATL where atl_price is still
+  // above it (.gt). The guard is evaluated by Postgres against the row's
+  // CURRENT value, so a maintainer acting on a stale read can never lower a
+  // stored ATH (nor raise a stored ATL) that a concurrent write already pushed.
+  // Each side is written independently, so an unchanged extreme is never
+  // rewritten with a stale value either.
+  if (highChanged) {
+    await bumpHigh(p, newHigh, nowIso);
+  }
+  if (lowChanged) {
+    await bumpLow(p, newLow, nowIso);
   }
 
   return withSource(levels, row.source_timeframe, row.source_candles, 'bumped');
+}
+
+/** Raise the stored ATH, but only if it is still strictly below `high`. */
+async function bumpHigh(
+  p: ResolveAllTimeParams,
+  high: PriceLevel,
+  nowIso: string,
+): Promise<void> {
+  const { error } = await p.supabase!
+    .from(TABLE)
+    .update({
+      ath_price: high.price,
+      ath_at: high.at,
+      updated_at: nowIso,
+      last_update_source: high.at === nowIso ? 'live' : 'daily',
+    })
+    .eq('symbol', p.symbol)
+    .lt('ath_price', high.price);
+
+  if (error) {
+    console.warn(
+      `[warn] ${p.symbol}: failed to raise cached ATH (${error.message}) — value still used for this run.`,
+    );
+  }
+}
+
+/** Lower the stored ATL, but only if it is still strictly above `low`. */
+async function bumpLow(
+  p: ResolveAllTimeParams,
+  low: PriceLevel,
+  nowIso: string,
+): Promise<void> {
+  const { error } = await p.supabase!
+    .from(TABLE)
+    .update({
+      atl_price: low.price,
+      atl_at: low.at,
+      updated_at: nowIso,
+      last_update_source: low.at === nowIso ? 'live' : 'daily',
+    })
+    .eq('symbol', p.symbol)
+    .gt('atl_price', low.price);
+
+  if (error) {
+    console.warn(
+      `[warn] ${p.symbol}: failed to lower cached ATL (${error.message}) — value still used for this run.`,
+    );
+  }
 }
 
 function withSource(
