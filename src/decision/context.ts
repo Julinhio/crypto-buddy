@@ -86,10 +86,12 @@ export function buildPriceLookup(
   const prices = new Map<string, Decimal>();
   for (const pair of [...market.market.tradable, ...market.market.reference]) {
     const [base, quote] = pair.symbol.split('/');
-    // Guard a non-finite price (partial fetch): never feed null/NaN to Decimal
-    // (it throws and would kill the whole cycle). Skip it — the asset just has
-    // no live price, which the portfolio/movements code already handles.
-    if (base && quote === reserveAsset && Number.isFinite(pair.price) && !prices.has(base)) {
+    // Guard a non-finite OR non-positive price (partial/garbage fetch): never
+    // feed null/NaN to Decimal (it throws), and treat 0 or negative as no price
+    // (a finite 0 would otherwise value the position at 0 and corrupt P&L). Skip
+    // it — the asset just has no live price, which the rest of the code handles
+    // via the avgCost fallback (priceStale).
+    if (base && quote === reserveAsset && Number.isFinite(pair.price) && pair.price > 0 && !prices.has(base)) {
       prices.set(base, new Decimal(pair.price));
     }
   }
