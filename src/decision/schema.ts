@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { config, tradableAssets, type AppConfig } from '../config/index.js';
+import { config, type AppConfig } from '../config/index.js';
 
 // Enumerations — single source of truth (the TS unions are derived from these).
 const actionTypeSchema = z.enum(['hold', 'rebalance', 'de_risk', 'rotate']);
@@ -21,12 +21,53 @@ export interface DecisionOutput {
 }
 
 /**
- * The only assets the AI may allocate to: tradable base assets + the reserve
- * quote (USDT). Derived from config so it always matches the tradable pairs;
- * reference / watchlist assets (SOL, BNB…) are excluded by construction.
+ * The reserve stable(s): the quote asset(s) of the configured tradable pairs
+ * (USDT here). Always allocatable — it's the cash we hold and trade against.
  */
-export function allocationAssets(cfg: AppConfig = config): string[] {
-  return [...tradableAssets(cfg)];
+export function reserveStables(cfg: AppConfig = config): string[] {
+  const quotes: string[] = [];
+  const seen = new Set<string>();
+  for (const pair of cfg.tradablePairs) {
+    const quote = pair.split('/')[1];
+    if (quote && !seen.has(quote)) {
+      seen.add(quote);
+      quotes.push(quote);
+    }
+  }
+  return quotes;
+}
+
+/**
+ * The assets the AI may allocate to THIS cycle: the base assets of the tradable
+ * pairs that ACTUALLY returned data (their symbols), plus the reserve stable.
+ *
+ * Derived from the live context, never from config alone: a pair the data
+ * engine dropped this cycle (no price/indicators) must not be offered to the
+ * model — otherwise it could allocate to an asset we know nothing about, and
+ * we'd journal a `decided` on incomplete data. Same spirit as the skip rule.
+ * Reference / watchlist assets are excluded by construction (only tradable
+ * symbols are passed in).
+ */
+export function allocatableUniverse(
+  presentTradableSymbols: string[],
+  cfg: AppConfig = config,
+): string[] {
+  const assets: string[] = [];
+  const seen = new Set<string>();
+  for (const symbol of presentTradableSymbols) {
+    const base = symbol.split('/')[0];
+    if (base && !seen.has(base)) {
+      seen.add(base);
+      assets.push(base);
+    }
+  }
+  for (const stable of reserveStables(cfg)) {
+    if (!seen.has(stable)) {
+      seen.add(stable);
+      assets.push(stable);
+    }
+  }
+  return assets;
 }
 
 /**
@@ -38,15 +79,19 @@ export function allocationAssets(cfg: AppConfig = config): string[] {
  */
 export function buildDecisionSchema(assets: string[]) {
   const allocationShape: Record<string, z.ZodNumber> = {};
-  for (const asset of assets) allocationShape[asset] = z.number();
+  // Per-asset bounds (0..100). zodOutputFormat strips numeric/length keywords
+  // the API can't enforce and validates them client-side instead — so these are
+  // belt-and-suspenders. The sum-to-100 rule is cross-field and stays in code
+  // (validateDecision), which remains the real guard.
+  for (const asset of assets) allocationShape[asset] = z.number().min(0).max(100);
 
   return z.object({
     target_allocation: z.object(allocationShape),
     action_type: actionTypeSchema,
-    what_changed: z.string(),
+    what_changed: z.string().min(1),
     confidence: confidenceSchema,
     market_state: marketStateSchema,
-    reasoning: z.string(),
+    reasoning: z.string().min(1),
     next_delay_minutes: z.number(),
   });
 }
