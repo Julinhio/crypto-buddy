@@ -1,4 +1,8 @@
-import { config } from '../config/index.js';
+import {
+  config,
+  tradableAssets,
+  type PairKind,
+} from '../config/index.js';
 import { publicMainnetClient, testnetAccountClient } from '../exchanges/binance.js';
 import { fetchCandles, fetchSpotPrice } from '../market/klines.js';
 import { computeIndicators, type IndicatorSnapshot } from '../market/indicators.js';
@@ -8,10 +12,11 @@ import {
   yearLevels,
   type RangeLevels,
 } from '../market/levels.js';
-import { fetchNonZeroBalances, type AssetBalance } from '../account/balances.js';
+import { fetchRelevantBalances, type AssetBalance } from '../account/balances.js';
 
 export interface PairContext {
   symbol: string;
+  kind: PairKind;
   price: number;
   primary: {
     timeframe: string;
@@ -31,7 +36,14 @@ export interface MarketContext {
     marketData: 'binance-public-mainnet';
     account: 'binance-testnet';
   };
-  pairs: PairContext[];
+  /**
+   * Pairs are grouped by family so the boundary is structurally explicit:
+   * `reference` pairs feed the LLM's market read but must never be allocated.
+   */
+  market: {
+    tradable: PairContext[];
+    reference: PairContext[];
+  };
   account: {
     balances: AssetBalance[];
   };
@@ -40,6 +52,7 @@ export interface MarketContext {
 async function buildPairContext(
   publicClient: ReturnType<typeof publicMainnetClient>,
   symbol: string,
+  kind: PairKind,
 ): Promise<PairContext> {
   const [price, primaryCandles, longTermCandles] = await Promise.all([
     fetchSpotPrice(publicClient, symbol),
@@ -59,6 +72,7 @@ async function buildPairContext(
 
   return {
     symbol,
+    kind,
     price,
     primary: {
       timeframe: config.primaryTimeframe,
@@ -83,9 +97,18 @@ export async function buildMarketContext(): Promise<MarketContext> {
   const publicClient = publicMainnetClient();
   const accountClient = testnetAccountClient();
 
-  const [pairs, balances] = await Promise.all([
-    Promise.all(config.pairs.map((symbol) => buildPairContext(publicClient, symbol))),
-    fetchNonZeroBalances(accountClient),
+  const [tradable, reference, balances] = await Promise.all([
+    Promise.all(
+      config.tradablePairs.map((symbol) =>
+        buildPairContext(publicClient, symbol, 'tradable'),
+      ),
+    ),
+    Promise.all(
+      config.referencePairs.map((symbol) =>
+        buildPairContext(publicClient, symbol, 'reference'),
+      ),
+    ),
+    fetchRelevantBalances(accountClient, tradableAssets(config)),
   ]);
 
   return {
@@ -94,7 +117,7 @@ export async function buildMarketContext(): Promise<MarketContext> {
       marketData: 'binance-public-mainnet',
       account: 'binance-testnet',
     },
-    pairs,
+    market: { tradable, reference },
     account: { balances },
   };
 }

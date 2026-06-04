@@ -9,7 +9,15 @@ no orders, no trading logic yet.
 
 ## What it does
 
-For each configured pair (default: `BTC/USDT`, `ETH/USDT`):
+Pairs are split into two families, kept strictly separate in the context:
+
+- **Tradable** (default: `BTC/USDT`, `ETH/USDT`) — the bot may take positions
+  on these later, under risk guardrails. Their base assets are balance-tracked.
+- **Reference** watchlist (default: `SOL/USDT`, `BNB/USDT`) — priced and
+  analyzed for market context only, **never traded, never allocated, no
+  balance tracked**.
+
+For every pair in **both** families:
 
 - Pulls the current spot price and a primary candle series (default: 500 × 1d)
   from the **public Binance mainnet** endpoint — real market data, no API key
@@ -20,8 +28,11 @@ For each configured pair (default: `BTC/USDT`, `ETH/USDT`):
   EMA(21) — via `technicalindicators`.
 - Computes price levels: month high/low, year high/low, ATH/ATL.
 
-It also reads the authenticated **Binance testnet** account for non-zero
-balances.
+It also reads the authenticated **Binance testnet** account, keeping only the
+**relevant balances** — the quote currency (USDT) and the base assets of
+tradable pairs. The testnet seeds hundreds of unrelated assets; everything
+outside that allowlist is filtered out. Reference-watchlist assets are never
+balance-tracked.
 
 Market data comes from mainnet on purpose (the testnet has synthetic
 prices); only the account side is sandboxed.
@@ -62,26 +73,31 @@ npm run typecheck
 
 All knobs live in [`src/config/index.ts`](src/config/index.ts):
 
-- `pairs` — add a pair by appending one string (e.g. `'SOL/USDT'`).
+- `tradablePairs` — pairs the bot may allocate. Add one by appending a string
+  (e.g. `'SOL/USDT'`); its base asset is automatically balance-tracked.
+- `referencePairs` — context-only watchlist. Add one to enrich the market
+  read without ever trading or tracking it.
 - `primaryTimeframe` / `primaryLimit` — series used for indicators and
   month/year levels.
 - `longTermTimeframe` / `longTermLimit` — series used for ATH/ATL only.
 - `indicators` — RSI period, list of SMA periods, list of EMA periods.
 
-The core code never needs to be touched to add a pair or tune an indicator.
+The set of balance-tracked assets is derived from `tradablePairs` via
+`tradableAssets()` — no separate asset list to maintain. The core code never
+needs to be touched to add a pair or tune an indicator.
 
 ## Project layout
 
 ```
 src/
 ├── index.ts                 # entry point
-├── config/index.ts          # pairs, timeframes, indicator params
+├── config/index.ts          # tradable/reference pairs, timeframes, indicators
 ├── exchanges/binance.ts     # public mainnet + authenticated testnet clients
 ├── market/
 │   ├── klines.ts            # candle + ticker fetch
 │   ├── indicators.ts        # RSI / SMA / EMA snapshot
 │   └── levels.ts            # month / year / ATH-ATL (isolated)
-├── account/balances.ts      # testnet non-zero balances
+├── account/balances.ts      # testnet balances, filtered to tradable assets
 └── context/
     ├── build.ts             # assembles MarketContext
     └── print.ts             # human-readable console output
