@@ -55,7 +55,9 @@ create table if not exists public.scheduler_runs (
   -- exactly how you spot a crash at audit time. finish_run flips it to 'completed'.
   status        text        not null default 'running' check (status in ('running', 'completed')),
   outcome       text        check (outcome in ('decided', 'skip', 'error')),
-  decision_id   bigint      references public.decisions (id),
+  -- SET NULL (not the default RESTRICT): purging a decision row must never be
+  -- blocked by, nor orphan, an audit row that merely references it.
+  decision_id   bigint      references public.decisions (id) on delete set null,
   missed_beats  integer,
   next_check_at timestamptz,
   detail        text
@@ -139,7 +141,12 @@ create or replace function public.finish_run(
 returns boolean
 language plpgsql
 as $$
+declare
+  v_lock_held boolean;
 begin
+  -- Reschedule + release bot_state ONLY if we still own the lock (the fencing
+  -- token). If our run overran and was reclaimed, we must NOT clobber the state —
+  -- the reclaiming run owns rescheduling.
   update public.bot_state
      set next_check_at        = now() + make_interval(mins => p_delay_minutes),
          run_token            = null,
@@ -151,21 +158,28 @@ begin
    where id = 1
      and run_token = p_run_token;
 
-  if not found then
-    return false;  -- fencing: lock lost (expired + reclaimed) — do NOT clobber state
-  end if;
+  v_lock_held := found;
 
+  -- ALWAYS close the history row. The run DID finish its cycle; on the fencing
+  -- path it just lost the lock — that is NOT a crash, so don't leave it 'running'
+  -- (that label is reserved for runs that truly never came back). Record the
+  -- lock-lost in the detail, and only stamp next_check_at when we actually
+  -- rescheduled.
   update public.scheduler_runs
      set finished_at   = now(),
          status        = 'completed',
          outcome       = p_outcome,
          decision_id   = p_decision_id,
          missed_beats  = p_missed_beats,
-         next_check_at = now() + make_interval(mins => p_delay_minutes),
-         detail        = p_detail
+         next_check_at = case when v_lock_held then now() + make_interval(mins => p_delay_minutes) else null end,
+         detail        = case
+                           when v_lock_held then p_detail
+                           else coalesce(p_detail || ' | ', '') ||
+                                'lock lost/overran: reclaimed by another beat; this run did not reschedule bot_state'
+                         end
    where id = p_run_id;
 
-  return true;
+  return v_lock_held;  -- true = we held the lock (normal); false = fencing (reclaimed)
 end;
 $$;
 
