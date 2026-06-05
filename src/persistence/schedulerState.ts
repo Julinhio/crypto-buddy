@@ -51,77 +51,74 @@ function toBotState(row: Record<string, unknown>): BotState {
 /**
  * Records liveness on EVERY beat (last_heartbeat_at = DB now()) and returns the
  * current state so the caller can decide — using DB time — whether to attempt a
- * claim. Returns null if Supabase is unavailable or the call fails.
+ * claim.
+ *
+ * THROWS on any infra failure (RPC error, missing singleton). For a cron-launched
+ * bot, an infra fault must fail the process hard (non-zero exit) so the platform
+ * sees it — swallowing it into a null would make an outage look like a normal beat.
  */
-export async function recordHeartbeat(supabase: SupabaseClient): Promise<BotState | null> {
-  try {
-    const { data, error } = await supabase.rpc('record_heartbeat');
-    if (error) throw new Error(error.message);
-    if (data == null) return null;
-    const row = (Array.isArray(data) ? data[0] : data) as Record<string, unknown> | undefined;
-    return row ? toBotState(row) : null;
-  } catch (err) {
-    console.warn(`[warn] record_heartbeat failed (${err instanceof Error ? err.message : String(err)}).`);
-    return null;
+export async function recordHeartbeat(supabase: SupabaseClient): Promise<BotState> {
+  const { data, error } = await supabase.rpc('record_heartbeat');
+  if (error) throw new Error(`record_heartbeat RPC failed: ${error.message}`);
+  const row = (Array.isArray(data) ? data[0] : data) as Record<string, unknown> | undefined;
+  if (!row) {
+    throw new Error('record_heartbeat returned no bot_state row — is migration 0006 applied?');
   }
+  return toBotState(row);
 }
 
 /**
- * The ATOMIC claim. Returns a ClaimResult only if THIS beat won the run-lock
- * (atomically, in the DB); returns null when not due, already locked, or on error
- * — in every "null" case the caller simply no-ops, which is always safe.
+ * The ATOMIC claim. THROWS on an infra failure (RPC error) so the beat exits
+ * non-zero. Returns null ONLY for the genuine business result: the RPC succeeded
+ * but did not claim (not due, or a live lock exists) — that's a safe no-op.
  */
 export async function claimDueRun(
   supabase: SupabaseClient,
   runToken: string,
   lockTtlSeconds: number,
 ): Promise<ClaimResult | null> {
-  try {
-    const { data, error } = await supabase.rpc('claim_due_run', {
-      p_run_token: runToken,
-      p_lock_ttl_seconds: lockTtlSeconds,
-    });
-    if (error) throw new Error(error.message);
-    const row = (Array.isArray(data) ? data[0] : data) as Record<string, unknown> | undefined;
-    if (!row) return null; // not due / locked
-    return {
-      runId: Number(row.run_id),
-      prevNextCheckAt: (row.prev_next_check_at as string | null) ?? null,
-      dbNow: String(row.db_now),
-      consecutiveFailures: Number(row.consecutive_failures ?? 0),
-      floorDelayStreak: Number(row.floor_delay_streak ?? 0),
-    };
-  } catch (err) {
-    console.warn(`[warn] claim_due_run failed (${err instanceof Error ? err.message : String(err)}) — treating as not claimed.`);
-    return null;
-  }
+  const { data, error } = await supabase.rpc('claim_due_run', {
+    p_run_token: runToken,
+    p_lock_ttl_seconds: lockTtlSeconds,
+  });
+  if (error) throw new Error(`claim_due_run RPC failed: ${error.message}`);
+  const row = (Array.isArray(data) ? data[0] : data) as Record<string, unknown> | undefined;
+  if (!row) return null; // RPC ran, claim refused: not due / locked
+  return {
+    runId: Number(row.run_id),
+    prevNextCheckAt: (row.prev_next_check_at as string | null) ?? null,
+    dbNow: String(row.db_now),
+    consecutiveFailures: Number(row.consecutive_failures ?? 0),
+    floorDelayStreak: Number(row.floor_delay_streak ?? 0),
+  };
 }
 
 /**
  * Reschedules + releases the lock + marks the run done, in ONE DB transaction.
- * Returns false when we lost the lock (the fencing token didn't match: our run
- * was reclaimed because it overran) — the caller logs it and does NOT retry, since
- * the reclaiming run now owns rescheduling. Returns false on error too; the lock
- * then simply expires and a later beat takes over.
+ *
+ * THROWS on an infra failure (RPC error). That is SAFE for recovery: the lock was
+ * already written at claim time, so if the DB dies right after the cycle the
+ * process exits non-zero, the lock stays posted with next_check_at in the past,
+ * and once the DB is back a later beat reclaims after the lock expires (replay is
+ * safe by PR B's booking-first model). We gain a VISIBLE outage, lose no recovery.
+ *
+ * Returns false ONLY for the genuine fencing result: the RPC ran and returned
+ * false because the lock had changed hands (our run overran and was reclaimed) —
+ * the reclaiming run now owns rescheduling, so the caller must not retry.
  */
 export async function finishRun(supabase: SupabaseClient, p: FinishRunParams): Promise<boolean> {
-  try {
-    const { data, error } = await supabase.rpc('finish_run', {
-      p_run_token: p.runToken,
-      p_run_id: p.runId,
-      p_delay_minutes: p.delayMinutes,
-      p_consecutive_failures: p.consecutiveFailures,
-      p_floor_delay_streak: p.floorDelayStreak,
-      p_succeeded: p.succeeded,
-      p_outcome: p.outcome,
-      p_decision_id: p.decisionId,
-      p_missed_beats: p.missedBeats,
-      p_detail: p.detail,
-    });
-    if (error) throw new Error(error.message);
-    return data === true;
-  } catch (err) {
-    console.error(`[error] finish_run failed (${err instanceof Error ? err.message : String(err)}) — lock will expire and a later beat will take over.`);
-    return false;
-  }
+  const { data, error } = await supabase.rpc('finish_run', {
+    p_run_token: p.runToken,
+    p_run_id: p.runId,
+    p_delay_minutes: p.delayMinutes,
+    p_consecutive_failures: p.consecutiveFailures,
+    p_floor_delay_streak: p.floorDelayStreak,
+    p_succeeded: p.succeeded,
+    p_outcome: p.outcome,
+    p_decision_id: p.decisionId,
+    p_missed_beats: p.missedBeats,
+    p_detail: p.detail,
+  });
+  if (error) throw new Error(`finish_run RPC failed: ${error.message}`);
+  return data === true;
 }

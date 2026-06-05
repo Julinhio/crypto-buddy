@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { config } from '../config/index.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
 import { decide } from '../decision/decide.js';
@@ -36,20 +37,25 @@ export interface HeartbeatResult {
  *
  * Reschedule happens LAST, after the work, so a crash mid-cycle never jumps the
  * schedule forward; the expiring lock lets a later beat reclaim a crashed run.
+ *
+ * Infra/config faults THROW (the wrappers propagate RPC errors, and a missing
+ * Supabase client throws here) so the process exits non-zero and the platform
+ * detects the outage — the exit code is our first line of monitoring. `supabase`
+ * can be injected for tests; production passes nothing and uses getSupabaseClient().
  */
-export async function runHeartbeat(): Promise<HeartbeatResult> {
-  const supabase = getSupabaseClient();
+export async function runHeartbeat(
+  deps: { supabase?: SupabaseClient | null } = {},
+): Promise<HeartbeatResult> {
+  const supabase = 'supabase' in deps ? deps.supabase ?? null : getSupabaseClient();
   if (!supabase) {
-    console.error('[CRITICAL] Supabase not configured — the scheduler needs persistent state to claim/lock. No-op.');
-    return { action: 'noop', reason: 'no-supabase' };
+    // A missing Supabase client is a CONFIGURATION error (same posture as a missing
+    // ANTHROPIC_API_KEY) — fail loud, never a quiet code-0 no-op.
+    throw new Error('Supabase not configured — the scheduler needs persistent state to claim/lock.');
   }
 
   // 1. Liveness on every beat — and read the state to decide what to do (DB time).
+  //    recordHeartbeat throws on any infra fault (→ non-zero exit), so state is set.
   const state = await recordHeartbeat(supabase);
-  if (!state) {
-    console.error('[error] could not read scheduler state this beat — no-op.');
-    return { action: 'noop', reason: 'state-unreadable' };
-  }
 
   // 2. Cheap pre-check against the DATABASE's clock (last_heartbeat_at = now()).
   const nowMs = state.lastHeartbeatAt ? Date.parse(state.lastHeartbeatAt) : Date.now();
