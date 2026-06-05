@@ -258,10 +258,11 @@ exchange only says whether that quantity is admissible. The tiny lot-rounding
 drift is an accepted operating tolerance.
 
 **Validation that has authority.** A movement is validated against the **real
-mainnet filters** (`LOT_SIZE`, `NOTIONAL`/min-notional) using our **sovereign
-price** as the economic reference. This — and only this — gates the sovereign
-booking. The filters are read straight from the exchange's `exchangeInfo` (the
-authoritative source), not a derived abstraction.
+mainnet filters** (`LOT_SIZE`, and `NOTIONAL` min **and max**) using our
+**sovereign price** as the economic reference. This — and only this — gates the
+sovereign booking. The filters are read straight from the exchange's
+`exchangeInfo` (the authoritative source), not a derived abstraction. A movement
+above `maxNotional` is a clean **block** (not booked, no order) — never split.
 
 **Crumbs are a clean no-op.** A movement too small to clear the real min-notional
 (or that snaps to nothing) is **skipped**: logged, journaled as a non-booked
