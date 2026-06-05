@@ -293,6 +293,70 @@ discriminator (defaulting existing PR A rows to booked `intent`s, so the
 portfolio derives identically) and the testnet-trace columns. RLS is already
 enabled on the table — nothing else to do.
 
+## Scheduler (heartbeat — PR 1: the core)
+
+So far the cycle only runs on a manual `npm run decide`. The scheduler makes the
+bot autonomous. The deploy host (Railway) provides a **fixed cron that beats
+every 5 min** (the cron wiring lands in a later deploy PR); this PR builds the
+**state in the database** and the logic that decides, at each beat, whether to
+actually run a cycle — robust to crashes and overlaps. It's also the **run-lock**
+that closes the PR #2 ATH/ATL cache race (one run touches the cache at a time).
+
+**The 5-min cron is dumb; the state is a small state machine with a lock.** Each
+beat (`npm run beat`): read the state, and run a real cycle only if it's due **and**
+no live lock exists. Before working, the beat **claims the run atomically** — the
+guard against ever deciding twice in parallel.
+
+- **State model** — a singleton `bot_state` row (next check, the run-lock
+  `run_token` + `locked_until`, liveness, last success, the backoff counter, the
+  overheating counter, an alert flag for later) plus an append-only `scheduler_runs`
+  history, same spirit as `executions`.
+- **Atomic claim** — a single conditional `UPDATE` (`claim_due_run`) is the
+  compare-and-set: Postgres takes a row lock, two overlapping beats serialize, and
+  the loser re-evaluates its `WHERE` against the now-locked row → 0 rows. No
+  double-run. Comparison uses the **database's `now()`**, never the app clock.
+- **The lock expires** — a run that crashes mid-cycle has its lock expire, and a
+  later beat reclaims it (self-healing). The lock TTL (`lockTtlSeconds`, 10 min)
+  must exceed the **worst-case cycle** (`maxCycleSeconds`, 5 min) — otherwise a
+  slow-but-alive run could lose its lock to a parallel beat and run a *second
+  concurrent cycle* (the fencing token stops state corruption, **not** double
+  execution). We make the cycle *provably* bounded, not just "probably short":
+  besides the per-call ccxt/Anthropic timeouts, `decide()` is wrapped in a **hard
+  timeout = maxCycleSeconds** (a timeout → technical error → backoff), and `beat.ts`
+  **force-exits** the one-shot process so a timed-out cycle can't keep running and
+  act after the lock is released. With `lockTtlSeconds > maxCycleSeconds` asserted
+  at startup, the lock cannot expire while a cycle is still alive.
+- **Reschedule last, and always** — order is: claim → run cycle → journal (the PR B
+  behaviour) → write the new `next_check_at` → release the lock, ideally in one
+  transaction (`finish_run`). Never reschedule before the work, so a crash can't
+  jump the schedule forward. And reschedule for **every** outcome so the bot never
+  goes dark: a decided cycle → the LLM's bounded delay (15–240); a soft skip → a
+  fixed ~30 min; a hard error → capped exponential backoff (15, 30, 60, 120, 240)
+  reset on success.
+- **No catch-up** — if many beats were missed (the bot was down), run **one** fresh
+  cycle on the current market; missed beats are only logged.
+- **Fail loud on infra** — for a cron-launched bot the **exit code is the first line
+  of monitoring** (before the external watchdog). An infra/config fault (RPC error,
+  unconfigured Supabase) **throws** so the beat exits non-zero; `null`/`false` are
+  reserved for genuine results (not-claimed / fencing). A `finish_run` failure right
+  after the cycle is safe: the lock was already written, so a later beat reclaims it
+  once it expires — visible outage, no lost recovery.
+
+Replay safety (why we're fine on testnet without `clientOrderId`): PR B books the
+intent *before* placing the order and derives the portfolio from the append-only
+journal, so a reclaimed run re-sizes from the already-booked state and never
+repeats a movement. The only residue is a duplicate testnet order without a trace
+— harmless on fake money. Fine idempotency keys stay a guard for real money.
+
+### Applying the migration
+
+Paste [`0006_scheduler.sql`](supabase/migrations/0006_scheduler.sql) into the
+Supabase **SQL Editor** and **Run**. It creates `bot_state` (seeded singleton) and
+`scheduler_runs`, plus the `record_heartbeat` / `claim_due_run` / `finish_run`
+functions. RLS deny-all on both tables, and `EXECUTE` on the functions is revoked
+from `public` and granted to `service_role` only (the backend's key) — so
+anon/authenticated can't even invoke them.
+
 ## Setup
 
 ```sh
@@ -313,6 +377,7 @@ cp .env.example .env
 #    - 0003_executions.sql                 (execution journal — virtual portfolio)
 #    - 0004_extend_decisions.sql           (bounded-allocation columns)
 #    - 0005_executions_testnet_orders.sql  (four-state testnet execution journal)
+#    - 0006_scheduler.sql                  (scheduler state machine + run-lock)
 #    - add SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY to .env
 #    Without these, `npm start` still runs; `npm run decide` still decides and
 #    paper-trades but won't journal (the portfolio stays at 100% cash).
@@ -329,7 +394,8 @@ cp .env.example .env
 
 ```sh
 npm start         # brick 1-2: build + print the market context
-npm run decide    # bricks 3-4: one wake-up — decide, bound to caps, paper-trade
+npm run decide    # bricks 3-4: one wake-up — decide, bound to caps, execute
+npm run beat      # scheduler: one heartbeat — run a cycle only if it's due
 ```
 
 `npm start` prints a formatted summary per pair, your testnet balances, then the
@@ -337,16 +403,21 @@ raw JSON of the full context. `npm run decide` runs a full cycle: it prints the
 AI's proposed allocation and reasoning, then the **virtual portfolio**, the
 **risk-wrapper** result (proposed vs applied), and the **real testnet execution**
 — per movement, what was booked and what the testnet did (the four states).
+`npm run beat` is the scheduler entry point: it records liveness, and **only when a
+cycle is due and unlocked** does it atomically claim the run, call `decide()`, and
+reschedule; otherwise it's a cheap no-op. The Railway cron will call it every 5 min.
 
-> ⚠️ `npm run decide` now **places real orders on the Binance testnet** (fake
-> money, but a real exchange round-trip) and **calls the Anthropic API** (cost).
-> The sovereign accounting is never affected by the testnet result.
+> ⚠️ `npm run decide` (and a *due* `npm run beat`) **places real orders on the
+> Binance testnet** (fake money, but a real exchange round-trip) and **calls the
+> Anthropic API** (cost). The sovereign accounting is never affected by the testnet
+> result.
 
 ## Type check & tests
 
 ```sh
 npm run typecheck
-npm test          # money invariants (e.g. cash floor holds after fees, any rebalance)
+npm test          # money invariants (cash floor, snapping) + scheduler policy
+                  # (due/lock, atomic-claim guard, reschedule, backoff, overheating)
 ```
 
 ## Configuration
@@ -369,6 +440,10 @@ All knobs live in [`src/config/index.ts`](src/config/index.ts):
 - `execution` — `startingCapitalUsd` (env `STARTING_CAPITAL_USD`), `feePercent`
   (env `FEE_PERCENT`), the per-class `caps` (big / small / `minCashPercent`), and
   `coinClass` (tag a coin `big`/`small`; unlisted defaults to `small`).
+- `scheduler` — `beatIntervalMinutes` (the cron cadence), `maxCycleSeconds`
+  (worst-case cycle budget), `lockTtlSeconds` (run-lock TTL, **must exceed**
+  `maxCycleSeconds`), and `softSkipDelayMinutes`. Backoff reuses the `decision`
+  delay bounds (15 / 240).
 
 The set of balance-tracked assets — and the AI's allocation universe — are both
 derived from `tradablePairs` via `tradableAssets()`; there's no separate asset
@@ -381,7 +456,8 @@ an indicator.
 src/
 ├── index.ts                 # brick 1-2 entry — build + print market context
 ├── decide.ts                # brick 3 entry — one decision wake-up
-├── config/index.ts          # pairs, timeframes, indicators, cache + decision tuning
+├── beat.ts                  # scheduler entry — one heartbeat (run a cycle if due)
+├── config/index.ts          # pairs, timeframes, indicators, cache + decision + scheduler tuning
 ├── exchanges/binance.ts     # public mainnet + authenticated testnet clients
 ├── market/
 │   ├── klines.ts            # candle + ticker fetch
@@ -393,7 +469,11 @@ src/
 │   ├── supabase.ts          # service-role client factory (null if unset)
 │   ├── athAtlCache.ts       # ATH/ATL seed / maintain / fallback logic
 │   ├── decisions.ts         # load recent + insert decision rows (resilient)
-│   └── executions.ts        # execution journal: derive ledger (booked intents) + insert rows
+│   ├── executions.ts        # execution journal: derive ledger (booked intents) + insert rows
+│   └── schedulerState.ts    # bot_state + scheduler_runs RPCs (heartbeat / claim / finish)
+├── scheduler/
+│   ├── policy.ts            # PURE logic: due/lock, missed beats, backoff, delays, overheating
+│   └── heartbeat.ts         # one beat: liveness → atomic claim → cycle → reschedule → release
 ├── portfolio/
 │   └── derive.ts            # derive the virtual portfolio + weighted-avg P&L from the journal
 ├── risk/
@@ -422,17 +502,20 @@ supabase/
     ├── 0002_decisions.sql                  # decision journal table + RLS
     ├── 0003_executions.sql                 # execution journal (virtual portfolio source of truth)
     ├── 0004_extend_decisions.sql           # bounded-allocation columns on decisions
-    └── 0005_executions_testnet_orders.sql  # four-state testnet execution (intent + execution rows)
+    ├── 0005_executions_testnet_orders.sql  # four-state testnet execution (intent + execution rows)
+    └── 0006_scheduler.sql                  # bot_state + scheduler_runs + claim/finish functions
 ```
 
 ## Coming next (not in this brick)
 
+- **Scheduler, next PRs.** This PR is the heartbeat core (state machine + atomic
+  claim + reschedule). Still to come: **alerting** (Telegram on a stale heartbeat /
+  overheating / repeated failures — the counters and `alert_sent` flag are already
+  maintained), an **external watchdog**, and the **Railway deploy** that wires the
+  5-min cron to `npm run beat`.
 - **Real money.** Mutate the ledger from the *real* fills (the step PR B
   deliberately stops short of: here the accounting stays driven by our own
-  calculation at real prices, and the testnet only proves executability).
-- Scheduler & run-lock: wake the bot on a cadence (using `applied_delay_minutes`),
-  guard against overlapping runs, and add fine idempotency (a `clientOrderId` per
-  order). For now there is no scheduler.
-- Real alerts (Telegram) and a dashboard. For now an alert is just a critical log
-  line.
-- More persistence: portfolio snapshots, bot state.
+  calculation at real prices, and the testnet only proves executability). This is
+  also when fine idempotency (a `clientOrderId` per order) graduates from
+  nice-to-have to required.
+- The false-`hold` prompt fix (a small standalone PR), and a dashboard.

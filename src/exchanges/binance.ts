@@ -1,5 +1,11 @@
 import { binance } from 'ccxt';
 
+// Per-request timeout (ms). Kept well under the scheduler's cycle budget
+// (config.scheduler.maxCycleSeconds): a cycle whose external calls hung past its
+// run-lock could be reclaimed by a parallel beat and double-book. ccxt does not
+// auto-retry, so the worst wall-time per call is bounded by this single timeout.
+const EXCHANGE_TIMEOUT_MS = 15_000;
+
 /**
  * Two distinct ccxt instances by design:
  *
@@ -17,6 +23,7 @@ import { binance } from 'ccxt';
 export function publicMainnetClient(): binance {
   return new binance({
     enableRateLimit: true,
+    timeout: EXCHANGE_TIMEOUT_MS,
     options: {
       defaultType: 'spot',
     },
@@ -38,6 +45,7 @@ export function testnetAccountClient(): binance {
     apiKey,
     secret,
     enableRateLimit: true,
+    timeout: EXCHANGE_TIMEOUT_MS,
     options: {
       defaultType: 'spot',
     },
