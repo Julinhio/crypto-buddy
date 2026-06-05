@@ -12,13 +12,21 @@ So far it has four bricks:
 2. A **Supabase persistence layer** — caches the rarely-changing ATH/ATL.
 3. An **LLM decision layer** — at each wake-up, sends the context to Claude,
    gets back a target allocation + reasoning, validates it, and journals it.
-4. An **execution layer — the economic brain (dry-run / paper trading)** —
-   the bot runs its own virtual portfolio valued at real prices, shows it to
-   the AI, bounds the AI's allocation to hard risk caps, and computes the
-   movements to get there. It journals **modeled** fills so the portfolio
-   evolves, but places **no real orders** yet (that's the next brick).
+4. An **execution layer — the economic brain** — the bot runs its own virtual
+   portfolio valued at real prices, shows it to the AI, bounds the AI's
+   allocation to hard risk caps, and computes the movements to get there.
+5. A **real testnet execution layer (PR B)** — between computing a movement and
+   journaling it, the bot now **places the real order on the Binance testnet** to
+   prove the movement is technically executable (filters OK, full technical path),
+   and traces **four distinct states**: what we *wanted*, what we *submitted*,
+   what the exchange *accepted*, and what actually *executed*. The testnet result
+   never touches the accounting — the ledger stays driven by our own calculation
+   at real prices.
 
-Still **no real orders**: the execution brick is paper trading only.
+The testnet is a **plumbing probe, not an accounting source of truth**: its
+prices decouple from the real market, its basket is inflated and it resets
+monthly. We book at real (mainnet) prices; the testnet only tells us whether an
+order is executable.
 
 ## What it does
 
@@ -198,12 +206,10 @@ risk", so the surplus always goes to **cash** (USDT), never to another coin:
 
 Caps are configurable per coin class in [`src/config/index.ts`](src/config/index.ts).
 
-**Dry-run movements.** The cycle computes the buys/sells to move from the
-current book to the bounded allocation, sized on equity at real prices, prints
-them, and journals them as modeled fills (`validation_status='executed'`,
-`exchange_*` null) so the portfolio evolves next cycle. **No Binance order is
-placed** — that, plus validation against the exchange's real filters
-(min-notional, lot size), is the next brick (PR B).
+**Movements.** The cycle computes the buys/sells to move from the current book to
+the bounded allocation, sized on equity at real prices. These movements are the
+**sovereign intention** — they decide *how much*, at real prices. The execution
+layer (PR B, below) is what turns each into a real testnet order.
 
 ### Applying the migrations
 
@@ -212,6 +218,80 @@ Paste each into the Supabase **SQL Editor** and **Run**, in order:
 journal) and
 [`0004_extend_decisions.sql`](supabase/migrations/0004_extend_decisions.sql)
 (the bounded-allocation columns). Both follow the same RLS-deny-all posture.
+
+## Real testnet execution (PR B — the plumbing to the exchange)
+
+Between computing a movement and journaling it, the bot now **places the real
+order on the Binance testnet**. The goal is not to make money on the testnet
+(its prices are bogus) — it's to **prove the order is executable** before real
+money: that it passes the exchange's filters and the full technical path.
+
+**The invariant is non-negotiable: the testnet never touches the accounting.**
+The sovereign ledger is booked at **real (mainnet) prices** from our own
+calculation, exactly as before. A testnet rejection, partial fill, or zero fill
+is *information*, traced but never booked.
+
+**Four states, made distinct and traceable.** The journal used to conflate them;
+now each is a separate, reconcilable fact:
+
+1. **Wanted** — the sovereign movement, sized at real prices (the intention).
+2. **Submitted** — what we managed to send to the testnet.
+3. **Accepted** — what the exchange validated (filters OK).
+4. **Executed** — what actually filled (full / partial / nothing).
+
+**Two events per movement, append-only, never rewritten** (see migration 0005):
+
+- An **`intent`** row — the **sovereign booking** (state 1). It carries the
+  `ledger_*` deltas and is the *only* row that moves the virtual portfolio. It is
+  written **before** the exchange call. Its `validation_status` records the
+  **authoritative** validation against the **real (mainnet)** filters:
+  `executed` (passed → booked), `rejected` (a *crumb* below the actionable
+  threshold → not booked), or `failed` (an unexpected block → not booked).
+- An **`execution`** row — the **testnet trace** (states 2-3-4). It is written
+  **after** the exchange responds, carries `ledger_* = 0` (never affects the
+  book), and links back to its intent via `intent_execution_id`.
+
+**Quantity.** We start from the sovereign quantity (computed at real prices) and
+only **snap it to the symbol's lot step** (`LOT_SIZE`). We *never* recompute a
+quantity from testnet prices — the sovereign world decides *how much*, the
+exchange only says whether that quantity is admissible. The tiny lot-rounding
+drift is an accepted operating tolerance.
+
+**Validation that has authority.** A movement is validated against the **real
+mainnet filters** (`LOT_SIZE`, and `NOTIONAL` min **and max**) using our
+**sovereign price** as the economic reference. This — and only this — gates the
+sovereign booking. The filters are read straight from the exchange's
+`exchangeInfo` (the authoritative source), not a derived abstraction. A movement
+above `maxNotional` is a clean **block** (not booked, no order) — never split.
+
+**Crumbs are a clean no-op.** A movement too small to clear the real min-notional
+(or that snaps to nothing) is **skipped**: logged, journaled as a non-booked
+intent, **no order, no error, no escalation**. The portfolio is left intact and
+the slight gap to target is carried to the next cycle — never forced into a retry
+loop.
+
+**Order type: marketable LIMIT, IOC.** We place a `LIMIT` (not a `MARKET`: a
+limit gives a clean, book-independent filter check) priced to **cross the testnet
+spread**, with `timeInForce: 'IOC'` (Immediate-Or-Cancel). It fills immediately
+against resting liquidity and cancels any remainder on the spot — so we always
+get an execution trace (full / partial / zero) and never leave a dangling order.
+The submitted price is derived from the **testnet** book (its
+`PERCENT_PRICE_BY_SIDE` band references the testnet price), while accounting uses
+the mainnet price.
+
+**Write order / crash safety.** Intent (durable) → order → trace. A crash between
+the writes is unambiguous and replayable: an intent with no trace means
+"wanted/booked, execution unknown", and the next cycle re-sizes from the
+already-updated book, so a movement is never double-booked and there is never a
+silent hole. The journal stays append-only and immutable.
+
+### Applying the migration
+
+Paste [`0005_executions_testnet_orders.sql`](supabase/migrations/0005_executions_testnet_orders.sql)
+into the Supabase **SQL Editor** and **Run**. It adds the `event_type`
+discriminator (defaulting existing PR A rows to booked `intent`s, so the
+portfolio derives identically) and the testnet-trace columns. RLS is already
+enabled on the table — nothing else to do.
 
 ## Setup
 
@@ -228,10 +308,11 @@ cp .env.example .env
 
 # 4. (Optional but recommended) Set up Supabase persistence and apply the
 #    migrations in order (SQL Editor → New query → Run):
-#    - 0001_ath_atl_cache.sql     (ATH/ATL cache)
-#    - 0002_decisions.sql         (decision journal)
-#    - 0003_executions.sql        (execution journal — virtual portfolio)
-#    - 0004_extend_decisions.sql  (bounded-allocation columns)
+#    - 0001_ath_atl_cache.sql              (ATH/ATL cache)
+#    - 0002_decisions.sql                  (decision journal)
+#    - 0003_executions.sql                 (execution journal — virtual portfolio)
+#    - 0004_extend_decisions.sql           (bounded-allocation columns)
+#    - 0005_executions_testnet_orders.sql  (four-state testnet execution journal)
 #    - add SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY to .env
 #    Without these, `npm start` still runs; `npm run decide` still decides and
 #    paper-trades but won't journal (the portfolio stays at 100% cash).
@@ -254,8 +335,12 @@ npm run decide    # bricks 3-4: one wake-up — decide, bound to caps, paper-tra
 `npm start` prints a formatted summary per pair, your testnet balances, then the
 raw JSON of the full context. `npm run decide` runs a full cycle: it prints the
 AI's proposed allocation and reasoning, then the **virtual portfolio**, the
-**risk-wrapper** result (proposed vs applied), and the **dry-run movements** it
-would make (journaled as modeled fills — no real order).
+**risk-wrapper** result (proposed vs applied), and the **real testnet execution**
+— per movement, what was booked and what the testnet did (the four states).
+
+> ⚠️ `npm run decide` now **places real orders on the Binance testnet** (fake
+> money, but a real exchange round-trip) and **calls the Anthropic API** (cost).
+> The sovereign accounting is never affected by the testnet result.
 
 ## Type check & tests
 
@@ -308,14 +393,17 @@ src/
 │   ├── supabase.ts          # service-role client factory (null if unset)
 │   ├── athAtlCache.ts       # ATH/ATL seed / maintain / fallback logic
 │   ├── decisions.ts         # load recent + insert decision rows (resilient)
-│   └── executions.ts        # execution journal: load ledger + insert modeled fills
+│   └── executions.ts        # execution journal: derive ledger (booked intents) + insert rows
 ├── portfolio/
 │   └── derive.ts            # derive the virtual portfolio + weighted-avg P&L from the journal
 ├── risk/
 │   └── clamp.ts             # risk wrapper: bound allocation to caps (surplus → cash)
 ├── execution/
-│   ├── movements.ts         # dry-run movement sizing + modeled fills
-│   └── print.ts             # portfolio / clamp / movements output
+│   ├── movements.ts         # movement sizing + the intent / rejected-intent / trace row builders
+│   ├── symbolRules.ts       # authoritative exchange filters: load + snap qty/price + validate
+│   ├── testnetOrder.ts      # place a marketable LIMIT IOC on the testnet, normalize the result
+│   ├── execute.ts           # per-movement: snap → validate → book intent → order → trace
+│   └── print.ts             # portfolio / clamp / four-state execution output
 ├── context/
 │   ├── build.ts             # assembles MarketContext
 │   └── print.ts             # human-readable context output
@@ -325,22 +413,26 @@ src/
     ├── context.ts           # decision context: portfolio in place of testnet balances
     ├── llm.ts               # Anthropic client, structured call, token/latency capture
     ├── gitSha.ts            # commit SHA for traceability (env → git → null)
-    ├── decide.ts            # orchestrator: derive → decide → clamp → movements → journal
+    ├── decide.ts            # orchestrator: derive → decide → clamp → movements → execute
     └── print.ts             # human-readable decision output
 
 supabase/
 └── migrations/
-    ├── 0001_ath_atl_cache.sql     # versioned cache table + RLS
-    ├── 0002_decisions.sql         # decision journal table + RLS
-    ├── 0003_executions.sql        # execution journal (virtual portfolio source of truth)
-    └── 0004_extend_decisions.sql  # bounded-allocation columns on decisions
+    ├── 0001_ath_atl_cache.sql              # versioned cache table + RLS
+    ├── 0002_decisions.sql                  # decision journal table + RLS
+    ├── 0003_executions.sql                 # execution journal (virtual portfolio source of truth)
+    ├── 0004_extend_decisions.sql           # bounded-allocation columns on decisions
+    └── 0005_executions_testnet_orders.sql  # four-state testnet execution (intent + execution rows)
 ```
 
 ## Coming next (not in this brick)
 
-- **PR B — real execution.** Place the movements as real testnet orders, fill
-  the `exchange_*` columns with the real fill, and validate against the
-  exchange's filters (min-notional, lot size) before placing.
-- Scheduler: wake the bot on a cadence (using `applied_delay_minutes`) and send
-  real alerts (Telegram). For now an alert is just a critical log line.
+- **Real money.** Mutate the ledger from the *real* fills (the step PR B
+  deliberately stops short of: here the accounting stays driven by our own
+  calculation at real prices, and the testnet only proves executability).
+- Scheduler & run-lock: wake the bot on a cadence (using `applied_delay_minutes`),
+  guard against overlapping runs, and add fine idempotency (a `clientOrderId` per
+  order). For now there is no scheduler.
+- Real alerts (Telegram) and a dashboard. For now an alert is just a critical log
+  line.
 - More persistence: portfolio snapshots, bot state.

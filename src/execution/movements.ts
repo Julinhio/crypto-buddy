@@ -1,6 +1,7 @@
 import { Decimal, ONE, ZERO } from '../money.js';
 import type { VirtualPortfolio, PriceLookup } from '../portfolio/derive.js';
 import type { ExecutionInsert } from '../persistence/executions.js';
+import type { OrderResult } from './testnetOrder.js';
 
 export interface Movement {
   symbol: string; // trading pair, e.g. 'BTC/USDT'
@@ -117,38 +118,135 @@ export function computeMovements(
   return movements;
 }
 
+// Shared empty testnet-trace fields for an intent row (states 2-4 live on the
+// separate execution row, written after the exchange responds).
+const NO_TRACE = {
+  submitted_qty: null,
+  submitted_price: null,
+  time_in_force: null,
+  exchange_avg_price: null,
+  execution_outcome: null,
+  exchange_order_id: null,
+  exchange_status: null,
+  exchange_error_code: null,
+  raw_response: null,
+} as const;
+
 /**
- * Turns this cycle's movements into MODELED-fill journal rows (paper trading):
- * the wanted qty, fully filled at the real price, with the modeled fee. No
- * exchange order is placed — the exchange_* columns stay null until PR B.
+ * The SOVEREIGN booking row (event_type='intent', state 1 = "wanted") for a
+ * movement that passed the real (mainnet) validation. The book is mutated by the
+ * SNAPPED quantity at the SOVEREIGN price with the MODELED fee — the testnet
+ * never enters here. Written BEFORE the exchange call so the intention is durable.
+ *
+ * notional/fee are recomputed from the snapped qty (not the pre-snap movement)
+ * so the booked qty, value and fee stay internally consistent. Snapping only ever
+ * trims the qty down, so the cash-floor guarantee from sizing holds a fortiori.
  */
-export function toModeledFills(
-  movements: Movement[],
+export function bookedIntent(
+  m: Movement,
+  snappedQty: Decimal,
   decisionId: number,
   priceSource: string,
-): ExecutionInsert[] {
-  return movements.map((m) => {
-    const isBuy = m.side === 'buy';
-    return {
-      decision_id: decisionId,
-      symbol: m.symbol,
-      side: m.side,
-      requested_qty: m.qty,
-      rounded_qty: m.qty, // no exchange step rounding in PR A
-      executed_qty: m.qty, // modeled full fill
-      valuation_price: m.price,
-      price_source: priceSource,
-      fee: m.fee,
-      // Ledger effect: buy removes (notional + fee) cash and adds qty; sell adds
-      // (notional − fee) cash and removes qty.
-      ledger_base_delta: isBuy ? m.qty : m.qty.neg(),
-      ledger_quote_delta: isBuy ? m.notional.plus(m.fee).neg() : m.notional.minus(m.fee),
-      validation_status: 'executed',
-      validation_reason: 'modeled fill (paper trading; no exchange order placed)',
-      exchange_order_id: null,
-      exchange_status: null,
-      exchange_error_code: null,
-      raw_response: null,
-    };
-  });
+  feePercent: number,
+): ExecutionInsert {
+  const isBuy = m.side === 'buy';
+  const notional = snappedQty.times(m.price);
+  const fee = notional.times(new Decimal(feePercent).div(100));
+  return {
+    decision_id: decisionId,
+    event_type: 'intent',
+    intent_execution_id: null,
+    symbol: m.symbol,
+    side: m.side,
+    requested_qty: m.qty,
+    rounded_qty: snappedQty,
+    executed_qty: snappedQty, // the sovereign booked qty — the book moves by this
+    valuation_price: m.price,
+    price_source: priceSource,
+    fee,
+    // Ledger effect: buy removes (notional + fee) cash and adds qty; sell adds
+    // (notional − fee) cash and removes qty.
+    ledger_base_delta: isBuy ? snappedQty : snappedQty.neg(),
+    ledger_quote_delta: isBuy ? notional.plus(fee).neg() : notional.minus(fee),
+    validation_status: 'executed',
+    validation_reason: 'sovereign booking — passed the real (mainnet) order filters',
+    ...NO_TRACE,
+  };
+}
+
+/**
+ * A NON-booked intent row: the movement was inadmissible against the real
+ * filters, so the ledger is left intact (deltas = 0) and no order is sent.
+ *   - status='rejected' → a crumb (below the actionable threshold): a clean no-op.
+ *   - status='failed'   → an unexpected block (e.g. qty above maxQty).
+ * Journaling it keeps "what the AI wanted but we couldn't do" in the audit trail.
+ */
+export function rejectedIntent(
+  m: Movement,
+  snappedQty: Decimal,
+  decisionId: number,
+  priceSource: string,
+  status: 'rejected' | 'failed',
+  reason: string,
+): ExecutionInsert {
+  return {
+    decision_id: decisionId,
+    event_type: 'intent',
+    intent_execution_id: null,
+    symbol: m.symbol,
+    side: m.side,
+    requested_qty: m.qty,
+    rounded_qty: snappedQty,
+    executed_qty: ZERO, // nothing booked
+    valuation_price: m.price,
+    price_source: priceSource,
+    fee: ZERO,
+    ledger_base_delta: ZERO, // the book is NOT touched
+    ledger_quote_delta: ZERO,
+    validation_status: status,
+    validation_reason: reason,
+    ...NO_TRACE,
+  };
+}
+
+/**
+ * The TESTNET trace row (event_type='execution', states 2-3-4 = submitted /
+ * accepted / executed) for a booked intent. It NEVER affects the ledger
+ * (ledger_* = 0) — the partial/zero/rejected testnet result is information only.
+ * Links back to its intent via intent_execution_id. Written AFTER the exchange
+ * responds.
+ */
+export function executionTrace(
+  m: Movement,
+  snappedQty: Decimal,
+  intentId: number,
+  decisionId: number,
+  result: OrderResult,
+): ExecutionInsert {
+  return {
+    decision_id: decisionId,
+    event_type: 'execution',
+    intent_execution_id: intentId,
+    symbol: m.symbol,
+    side: m.side,
+    requested_qty: m.qty, // the sovereign qty (NOT NULL column); context for the trace
+    rounded_qty: snappedQty,
+    executed_qty: result.executedQty, // the REAL testnet fill
+    valuation_price: m.price, // carry the sovereign price (NOT NULL; the testnet price is bogus)
+    price_source: 'binance-testnet-order',
+    fee: ZERO, // the modeled fee lives on the intent; the testnet fee is not booked
+    ledger_base_delta: ZERO, // a trace NEVER moves the book
+    ledger_quote_delta: ZERO,
+    validation_status: null, // execution rows use execution_outcome, not validation_status
+    validation_reason: null,
+    submitted_qty: result.submittedQty,
+    submitted_price: result.submittedPrice,
+    time_in_force: result.timeInForce,
+    exchange_avg_price: result.avgPrice,
+    execution_outcome: result.outcome,
+    exchange_order_id: result.orderId,
+    exchange_status: result.status,
+    exchange_error_code: result.errorCode,
+    raw_response: result.raw,
+  };
 }

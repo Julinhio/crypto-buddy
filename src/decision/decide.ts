@@ -7,7 +7,7 @@ import {
   loadRecentDecisions,
   type DecisionRow,
 } from '../persistence/decisions.js';
-import { loadLedger, insertExecutions } from '../persistence/executions.js';
+import { loadLedger } from '../persistence/executions.js';
 import { derivePortfolio, type VirtualPortfolio } from '../portfolio/derive.js';
 import {
   buildPriceLookup,
@@ -15,7 +15,13 @@ import {
   type DecisionContext,
 } from './context.js';
 import { clampAllocation, type ClampResult } from '../risk/clamp.js';
-import { computeMovements, toModeledFills, type Movement } from '../execution/movements.js';
+import { computeMovements, type Movement } from '../execution/movements.js';
+import {
+  executeMovements,
+  emptyExecutionSummary,
+  type ExecutionSummary,
+} from '../execution/execute.js';
+import { publicMainnetClient, testnetAccountClient } from '../exchanges/binance.js';
 import { allocatableUniverse, reserveStables, validateDecision } from './schema.js';
 import { buildSystemPrompt, buildUserPrompt, PROMPT_VERSION } from './prompt.js';
 import { assertAnthropicConfigured, resolveModel, runDecision, type LlmResult } from './llm.js';
@@ -30,19 +36,22 @@ export interface DecideResult {
   portfolio: VirtualPortfolio | null;
   /** The risk-wrapper result (only on a decided cycle). */
   clamp: ClampResult | null;
-  /** Dry-run movements computed to reach the bounded allocation. */
+  /** Movements computed to reach the bounded allocation. */
   movements: Movement[];
-  /** How many modeled fills were journaled (paper trading). */
-  executionsWritten: number;
+  /** The real testnet execution outcome (null on a non-decided / unpersisted cycle). */
+  execution: ExecutionSummary | null;
 }
 
 /**
- * One wake-up of the economic brain (PR A — dry-run / paper trading):
+ * One wake-up of the economic brain (PR B — real testnet execution):
  *   1. read the market, derive the VIRTUAL portfolio from the execution journal
  *   2. show that portfolio (not the testnet basket) to the AI, get a target
  *   3. bound it to the risk caps (surplus → cash), journal the decision
- *   4. compute the movements to reach it, journal them as MODELED fills
- * No Binance order is placed. The portfolio evolves from the modeled fills.
+ *   4. compute the movements to reach it, then for each: validate against the
+ *      REAL (mainnet) filters, book the sovereign intent, place a real testnet
+ *      LIMIT IOC order, and journal its result as a trace.
+ * The portfolio still evolves from OUR booking at real prices — the testnet fill
+ * (partial / zero / rejected) is traced but never touches the sovereign ledger.
  */
 export async function decide(): Promise<DecideResult> {
   assertAnthropicConfigured();
@@ -158,7 +167,7 @@ export async function decide(): Promise<DecideResult> {
   });
   const { persisted, id } = await insertDecision(supabase, row);
 
-  // Dry-run: the movements to reach the bounded allocation, sized on the book.
+  // The movements to reach the bounded allocation, sized on the book at real prices.
   const movements = computeMovements(
     portfolio,
     clamp.applied,
@@ -166,16 +175,31 @@ export async function decide(): Promise<DecideResult> {
     config.execution.feePercent,
   );
 
-  // Paper trading: journal the modeled fills so the portfolio evolves next
-  // cycle. Needs the decision id as FK — skip (and warn) if it wasn't persisted.
-  let executionsWritten = 0;
-  if (id != null) {
-    const fills = toModeledFills(movements, id, context.source.marketData);
-    executionsWritten = await insertExecutions(supabase, fills);
-  } else if (movements.length > 0) {
-    console.warn(
-      '[warn] decision not persisted — modeled fills NOT journaled (portfolio will not evolve).',
-    );
+  // Real execution. Each booking needs the decision id as FK and a durable home,
+  // so without a persisted decision we place nothing (the book can't evolve).
+  let execution: ExecutionSummary | null = null;
+  if (id == null) {
+    if (movements.length > 0) {
+      console.warn(
+        '[warn] decision not persisted — movements NOT executed (no order without a durable booking; portfolio will not evolve).',
+      );
+    }
+  } else if (movements.length === 0) {
+    execution = emptyExecutionSummary(); // already at target — nothing to do
+  } else {
+    // The reserve the risk wrapper wants kept in cash — used to size buys on the
+    // cash REALLY available after the (down-)snapped sells, so the floor holds.
+    const targetReserve = portfolio.equity.times(clamp.applied[reserveStable] ?? 0).div(100);
+    execution = await executeMovements(movements, {
+      decisionId: id,
+      supabase,
+      publicClient: publicMainnetClient(),
+      testnetClient: testnetAccountClient(),
+      priceSource: context.source.marketData,
+      feePercent: config.execution.feePercent,
+      cash: portfolio.cash,
+      targetReserve,
+    });
   }
 
   return {
@@ -186,7 +210,7 @@ export async function decide(): Promise<DecideResult> {
     portfolio,
     clamp,
     movements,
-    executionsWritten,
+    execution,
   };
 }
 
@@ -205,7 +229,7 @@ function emptyResult(
     portfolio,
     clamp: null,
     movements: [],
-    executionsWritten: 0,
+    execution: null,
   };
 }
 
