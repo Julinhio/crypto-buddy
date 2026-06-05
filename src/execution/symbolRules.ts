@@ -22,8 +22,9 @@ export interface SymbolRules {
   maxQty: Decimal; // 0 = no max
   // PRICE_FILTER
   tickSize: Decimal;
-  // NOTIONAL / MIN_NOTIONAL — the "actionable threshold" for a LIMIT order
+  // NOTIONAL / MIN_NOTIONAL — the actionable range for a LIMIT order
   minNotional: Decimal; // 0 = no min
+  maxNotional: Decimal; // 0 = no max
   // PERCENT_PRICE_BY_SIDE (price band, relative to the reference price)
   bidMultiplierUp: Decimal | null;
   bidMultiplierDown: Decimal | null;
@@ -83,6 +84,10 @@ export async function loadSymbolRules(client: Exchange, symbol: string): Promise
     maxQty: decOr(lot?.maxQty, ZERO),
     tickSize: decOr(price?.tickSize, ZERO),
     minNotional: decOr(notional?.minNotional, ZERO),
+    // For a LIMIT order, price*qty must also be <= maxNotional (the apply* flags
+    // gate MARKET orders only; LIMIT enforces both bounds). Absent on legacy
+    // MIN_NOTIONAL symbols → 0 = no max.
+    maxNotional: decOr(notional?.maxNotional, ZERO),
     bidMultiplierUp: decOrNull(pct?.bidMultiplierUp),
     bidMultiplierDown: decOrNull(pct?.bidMultiplierDown),
     askMultiplierUp: decOrNull(pct?.askMultiplierUp),
@@ -148,6 +153,15 @@ export function validateMovement(
     return {
       kind: 'block',
       reason: `qty ${snappedQty.toString()} > maxQty ${rules.maxQty.toString()} (LOT_SIZE)`,
+    };
+  }
+  // maxNotional: the exchange would reject an order whose notional exceeds the cap,
+  // so booking it would put the book ahead of an inexecutable order. A clean block
+  // (no split into multiple orders at our scale).
+  if (rules.maxNotional.gt(0) && notional.gt(rules.maxNotional)) {
+    return {
+      kind: 'block',
+      reason: `notional ${notional.toFixed(2)} > maxNotional ${rules.maxNotional.toString()}`,
     };
   }
   return { kind: 'ok' };
