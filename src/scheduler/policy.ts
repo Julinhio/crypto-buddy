@@ -118,3 +118,28 @@ export function nextFloorStreak(
   if (outcome !== 'decided') return prev;
   return appliedDelayMinutes != null && appliedDelayMinutes <= floorMinutes ? prev + 1 : 0;
 }
+
+/** The debounce verdict for one alert trigger: fire now? and the flag to persist. */
+export interface AlertDecision {
+  /** Send the alert on THIS beat — true only when crossing UP (not already sent). */
+  fire: boolean;
+  /** The debounce flag to persist: armed (true) while at/above, re-armed (false) below. */
+  sent: boolean;
+}
+
+/**
+ * Per-trigger alert debounce, as a pure function (this is the load-bearing
+ * anti-spam logic, proven offline here and live by the debounce-check script):
+ *
+ *   - fire ONCE on the crossing: at/above the threshold AND not already sent;
+ *   - stay SILENT while it remains at/above (already sent);
+ *   - RE-ARM (sent → false) once it drops back below the threshold.
+ *
+ * Both scheduler counters only ever climb (+1) or reset to 0, so "drops below
+ * threshold" coincides with "back to 0" — the brief's wording. The two triggers
+ * are evaluated INDEPENDENTLY (one call each) so neither can mask the other.
+ */
+export function evaluateAlert(value: number, threshold: number, prevSent: boolean): AlertDecision {
+  const atOrAbove = value >= threshold;
+  return { fire: atOrAbove && !prevSent, sent: atOrAbove };
+}

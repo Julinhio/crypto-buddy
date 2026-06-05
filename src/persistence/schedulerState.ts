@@ -10,7 +10,9 @@ export interface BotState {
   lastSuccessAt: string | null;
   consecutiveFailures: number;
   floorDelayStreak: number;
-  alertSent: boolean;
+  /** Debounce flags (one per trigger) — the pre-cycle snapshot the heartbeat reads. */
+  floorAlertSent: boolean;
+  failureAlertSent: boolean;
 }
 
 /** What `claim_due_run` returns on a successful (atomic) claim. */
@@ -33,6 +35,9 @@ export interface FinishRunParams {
   decisionId: number | null;
   missedBeats: number;
   detail: string | null;
+  /** Debounce flags to persist (computed post-cycle by the pure policy). */
+  floorAlertSent: boolean;
+  failureAlertSent: boolean;
 }
 
 function toBotState(row: Record<string, unknown>): BotState {
@@ -44,7 +49,8 @@ function toBotState(row: Record<string, unknown>): BotState {
     lastSuccessAt: (row.last_success_at as string | null) ?? null,
     consecutiveFailures: Number(row.consecutive_failures ?? 0),
     floorDelayStreak: Number(row.floor_delay_streak ?? 0),
-    alertSent: Boolean(row.alert_sent ?? false),
+    floorAlertSent: Boolean(row.floor_alert_sent ?? false),
+    failureAlertSent: Boolean(row.failure_alert_sent ?? false),
   };
 }
 
@@ -118,6 +124,8 @@ export async function finishRun(supabase: SupabaseClient, p: FinishRunParams): P
     p_decision_id: p.decisionId,
     p_missed_beats: p.missedBeats,
     p_detail: p.detail,
+    p_floor_alert_sent: p.floorAlertSent,
+    p_failure_alert_sent: p.failureAlertSent,
   });
   if (error) throw new Error(`finish_run RPC failed: ${error.message}`);
   return data === true;

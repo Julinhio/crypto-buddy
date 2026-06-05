@@ -10,8 +10,10 @@ import {
   backoffMinutes,
   nextDelayMinutes,
   nextFloorStreak,
+  evaluateAlert,
   type CycleStatus,
 } from '../scheduler/policy.js';
+import { formatAlert } from '../alerting/messages.js';
 import {
   recordHeartbeat,
   claimDueRun,
@@ -90,6 +92,33 @@ ok('floor streak resets above the floor', nextFloorStreak(2, 'decided', 60, 15) 
 ok('floor streak untouched on skip', nextFloorStreak(2, 'skip', null, 15) === 2);
 ok('floor streak untouched on error', nextFloorStreak(2, 'error', null, 15) === 2);
 
+// ── Alert debounce (pure): fire ONCE on the crossing, silent while above, re-arm
+//    below; the two triggers are independent. The LIVE DB round-trip + independence
+//    is proven by `npm run alerting:debounce-check`; this is the offline logic. ──
+console.log('\nAlert debounce (per-trigger anti-spam):');
+ok('no fire below threshold', evaluateAlert(2, 3, false).fire === false);
+ok('flag stays re-armed below threshold', evaluateAlert(2, 3, false).sent === false);
+ok('fires on the crossing (not yet sent)', evaluateAlert(3, 3, false).fire === true);
+ok('arms the flag on the crossing', evaluateAlert(3, 3, false).sent === true);
+ok('silent while above (already sent)', evaluateAlert(4, 3, true).fire === false);
+ok('flag stays armed while above', evaluateAlert(4, 3, true).sent === true);
+ok('no fire on the re-arming beat', evaluateAlert(0, 3, true).fire === false);
+ok('re-arms when it drops back to 0', evaluateAlert(0, 3, true).sent === false);
+ok('fires again on a re-cross after re-arm', evaluateAlert(3, 3, false).fire === true);
+
+// ── Alert message: names the trigger + counter value + timestamp; the last error
+//    rides only on the degraded alert, and a huge error is truncated. ──
+console.log('\nAlert message formatting:');
+const ats = '2026-06-05T17:30:00.000Z';
+const heat = formatAlert({ trigger: 'overheating', value: 10, timestamp: ats });
+ok('overheating carries trigger + value + timestamp', heat.includes('EMBALLEMENT') && heat.includes('floor_delay_streak = 10') && heat.includes(ats));
+ok('overheating has no error line', !heat.includes('Dernière erreur'));
+const degr = formatAlert({ trigger: 'degraded', value: 3, timestamp: ats, lastError: 'cycle threw: kaboom' });
+ok('degraded carries trigger + value + timestamp', degr.includes('DÉGRADÉ') && degr.includes('consecutive_failures = 3') && degr.includes(ats));
+ok('degraded includes the last error when present', degr.includes('kaboom'));
+ok('degraded states unavailable when no error', formatAlert({ trigger: 'degraded', value: 3, timestamp: ats, lastError: null }).includes('non disponible'));
+ok('degraded truncates a huge error', formatAlert({ trigger: 'degraded', value: 3, timestamp: ats, lastError: 'x'.repeat(2000) }).includes('[truncated]'));
+
 // ── Error propagation: an infra fault must THROW (→ non-zero exit), while a genuine
 //    business result stays null/false. (No real network — a fake rpc() client.) ──
 console.log('\nScheduler infra-error propagation (cron monitoring depends on the exit code):');
@@ -112,6 +141,7 @@ async function okResolves(label: string, p: Promise<unknown>, expected: unknown)
 const fp: FinishRunParams = {
   runToken: 'tok', runId: 1, delayMinutes: 30, consecutiveFailures: 0, floorDelayStreak: 0,
   succeeded: true, outcome: 'decided', decisionId: null, missedBeats: 0, detail: null,
+  floorAlertSent: false, failureAlertSent: false,
 };
 const claimRow = { run_id: 7, prev_next_check_at: null, db_now: '2024-01-01T00:00:00Z', consecutive_failures: 1, floor_delay_streak: 2 };
 
