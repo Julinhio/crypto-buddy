@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   isDue,
   isLockLive,
@@ -10,6 +11,13 @@ import {
   nextDelayMinutes,
   nextFloorStreak,
 } from '../scheduler/policy.js';
+import {
+  recordHeartbeat,
+  claimDueRun,
+  finishRun,
+  type FinishRunParams,
+} from '../persistence/schedulerState.js';
+import { runHeartbeat } from '../scheduler/heartbeat.js';
 
 /**
  * Scheduler policy test — run via `npm test` (tsx). No framework, no network, no
@@ -79,5 +87,47 @@ ok('floor streak increments at the 15-min floor', nextFloorStreak(2, 'decided', 
 ok('floor streak resets above the floor', nextFloorStreak(2, 'decided', 60, 15) === 0);
 ok('floor streak untouched on skip', nextFloorStreak(2, 'skip', null, 15) === 2);
 ok('floor streak untouched on error', nextFloorStreak(2, 'error', null, 15) === 2);
+
+// ── Error propagation: an infra fault must THROW (→ non-zero exit), while a genuine
+//    business result stays null/false. (No real network — a fake rpc() client.) ──
+console.log('\nScheduler infra-error propagation (cron monitoring depends on the exit code):');
+
+const rpc = (data: unknown, error: unknown = null): SupabaseClient =>
+  ({ rpc: async () => ({ data, error }) }) as unknown as SupabaseClient;
+const rpcError = (): SupabaseClient => rpc(null, { message: 'db down' });
+
+async function okThrows(label: string, p: Promise<unknown>): Promise<void> {
+  await assert.rejects(p);
+  console.log(`  ok: ${label}`);
+  passed += 1;
+}
+async function okResolves(label: string, p: Promise<unknown>, expected: unknown): Promise<void> {
+  assert.deepEqual(await p, expected);
+  console.log(`  ok: ${label}`);
+  passed += 1;
+}
+
+const fp: FinishRunParams = {
+  runToken: 'tok', runId: 1, delayMinutes: 30, consecutiveFailures: 0, floorDelayStreak: 0,
+  succeeded: true, outcome: 'decided', decisionId: null, missedBeats: 0, detail: null,
+};
+const claimRow = { run_id: 7, prev_next_check_at: null, db_now: '2024-01-01T00:00:00Z', consecutive_failures: 1, floor_delay_streak: 2 };
+
+// recordHeartbeat: throws on RPC error and on a missing singleton; ok otherwise.
+await okThrows('recordHeartbeat throws on an RPC error', recordHeartbeat(rpcError()));
+await okThrows('recordHeartbeat throws on a missing bot_state row', recordHeartbeat(rpc(null)));
+
+// claimDueRun: throws on RPC error; null ONLY when the RPC ran but didn't claim.
+await okThrows('claimDueRun throws on an RPC error', claimDueRun(rpcError(), 'tok', 600));
+await okResolves('claimDueRun → null only when not claimed (not due / locked)', claimDueRun(rpc([]), 'tok', 600), null);
+ok('claimDueRun maps a claimed row', (await claimDueRun(rpc([claimRow]), 'tok', 600))?.runId === 7);
+
+// finishRun: throws on RPC error; true/false are the real results (false = fencing).
+await okThrows('finishRun throws on an RPC error', finishRun(rpcError(), fp));
+await okResolves('finishRun → true when the RPC reports success', finishRun(rpc(true), fp), true);
+await okResolves('finishRun → false ONLY for the fencing case', finishRun(rpc(false), fp), false);
+
+// Orchestrator: an unconfigured Supabase client is a config error → throw, not no-op.
+await okThrows('runHeartbeat throws when Supabase is unconfigured', runHeartbeat({ supabase: null }));
 
 console.log(`\n${passed} scheduler checks passed.`);
