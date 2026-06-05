@@ -187,6 +187,9 @@ export async function decide(): Promise<DecideResult> {
   } else if (movements.length === 0) {
     execution = emptyExecutionSummary(); // already at target — nothing to do
   } else {
+    // The reserve the risk wrapper wants kept in cash — used to size buys on the
+    // cash REALLY available after the (down-)snapped sells, so the floor holds.
+    const targetReserve = portfolio.equity.times(clamp.applied[reserveStable] ?? 0).div(100);
     execution = await executeMovements(movements, {
       decisionId: id,
       supabase,
@@ -194,6 +197,8 @@ export async function decide(): Promise<DecideResult> {
       testnetClient: testnetAccountClient(),
       priceSource: context.source.marketData,
       feePercent: config.execution.feePercent,
+      cash: portfolio.cash,
+      targetReserve,
     });
   }
 
