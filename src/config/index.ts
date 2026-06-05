@@ -86,6 +86,28 @@ export interface ExecutionConfig {
   coinClass: Record<string, CoinClass>;
 }
 
+/**
+ * Scheduler (heartbeat) tuning. A fixed external cron beats the entry point every
+ * `beatIntervalMinutes`; the state machine turns that into a variable cadence.
+ *
+ * The load-bearing safety relation is `lockTtlSeconds > maxCycleSeconds`: the lock
+ * must outlive the WORST-case cycle (slow LLM call included), otherwise a
+ * slow-but-alive run could see its lock expire and a parallel beat reclaim it,
+ * running a SECOND concurrent cycle. The fencing token stops state corruption, not
+ * two concurrent executions — so we bound the external calls (see binance.ts /
+ * llm.ts timeouts) AND keep the lock longer than the declared cycle budget.
+ */
+export interface SchedulerConfig {
+  /** The external cron cadence, in minutes (used for missed-beat accounting). */
+  beatIntervalMinutes: number;
+  /** Declared worst-case cycle budget. MUST stay above the sum of external timeouts. */
+  maxCycleSeconds: number;
+  /** Run-lock TTL. MUST exceed maxCycleSeconds so a live run never loses its lock. */
+  lockTtlSeconds: number;
+  /** Reschedule delay after a soft skip (no usable data / nothing actionable). */
+  softSkipDelayMinutes: number;
+}
+
 export interface AppConfig {
   tradablePairs: string[];
   referencePairs: string[];
@@ -97,6 +119,7 @@ export interface AppConfig {
   cache: CacheConfig;
   decision: DecisionConfig;
   execution: ExecutionConfig;
+  scheduler: SchedulerConfig;
 }
 
 /** Reads a numeric env var, falling back to `fallback` when unset/blank/non-finite. */
@@ -159,6 +182,18 @@ export const config: AppConfig = {
     },
     coinClass: { BTC: 'big', ETH: 'big' },
   },
+
+  scheduler: {
+    // Railway's native cron beats every 5 min (wired in the deploy PR).
+    beatIntervalMinutes: 5,
+    // Worst-case cycle budget. The external timeouts (binance.ts ~15s/req,
+    // llm.ts 60s × 1 retry) keep a real cycle well under this; lockTtl exceeds it.
+    maxCycleSeconds: 300,
+    lockTtlSeconds: 600,
+    // Soft skip → a modest fixed retry; backoff (hard errors) reuses the decision
+    // delay bounds (min 15 / max 240).
+    softSkipDelayMinutes: 30,
+  },
 };
 
 /** Risk class for a coin (defaults to 'small' — shorter leash — when unlisted). */
@@ -196,6 +231,36 @@ function validateExecutionConfig(cfg: ExecutionConfig): void {
 }
 
 validateExecutionConfig(config.execution);
+
+/**
+ * Fails fast on an unsafe scheduler config. The critical invariant is
+ * `lockTtlSeconds > maxCycleSeconds`: if the lock could expire before the worst
+ * cycle finishes, a parallel beat would reclaim it and run a second concurrent
+ * cycle (the fencing token prevents state corruption, not double execution).
+ */
+function validateSchedulerConfig(cfg: SchedulerConfig): void {
+  const problems: string[] = [];
+  if (!(cfg.beatIntervalMinutes > 0)) {
+    problems.push(`beatIntervalMinutes must be > 0 (got ${cfg.beatIntervalMinutes})`);
+  }
+  if (!(cfg.maxCycleSeconds > 0)) {
+    problems.push(`maxCycleSeconds must be > 0 (got ${cfg.maxCycleSeconds})`);
+  }
+  if (!(cfg.lockTtlSeconds > cfg.maxCycleSeconds)) {
+    problems.push(
+      `lockTtlSeconds (${cfg.lockTtlSeconds}) must exceed maxCycleSeconds (${cfg.maxCycleSeconds}) ` +
+        `so a slow-but-alive run never loses its lock to a parallel beat`,
+    );
+  }
+  if (!(cfg.softSkipDelayMinutes > 0)) {
+    problems.push(`softSkipDelayMinutes must be > 0 (got ${cfg.softSkipDelayMinutes})`);
+  }
+  if (problems.length > 0) {
+    throw new Error(`Invalid scheduler config: ${problems.join('; ')}`);
+  }
+}
+
+validateSchedulerConfig(config.scheduler);
 
 /**
  * Assets worth tracking in balances: every side of every tradable pair,

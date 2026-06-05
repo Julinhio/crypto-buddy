@@ -6,6 +6,14 @@ import { buildDecisionSchema, type DecisionOutput } from './schema.js';
 // Memoized client.
 let client: Anthropic | null = null;
 
+// Bound the LLM call well under the scheduler's cycle budget
+// (config.scheduler.maxCycleSeconds). A run that outlives its lock could be
+// reclaimed by a parallel beat and run a second concurrent cycle, so external
+// calls MUST stay bounded: `timeout` caps one attempt, `maxRetries` the multiplier
+// (worst ≈ timeout × (1 + retries) ≈ 120s, comfortably under the 300s budget).
+const LLM_TIMEOUT_MS = 60_000;
+const LLM_MAX_RETRIES = 1;
+
 const MISSING_KEY_MESSAGE =
   'Missing ANTHROPIC_API_KEY — set it in .env to run the decision layer. ' +
   'This is a configuration error to fix before running (the LLM is the brain of the bot).';
@@ -28,7 +36,7 @@ function getClient(): Anthropic {
   if (!apiKey) throw new Error(MISSING_KEY_MESSAGE);
   // Pass the trimmed key explicitly so accidental surrounding whitespace in
   // .env doesn't slip through to the API as a malformed credential.
-  client = new Anthropic({ apiKey });
+  client = new Anthropic({ apiKey, timeout: LLM_TIMEOUT_MS, maxRetries: LLM_MAX_RETRIES });
   return client;
 }
 
