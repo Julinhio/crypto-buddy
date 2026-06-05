@@ -10,6 +10,7 @@ import {
   backoffMinutes,
   nextDelayMinutes,
   nextFloorStreak,
+  type CycleStatus,
 } from '../scheduler/policy.js';
 import {
   recordHeartbeat,
@@ -17,7 +18,8 @@ import {
   finishRun,
   type FinishRunParams,
 } from '../persistence/schedulerState.js';
-import { runHeartbeat } from '../scheduler/heartbeat.js';
+import { runHeartbeat, runCycleWithTimeout } from '../scheduler/heartbeat.js';
+import type { DecideResult } from '../decision/decide.js';
 
 /**
  * Scheduler policy test — run via `npm test` (tsx). No framework, no network, no
@@ -129,5 +131,28 @@ await okResolves('finishRun → false ONLY for the fencing case', finishRun(rpc(
 
 // Orchestrator: an unconfigured Supabase client is a config error → throw, not no-op.
 await okThrows('runHeartbeat throws when Supabase is unconfigured', runHeartbeat({ supabase: null }));
+
+// ── Hard cycle timeout: bounds decide() under maxCycleSeconds → technical error → backoff ──
+console.log('\nScheduler cycle timeout (the catch-all that keeps the lock from expiring mid-cycle):');
+
+const fakeResult = (status: CycleStatus, appliedDelay: number | null): DecideResult =>
+  ({ status, decisionId: null, row: { applied_delay_minutes: appliedDelay } }) as unknown as DecideResult;
+
+const fast = await runCycleWithTimeout(() => Promise.resolve(fakeResult('decided', 60)), 1000);
+ok('a cycle within budget keeps its real status', fast.status === 'decided' && fast.appliedDelayMinutes === 60);
+
+const slow = await runCycleWithTimeout(
+  () => new Promise<DecideResult>((r) => setTimeout(() => r(fakeResult('decided', 60)), 40)),
+  5,
+);
+ok('a cycle OVER budget becomes a technical error', slow.status === 'error');
+ok(
+  'a timed-out cycle drives the backoff path',
+  classifyOutcome(slow.status) === 'error' &&
+    backoffMinutes(nextConsecutiveFailures(0, classifyOutcome(slow.status)), 15, 240) === 15,
+);
+
+const threw = await runCycleWithTimeout(() => Promise.reject(new Error('kaboom')), 1000);
+ok('a thrown cycle is a technical error with the stack captured', threw.status === 'error' && threw.detail.includes('kaboom'));
 
 console.log(`\n${passed} scheduler checks passed.`);
