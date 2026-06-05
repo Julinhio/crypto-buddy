@@ -124,7 +124,11 @@ export async function runHeartbeat(
   const state = await recordHeartbeat(supabase);
 
   // 2. Cheap pre-check against the DATABASE's clock (last_heartbeat_at = now()).
-  const nowMs = state.lastHeartbeatAt ? Date.parse(state.lastHeartbeatAt) : Date.now();
+  //    Guard a NaN parse on the reference time by falling back to the app clock —
+  //    this pre-check is only an optimization/log; the SQL claim is the authority
+  //    on due-ness, so a slightly-off reference here can never cause a double run.
+  const parsedNow = state.lastHeartbeatAt ? Date.parse(state.lastHeartbeatAt) : NaN;
+  const nowMs = Number.isNaN(parsedNow) ? Date.now() : parsedNow;
   const nextMs = state.nextCheckAt ? Date.parse(state.nextCheckAt) : null;
   const lockMs = state.lockedUntil ? Date.parse(state.lockedUntil) : null;
   if (!canClaim({ nextCheckAtMs: nextMs, lockedUntilMs: lockMs }, nowMs)) {
