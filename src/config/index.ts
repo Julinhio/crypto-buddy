@@ -108,6 +108,22 @@ export interface SchedulerConfig {
   softSkipDelayMinutes: number;
 }
 
+/**
+ * Alerting (heartbeat safety net) tuning. An emergency net that should almost
+ * never fire: ONE Telegram alert when a health counter crosses its threshold, then
+ * silence until it re-arms. Thresholds are named here so they're trivial to adjust.
+ *
+ * The secrets themselves (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / HEALTHCHECKS_PING_URL)
+ * are NOT here — like the Supabase/Anthropic keys, they're read from the environment
+ * at call time so nothing sensitive lives in committed config.
+ */
+export interface AlertingConfig {
+  /** Overheating: alert once floor_delay_streak reaches this many decided cycles. */
+  floorStreakThreshold: number;
+  /** Degraded: alert once consecutive_failures reaches this many hard errors. */
+  consecutiveFailuresThreshold: number;
+}
+
 export interface AppConfig {
   tradablePairs: string[];
   referencePairs: string[];
@@ -120,6 +136,7 @@ export interface AppConfig {
   decision: DecisionConfig;
   execution: ExecutionConfig;
   scheduler: SchedulerConfig;
+  alerting: AlertingConfig;
 }
 
 /** Reads a numeric env var, falling back to `fallback` when unset/blank/non-finite. */
@@ -194,6 +211,14 @@ export const config: AppConfig = {
     // delay bounds (min 15 / max 240).
     softSkipDelayMinutes: 30,
   },
+
+  alerting: {
+    // Overheating: 10 decided cycles in a row at the 15-min floor → the AI is
+    // hammering the floor. Degraded: 3 hard errors in a row → the bot beats but
+    // its cycle keeps failing. Both are easy to retune from here.
+    floorStreakThreshold: 10,
+    consecutiveFailuresThreshold: 3,
+  },
 };
 
 /** Risk class for a coin (defaults to 'small' — shorter leash — when unlisted). */
@@ -261,6 +286,26 @@ function validateSchedulerConfig(cfg: SchedulerConfig): void {
 }
 
 validateSchedulerConfig(config.scheduler);
+
+/**
+ * Fails fast on a nonsensical alerting config. Thresholds must be >= 1, otherwise a
+ * counter would be "at or above" from its very first tick and the alert would fire
+ * (or be permanently suppressed) without any real crossing.
+ */
+function validateAlertingConfig(cfg: AlertingConfig): void {
+  const problems: string[] = [];
+  if (!(Number.isInteger(cfg.floorStreakThreshold) && cfg.floorStreakThreshold >= 1)) {
+    problems.push(`floorStreakThreshold must be an integer >= 1 (got ${cfg.floorStreakThreshold})`);
+  }
+  if (!(Number.isInteger(cfg.consecutiveFailuresThreshold) && cfg.consecutiveFailuresThreshold >= 1)) {
+    problems.push(`consecutiveFailuresThreshold must be an integer >= 1 (got ${cfg.consecutiveFailuresThreshold})`);
+  }
+  if (problems.length > 0) {
+    throw new Error(`Invalid alerting config: ${problems.join('; ')}`);
+  }
+}
+
+validateAlertingConfig(config.alerting);
 
 /**
  * Assets worth tracking in balances: every side of every tradable pair,

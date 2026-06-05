@@ -309,8 +309,8 @@ guard against ever deciding twice in parallel.
 
 - **State model** — a singleton `bot_state` row (next check, the run-lock
   `run_token` + `locked_until`, liveness, last success, the backoff counter, the
-  overheating counter, an alert flag for later) plus an append-only `scheduler_runs`
-  history, same spirit as `executions`.
+  overheating counter, and the per-trigger alert debounce flags) plus an append-only
+  `scheduler_runs` history, same spirit as `executions`.
 - **Atomic claim** — a single conditional `UPDATE` (`claim_due_run`) is the
   compare-and-set: Postgres takes a row lock, two overlapping beats serialize, and
   the loser re-evaluates its `WHERE` against the now-locked row → 0 rows. No
@@ -357,6 +357,75 @@ functions. RLS deny-all on both tables, and `EXECUTE` on the functions is revoke
 from `public` and granted to `service_role` only (the backend's key) — so
 anon/authenticated can't even invoke them.
 
+## Alerting (heartbeat safety net)
+
+Before the bot runs unattended (the Railway cron lands next), it gets an **emergency
+net** — deliberately simple and meant to almost never fire. Two distinct needs,
+never conflated:
+
+1. **The bot is alive but sees something wrong** → an internal **Telegram** alert
+   sent from the code.
+2. **The bot goes completely silent** (Railway down, cron broken, crash) → a dead
+   bot can't alert itself, so this is watched from the **outside** by Healthchecks.io.
+
+**Dead-man's-switch (Healthchecks.io).** Every **clean** beat ends with an HTTP ping
+to `HEALTHCHECKS_PING_URL` — at the 5-min *beat* cadence, not the decision cadence,
+because the signal is "the cron runs and the process is alive," which happens each
+beat even when it just checks the time and leaves. The ping fires **only if the beat
+finished cleanly**: an infra fault throws (the existing fail-loud), the process exits
+non-zero, and **no ping goes out** — which is exactly the silence Healthchecks
+catches. Detection lives in their dashboard (period 5 min, grace 15–20 min, email),
+nothing to code. Note a *cycle* error still pings (the process is alive and backing
+off) — that gap is covered by the degraded alert below, not by Healthchecks.
+
+**Internal alerts (Telegram).** Two triggers, both off the counters `bot_state`
+already maintains, each with named thresholds in config (easy to retune):
+
+- **Overheating** — `floor_delay_streak` reaches **10**: the AI has asked for its
+  15-min floor delay ten cycles in a row.
+- **Degraded** — `consecutive_failures` reaches **3**: the bot still beats but its
+  cycle fails every time (the gap Healthchecks can't see — the process is up and
+  still pinging). The alert carries the last cycle's error when available.
+
+**Anti-spam (debounce).** Identical for both, and **independent** per trigger (an
+overheating alert never masks a degraded one): alert **once** on the crossing, stay
+silent while the counter remains above, **re-arm** when it drops back. The state is
+one debounce flag per trigger in `bot_state` (`floor_alert_sent` / `failure_alert_sent`,
+migration 0007 — they replace the unused `alert_sent` placeholder). The decision is a
+pure function (`evaluateAlert` in `scheduler/policy.ts`); the flags are persisted in
+the same fenced `finish_run` transaction as the counters, so a reclaimed run can't
+double-alert.
+
+**Robustness — the alerting layer can NEVER take the bot down.** Every external call
+(the Healthchecks ping and the Telegram send) is **best-effort**: on any failure or
+unreachable service it logs and continues, it never throws. This is the deliberate
+opposite of fail-loud, which stays reserved for the infra the bot truly needs (DB,
+exchange, LLM). A Telegram or Healthchecks outage must never interrupt a beat. (One
+consequence of "alert once": the debounce flag is set *before* the send, so a send
+that fails on the exact crossing loses that one alert rather than risking spam — the
+condition persists in the logs/backoff, and total silence is Healthchecks' job.)
+
+### Applying the migration
+
+Paste [`0007_alerting.sql`](supabase/migrations/0007_alerting.sql) into the Supabase
+**SQL Editor** and **Run**. It swaps the unused `alert_sent` for `floor_alert_sent` +
+`failure_alert_sent` on `bot_state`, and recreates `finish_run` with two added
+parameters (the flags, written as plain assignments under the same fencing guard) —
+re-applying its `service_role`-only `EXECUTE` grant.
+
+### Proving it works
+
+- **Telegram end-to-end** — `npm run notify:test` sends one fixed message; if it
+  lands in your chat, the token + chat id work.
+- **Healthchecks** — confirmed on their dashboard: one clean beat shows up as a
+  received ping.
+- **Debounce (live)** — `npm run alerting:debounce-check` drives the **real**
+  `bot_state` through the actual `claim_due_run` / `finish_run` path for a scripted
+  counter sequence, asserting the alert fires exactly once per crossing, stays
+  silent above, re-arms, and that the two triggers are independent. It does **not**
+  send Telegram or run a decision cycle, and it snapshots + restores `bot_state`.
+  (Requires migration 0007 applied and Supabase configured.)
+
 ## Setup
 
 ```sh
@@ -378,6 +447,7 @@ cp .env.example .env
 #    - 0004_extend_decisions.sql           (bounded-allocation columns)
 #    - 0005_executions_testnet_orders.sql  (four-state testnet execution journal)
 #    - 0006_scheduler.sql                  (scheduler state machine + run-lock)
+#    - 0007_alerting.sql                   (per-trigger alert debounce flags)
 #    - add SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY to .env
 #    Without these, `npm start` still runs; `npm run decide` still decides and
 #    paper-trades but won't journal (the portfolio stays at 100% cash).
@@ -388,6 +458,10 @@ cp .env.example .env
 
 # 6. (Optional) Tune the economic brain in .env:
 #    - STARTING_CAPITAL_USD (default 500), FEE_PERCENT (default 0.1)
+
+# 7. (Optional) Alerting safety net — all best-effort, the bot beats fine without:
+#    - TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID  (internal alerts; test: npm run notify:test)
+#    - HEALTHCHECKS_PING_URL                  (external dead-man's-switch)
 ```
 
 ## Run
@@ -396,6 +470,8 @@ cp .env.example .env
 npm start         # brick 1-2: build + print the market context
 npm run decide    # bricks 3-4: one wake-up — decide, bound to caps, execute
 npm run beat      # scheduler: one heartbeat — run a cycle only if it's due
+npm run notify:test              # alerting: send a test Telegram message
+npm run alerting:debounce-check  # alerting: live debounce proof (snapshots bot_state)
 ```
 
 `npm start` prints a formatted summary per pair, your testnet balances, then the
@@ -417,8 +493,13 @@ reschedule; otherwise it's a cheap no-op. The Railway cron will call it every 5 
 ```sh
 npm run typecheck
 npm test          # money invariants (cash floor, snapping) + scheduler policy
-                  # (due/lock, atomic-claim guard, reschedule, backoff, overheating)
+                  # (due/lock, atomic-claim guard, reschedule, backoff, overheating,
+                  #  alert debounce + message formatting)
 ```
+
+The debounce *logic* is also proven **live** with `npm run alerting:debounce-check`
+(see [Alerting](#alerting-heartbeat-safety-net)) — offline tests cover the pure
+function, the live script proves the DB round-trip and trigger independence.
 
 ## Configuration
 
@@ -444,6 +525,9 @@ All knobs live in [`src/config/index.ts`](src/config/index.ts):
   (worst-case cycle budget), `lockTtlSeconds` (run-lock TTL, **must exceed**
   `maxCycleSeconds`), and `softSkipDelayMinutes`. Backoff reuses the `decision`
   delay bounds (15 / 240).
+- `alerting` — the alert thresholds `floorStreakThreshold` (overheating, 10) and
+  `consecutiveFailuresThreshold` (degraded, 3). The secrets (Telegram / Healthchecks)
+  are **not** here — they're read from the environment at call time.
 
 The set of balance-tracked assets — and the AI's allocation universe — are both
 derived from `tradablePairs` via `tradableAssets()`; there's no separate asset
@@ -457,7 +541,7 @@ src/
 ├── index.ts                 # brick 1-2 entry — build + print market context
 ├── decide.ts                # brick 3 entry — one decision wake-up
 ├── beat.ts                  # scheduler entry — one heartbeat (run a cycle if due)
-├── config/index.ts          # pairs, timeframes, indicators, cache + decision + scheduler tuning
+├── config/index.ts          # pairs, timeframes, indicators, cache + decision + scheduler + alerting tuning
 ├── exchanges/binance.ts     # public mainnet + authenticated testnet clients
 ├── market/
 │   ├── klines.ts            # candle + ticker fetch
@@ -472,8 +556,14 @@ src/
 │   ├── executions.ts        # execution journal: derive ledger (booked intents) + insert rows
 │   └── schedulerState.ts    # bot_state + scheduler_runs RPCs (heartbeat / claim / finish)
 ├── scheduler/
-│   ├── policy.ts            # PURE logic: due/lock, missed beats, backoff, delays, overheating
-│   └── heartbeat.ts         # one beat: liveness → atomic claim → cycle → reschedule → release
+│   ├── policy.ts            # PURE logic: due/lock, missed beats, backoff, delays, overheating, alert debounce
+│   └── heartbeat.ts         # one beat: liveness → atomic claim → cycle → reschedule → release → alerts
+├── alerting/
+│   ├── messages.ts         # PURE alert payloads + Telegram text (trigger, value, time, last error)
+│   ├── telegram.ts         # best-effort Telegram sender (never throws, hard timeout)
+│   ├── healthchecks.ts     # best-effort dead-man's-switch ping (never throws, hard timeout)
+│   ├── sendTestMessage.ts  # `notify:test` — prove the Telegram bot end-to-end
+│   └── debounceProof.ts    # `alerting:debounce-check` — live debounce proof (snapshots bot_state)
 ├── portfolio/
 │   └── derive.ts            # derive the virtual portfolio + weighted-avg P&L from the journal
 ├── risk/
@@ -503,16 +593,17 @@ supabase/
     ├── 0003_executions.sql                 # execution journal (virtual portfolio source of truth)
     ├── 0004_extend_decisions.sql           # bounded-allocation columns on decisions
     ├── 0005_executions_testnet_orders.sql  # four-state testnet execution (intent + execution rows)
-    └── 0006_scheduler.sql                  # bot_state + scheduler_runs + claim/finish functions
+    ├── 0006_scheduler.sql                  # bot_state + scheduler_runs + claim/finish functions
+    └── 0007_alerting.sql                   # per-trigger alert debounce flags + finish_run rev
 ```
 
 ## Coming next (not in this brick)
 
-- **Scheduler, next PRs.** This PR is the heartbeat core (state machine + atomic
-  claim + reschedule). Still to come: **alerting** (Telegram on a stale heartbeat /
-  overheating / repeated failures — the counters and `alert_sent` flag are already
-  maintained), an **external watchdog**, and the **Railway deploy** that wires the
-  5-min cron to `npm run beat`.
+- **Scheduler, next PRs.** Done so far: the heartbeat core (state machine + atomic
+  claim + reschedule) and the **alerting** safety net (Telegram on overheating /
+  repeated failures + the Healthchecks dead-man's-switch). Still to come: the
+  **Railway deploy** that wires the 5-min cron to `npm run beat` (which activates the
+  ping that's already greffé on the beat).
 - **Real money.** Mutate the ledger from the *real* fills (the step PR B
   deliberately stops short of: here the accounting stays driven by our own
   calculation at real prices, and the testnet only proves executability). This is

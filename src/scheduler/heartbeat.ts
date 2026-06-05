@@ -7,6 +7,7 @@ import { recordHeartbeat, claimDueRun, finishRun } from '../persistence/schedule
 import {
   canClaim,
   classifyOutcome,
+  evaluateAlert,
   missedBeats,
   nextConsecutiveFailures,
   nextDelayMinutes,
@@ -14,6 +15,7 @@ import {
   type CycleStatus,
   type RunOutcome,
 } from './policy.js';
+import type { AlertPayload } from '../alerting/messages.js';
 
 export interface HeartbeatResult {
   action: 'noop' | 'ran';
@@ -22,6 +24,12 @@ export interface HeartbeatResult {
   delayMinutes?: number;
   missedBeats?: number;
   lockLost?: boolean;
+  /**
+   * Internal alerts that crossed their threshold on THIS beat (debounced — at most
+   * one per trigger). The caller (beat.ts) sends them best-effort; the debounce
+   * flags are already persisted by finishRun, so a failed send is never retried.
+   */
+  alerts?: AlertPayload[];
 }
 
 /** The cycle's result, normalized — a timeout or a throw both become a technical error. */
@@ -178,6 +186,12 @@ export async function runHeartbeat(
   });
   const floorStreak = nextFloorStreak(claim.floorDelayStreak, outcome, appliedDelay, config.decision.minDelayMinutes);
 
+  // Per-trigger alert debounce (pure). The PREVIOUS flags come from `state` — the
+  // record_heartbeat snapshot at the very top of this beat — and only finishRun
+  // (us, fencing-guarded) rewrites them, so that snapshot is still current here.
+  const floorAlert = evaluateAlert(floorStreak, config.alerting.floorStreakThreshold, state.floorAlertSent);
+  const failureAlert = evaluateAlert(failuresAfter, config.alerting.consecutiveFailuresThreshold, state.failureAlertSent);
+
   const finalized = await finishRun(supabase, {
     runToken,
     runId: claim.runId,
@@ -189,6 +203,11 @@ export async function runHeartbeat(
     decisionId,
     missedBeats: missed,
     detail,
+    // Intent-first: persist the re-armed/armed flags in the SAME fenced transaction
+    // as the counters. A send that later fails just loses that one alert (no spam);
+    // a reclaimed run can't write these (fencing) so it won't send below either.
+    floorAlertSent: floorAlert.sent,
+    failureAlertSent: failureAlert.sent,
   });
 
   if (!finalized) {
@@ -196,12 +215,27 @@ export async function runHeartbeat(
       `[warn] run #${claim.runId} lost its lock before finalizing (it overran and was reclaimed). ` +
         'The reclaiming run owns rescheduling; the cycle still ran.',
     );
+    // Do NOT alert on the fencing path: the flags were not persisted (the fenced
+    // UPDATE affected 0 rows), so the reclaiming run owns the alert evaluation.
     return { action: 'ran', reason: outcome, outcome, delayMinutes, missedBeats: missed, lockLost: true };
+  }
+
+  // Build the alerts that crossed UP on this beat (at most one per trigger). The DB
+  // claim time is the timestamp; the degraded alert carries the last cycle's error.
+  const alerts: AlertPayload[] = [];
+  if (floorAlert.fire) {
+    alerts.push({ trigger: 'overheating', value: floorStreak, timestamp: claim.dbNow });
+  }
+  if (failureAlert.fire) {
+    alerts.push({ trigger: 'degraded', value: failuresAfter, timestamp: claim.dbNow, lastError: detail });
+  }
+  if (alerts.length > 0) {
+    console.warn(`[alert] ${alerts.length} threshold crossing(s) this beat: ${alerts.map((a) => a.trigger).join(', ')}.`);
   }
 
   console.log(
     `[beat] run #${claim.runId} done — outcome=${outcome}, next check in ${delayMinutes} min ` +
       `(consecutive_failures=${failuresAfter}, floor_streak=${floorStreak}).`,
   );
-  return { action: 'ran', reason: outcome, outcome, delayMinutes, missedBeats: missed, lockLost: false };
+  return { action: 'ran', reason: outcome, outcome, delayMinutes, missedBeats: missed, lockLost: false, alerts };
 }
