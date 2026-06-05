@@ -100,13 +100,17 @@ declare
   v_floor     integer;
   v_run_id    bigint;
 begin
-  update public.bot_state
+  -- Alias the table as `b` and qualify the WHERE/RETURNING columns: the RETURNS
+  -- TABLE output columns (consecutive_failures, floor_delay_streak) share names
+  -- with bot_state columns, so an unqualified reference is ambiguous. `b.` ties
+  -- them to the table. (SET targets are never ambiguous, so they stay unqualified.)
+  update public.bot_state b
      set run_token    = p_run_token,
          locked_until = now() + make_interval(secs => p_lock_ttl_seconds)
-   where id = 1
-     and (next_check_at is null or next_check_at <= now())                       -- due?
-     and (run_token is null or locked_until is null or locked_until <= now())    -- free / expired?
-   returning next_check_at, consecutive_failures, floor_delay_streak
+   where b.id = 1
+     and (b.next_check_at is null or b.next_check_at <= now())                         -- due?
+     and (b.run_token is null or b.locked_until is null or b.locked_until <= now())    -- free / expired?
+   returning b.next_check_at, b.consecutive_failures, b.floor_delay_streak
         into v_prev_next, v_failures, v_floor;
 
   if not found then
