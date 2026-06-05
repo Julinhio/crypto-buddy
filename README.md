@@ -332,6 +332,12 @@ guard against ever deciding twice in parallel.
   reset on success.
 - **No catch-up** — if many beats were missed (the bot was down), run **one** fresh
   cycle on the current market; missed beats are only logged.
+- **Fail loud on infra** — for a cron-launched bot the **exit code is the first line
+  of monitoring** (before the external watchdog). An infra/config fault (RPC error,
+  unconfigured Supabase) **throws** so the beat exits non-zero; `null`/`false` are
+  reserved for genuine results (not-claimed / fencing). A `finish_run` failure right
+  after the cycle is safe: the lock was already written, so a later beat reclaims it
+  once it expires — visible outage, no lost recovery.
 
 Replay safety (why we're fine on testnet without `clientOrderId`): PR B books the
 intent *before* placing the order and derives the portfolio from the append-only
@@ -344,7 +350,9 @@ repeats a movement. The only residue is a duplicate testnet order without a trac
 Paste [`0006_scheduler.sql`](supabase/migrations/0006_scheduler.sql) into the
 Supabase **SQL Editor** and **Run**. It creates `bot_state` (seeded singleton) and
 `scheduler_runs`, plus the `record_heartbeat` / `claim_due_run` / `finish_run`
-functions. RLS deny-all on both tables (service role bypasses).
+functions. RLS deny-all on both tables, and `EXECUTE` on the functions is revoked
+from `public` and granted to `service_role` only (the backend's key) — so
+anon/authenticated can't even invoke them.
 
 ## Setup
 
