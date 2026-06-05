@@ -176,6 +176,24 @@ $$;
 alter table public.bot_state enable row level security;
 alter table public.scheduler_runs enable row level security;
 
+-- Beyond deny-all on the rows, lock down WHO may even invoke these functions.
+-- New functions grant EXECUTE to PUBLIC by default; revoke that and grant it back
+-- ONLY to service_role (the backend's key). anon/authenticated then can't call
+-- them at all. The owner (postgres) keeps execute regardless — so the migration
+-- itself is unaffected. Double-check after applying that the service key still
+-- works (it runs as service_role, which is granted below).
+revoke execute on function public.record_heartbeat() from public;
+revoke execute on function public.claim_due_run(uuid, integer) from public;
+revoke execute on function public.finish_run(
+  uuid, bigint, integer, integer, integer, boolean, text, bigint, integer, text
+) from public;
+
+grant execute on function public.record_heartbeat() to service_role;
+grant execute on function public.claim_due_run(uuid, integer) to service_role;
+grant execute on function public.finish_run(
+  uuid, bigint, integer, integer, integer, boolean, text, bigint, integer, text
+) to service_role;
+
 comment on table public.bot_state is
   'Singleton scheduler state: next check, run-lock (run_token + locked_until), liveness, backoff/overheating counters. Mutated only via the record_heartbeat / claim_due_run / finish_run functions.';
 comment on table public.scheduler_runs is
