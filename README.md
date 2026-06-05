@@ -317,12 +317,15 @@ guard against ever deciding twice in parallel.
   double-run. Comparison uses the **database's `now()`**, never the app clock.
 - **The lock expires** — a run that crashes mid-cycle has its lock expire, and a
   later beat reclaims it (self-healing). The lock TTL (`lockTtlSeconds`, 10 min)
-  must exceed the **worst-case cycle** (`maxCycleSeconds`, 5 min; the LLM and
-  exchange calls are explicitly timed out well under it) — otherwise a slow-but-alive
-  run could lose its lock to a parallel beat and run a *second concurrent cycle*.
-  The fencing token (`finish_run` only writes when `run_token` still matches) stops
-  state corruption, **not** double execution — hence the TTL discipline. Validated
-  at startup (`lockTtlSeconds > maxCycleSeconds`).
+  must exceed the **worst-case cycle** (`maxCycleSeconds`, 5 min) — otherwise a
+  slow-but-alive run could lose its lock to a parallel beat and run a *second
+  concurrent cycle* (the fencing token stops state corruption, **not** double
+  execution). We make the cycle *provably* bounded, not just "probably short":
+  besides the per-call ccxt/Anthropic timeouts, `decide()` is wrapped in a **hard
+  timeout = maxCycleSeconds** (a timeout → technical error → backoff), and `beat.ts`
+  **force-exits** the one-shot process so a timed-out cycle can't keep running and
+  act after the lock is released. With `lockTtlSeconds > maxCycleSeconds` asserted
+  at startup, the lock cannot expire while a cycle is still alive.
 - **Reschedule last, and always** — order is: claim → run cycle → journal (the PR B
   behaviour) → write the new `next_check_at` → release the lock, ideally in one
   transaction (`finish_run`). Never reschedule before the work, so a crash can't
