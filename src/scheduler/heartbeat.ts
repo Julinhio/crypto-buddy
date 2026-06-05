@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { config } from '../config/index.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
-import { decide } from '../decision/decide.js';
+import { decide, type DecideResult } from '../decision/decide.js';
 import { recordHeartbeat, claimDueRun, finishRun } from '../persistence/schedulerState.js';
 import {
   canClaim,
@@ -22,6 +22,72 @@ export interface HeartbeatResult {
   delayMinutes?: number;
   missedBeats?: number;
   lockLost?: boolean;
+}
+
+/** The cycle's result, normalized — a timeout or a throw both become a technical error. */
+export interface CycleOutcome {
+  status: CycleStatus;
+  appliedDelayMinutes: number | null;
+  decisionId: number | null;
+  detail: string;
+}
+
+/**
+ * Runs the cycle under a HARD timeout (= maxCycleSeconds). This is the catch-all
+ * that bounds the cycle no matter what happens inside decide() — beyond the
+ * per-call ccxt/Anthropic timeouts — so the run-lock provably cannot expire while
+ * a cycle is still alive (with lockTtl > maxCycleSeconds), closing the door on a
+ * parallel beat reclaiming and double-executing.
+ *
+ * Caveat handled by the caller: a promise-race timeout does NOT cancel the
+ * underlying work — decide() keeps running in the background. A timeout (or a
+ * throw) is recorded as a technical error (→ backoff), and `beat.ts` force-exits
+ * the one-shot process so no orphaned cycle can act after the lock is released.
+ * Any partial work is already covered by PR B's booking-first replay safety.
+ */
+export async function runCycleWithTimeout(
+  decideFn: () => Promise<DecideResult>,
+  timeoutMs: number,
+): Promise<CycleOutcome> {
+  const cyclePromise = decideFn();
+  // Swallow a LATE rejection from an orphaned (already-timed-out) cycle so it
+  // can't surface as an unhandledRejection before the process exits.
+  cyclePromise.catch(() => {});
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), timeoutMs);
+  });
+
+  try {
+    const raced = await Promise.race([cyclePromise, timeout]);
+    if (raced === 'timeout') {
+      return {
+        status: 'error',
+        appliedDelayMinutes: null,
+        decisionId: null,
+        detail: `cycle exceeded the ${Math.round(timeoutMs / 1000)}s budget — treated as a technical error (backoff)`,
+      };
+    }
+    return {
+      status: raced.status,
+      appliedDelayMinutes: raced.row.applied_delay_minutes ?? null,
+      decisionId: raced.decisionId,
+      detail: `status=${raced.status}`,
+    };
+  } catch (err) {
+    // Capture the STACK (not just the message) for the post-mortem in scheduler_runs.
+    return {
+      status: 'error',
+      appliedDelayMinutes: null,
+      decisionId: null,
+      detail: `cycle threw: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+    };
+  } finally {
+    // Essential: clear the timer on the resolve path, else a pending 5-min timer
+    // would keep the event loop alive long after the cycle finished.
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**
@@ -83,23 +149,16 @@ export async function runHeartbeat(
   );
   console.log(`[beat] claimed run #${claim.runId} (token ${runToken}); missed_beats=${missed}. Running the cycle…`);
 
-  // 4. Run the cycle exactly ONCE on the current market — no replay of missed beats.
-  let status: CycleStatus;
-  let appliedDelay: number | null = null;
-  let decisionId: number | null = null;
-  let detail: string;
-  try {
-    const result = await decide();
-    status = result.status;
-    appliedDelay = result.row.applied_delay_minutes ?? null;
-    decisionId = result.decisionId;
-    detail = `status=${status}`;
-  } catch (err) {
-    // decide() handles its own internal errors; a throw here is an unexpected hard
-    // failure → treat as a technical error (backoff).
-    status = 'error';
-    detail = `cycle threw: ${err instanceof Error ? err.message : String(err)}`;
-    console.error(`[error] decision cycle threw — recording a hard error. ${detail}`);
+  // 4. Run the cycle exactly ONCE on the current market (no replay of missed beats),
+  //    under a hard timeout = maxCycleSeconds. A timeout or a throw → technical
+  //    error (backoff); beat.ts force-exits afterwards so a timed-out cycle can't
+  //    keep running and act after the lock is released.
+  const { status, appliedDelayMinutes: appliedDelay, decisionId, detail } = await runCycleWithTimeout(
+    decide,
+    config.scheduler.maxCycleSeconds * 1000,
+  );
+  if (status === 'error' || status === 'parse_failed') {
+    console.error(`[error] cycle did not complete cleanly — ${detail}`);
   }
 
   // 5. Pure policy → the next state. Reschedule ALWAYS, whatever the outcome.
