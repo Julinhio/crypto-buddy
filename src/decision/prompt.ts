@@ -71,18 +71,20 @@ function summarizeDecision(d: DecisionSummary): Record<string, unknown> {
   const summary: Record<string, unknown> = {
     at: d.created_at,
     action_type: d.action_type,
-    // The allocation the code ACTUALLY held after the risk caps — what your real
-    // book reflects. Falls back to your raw target for rows predating the applied
-    // column, so old history stays correct.
-    applied_allocation: d.applied_allocation ?? d.target_allocation,
+    // What you PROPOSED that cycle (your raw target). This is your decision — NOT
+    // necessarily what your book holds now; your real current book is in the
+    // context above.
+    proposed_allocation: d.target_allocation,
   };
 
-  // When the code trimmed your proposal to a cap, surface what you PROPOSED and
-  // why it was bounded. This is the feedback loop: the gap between your target and
-  // your book is a CAP, not market drift — and re-proposing the same excess is
-  // futile, the code will trim it to the cap again.
+  // If the risk wrapper trimmed your proposal to a cap, surface the bounded
+  // TARGET it aimed for, plus the reason. This is the execution INPUT, not an
+  // allocation you necessarily reached — a movement may not book (min-notional
+  // crumb, symbol rules unavailable, a failed write) — so it is deliberately NOT
+  // labelled "applied"/"held". The takeaway: proposing past a cap is futile; the
+  // code trims the excess to the cap every time.
   if (d.clamped) {
-    summary.proposed_allocation = d.target_allocation;
+    summary.risk_bounded_target = d.applied_allocation ?? d.target_allocation;
     summary.clamped = true;
     summary.clamp_reason = d.clamp_reason ?? null;
   }

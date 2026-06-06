@@ -10,8 +10,9 @@ export interface DecisionSummary {
   action_type: string;
   /** What the AI proposed (raw). */
   target_allocation: unknown;
-  /** What the code actually kept after the risk caps (migration 0004). Null on
-   *  rows predating that migration — the prompt falls back to target_allocation. */
+  /** The risk-bounded target (clamp output = execution INPUT), migration 0004.
+   *  NOT necessarily the allocation actually held — a movement may not book. Null
+   *  on rows predating that migration. */
   applied_allocation: unknown;
   clamped: boolean | null;
   clamp_reason: string | null;
