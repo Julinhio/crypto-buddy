@@ -8,7 +8,13 @@ export type DecisionStatus = 'decided' | 'skipped' | 'parse_failed' | 'error';
 export interface DecisionSummary {
   created_at: string;
   action_type: string;
+  /** What the AI proposed (raw). */
   target_allocation: unknown;
+  /** What the code actually kept after the risk caps (migration 0004). Null on
+   *  rows predating that migration — the prompt falls back to target_allocation. */
+  applied_allocation: unknown;
+  clamped: boolean | null;
+  clamp_reason: string | null;
   confidence: string;
   market_state: string;
   what_changed: string;
@@ -63,7 +69,7 @@ export async function loadRecentDecisions(
     const { data, error } = await supabase
       .from(TABLE)
       .select(
-        'created_at, action_type, target_allocation, confidence, market_state, what_changed, reasoning',
+        'created_at, action_type, target_allocation, applied_allocation, clamped, clamp_reason, confidence, market_state, what_changed, reasoning',
       )
       .eq('status', 'decided')
       .order('created_at', { ascending: false })

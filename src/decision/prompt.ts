@@ -67,16 +67,33 @@ export function buildSystemPrompt(): string {
 
 function summarizeDecision(d: DecisionSummary): Record<string, unknown> {
   const reasoning = (d.reasoning ?? '').trim();
-  return {
+
+  const summary: Record<string, unknown> = {
     at: d.created_at,
     action_type: d.action_type,
-    target_allocation: d.target_allocation,
-    confidence: d.confidence,
-    market_state: d.market_state,
-    what_changed: d.what_changed,
-    // Truncate to keep the prompt bounded; full reasoning lives in the DB.
-    reasoning: reasoning.length > 800 ? `${reasoning.slice(0, 800)}…` : reasoning,
+    // The allocation the code ACTUALLY held after the risk caps — what your real
+    // book reflects. Falls back to your raw target for rows predating the applied
+    // column, so old history stays correct.
+    applied_allocation: d.applied_allocation ?? d.target_allocation,
   };
+
+  // When the code trimmed your proposal to a cap, surface what you PROPOSED and
+  // why it was bounded. This is the feedback loop: the gap between your target and
+  // your book is a CAP, not market drift — and re-proposing the same excess is
+  // futile, the code will trim it to the cap again.
+  if (d.clamped) {
+    summary.proposed_allocation = d.target_allocation;
+    summary.clamped = true;
+    summary.clamp_reason = d.clamp_reason ?? null;
+  }
+
+  summary.confidence = d.confidence;
+  summary.market_state = d.market_state;
+  summary.what_changed = d.what_changed;
+  // Truncate to keep the prompt bounded; full reasoning lives in the DB.
+  summary.reasoning = reasoning.length > 800 ? `${reasoning.slice(0, 800)}…` : reasoning;
+
+  return summary;
 }
 
 /** Per-run user message carrying all volatile data (kept out of the cached system prompt). */
