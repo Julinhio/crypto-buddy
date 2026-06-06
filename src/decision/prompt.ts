@@ -67,16 +67,35 @@ export function buildSystemPrompt(): string {
 
 function summarizeDecision(d: DecisionSummary): Record<string, unknown> {
   const reasoning = (d.reasoning ?? '').trim();
-  return {
+
+  const summary: Record<string, unknown> = {
     at: d.created_at,
     action_type: d.action_type,
-    target_allocation: d.target_allocation,
-    confidence: d.confidence,
-    market_state: d.market_state,
-    what_changed: d.what_changed,
-    // Truncate to keep the prompt bounded; full reasoning lives in the DB.
-    reasoning: reasoning.length > 800 ? `${reasoning.slice(0, 800)}…` : reasoning,
+    // What you PROPOSED that cycle (your raw target). This is your decision — NOT
+    // necessarily what your book holds now; your real current book is in the
+    // context above.
+    proposed_allocation: d.target_allocation,
   };
+
+  // If the risk wrapper trimmed your proposal to a cap, surface the bounded
+  // TARGET it aimed for, plus the reason. This is the execution INPUT, not an
+  // allocation you necessarily reached — a movement may not book (min-notional
+  // crumb, symbol rules unavailable, a failed write) — so it is deliberately NOT
+  // labelled "applied"/"held". The takeaway: proposing past a cap is futile; the
+  // code trims the excess to the cap every time.
+  if (d.clamped) {
+    summary.risk_bounded_target = d.applied_allocation ?? d.target_allocation;
+    summary.clamped = true;
+    summary.clamp_reason = d.clamp_reason ?? null;
+  }
+
+  summary.confidence = d.confidence;
+  summary.market_state = d.market_state;
+  summary.what_changed = d.what_changed;
+  // Truncate to keep the prompt bounded; full reasoning lives in the DB.
+  summary.reasoning = reasoning.length > 800 ? `${reasoning.slice(0, 800)}…` : reasoning;
+
+  return summary;
 }
 
 /** Per-run user message carrying all volatile data (kept out of the cached system prompt). */
