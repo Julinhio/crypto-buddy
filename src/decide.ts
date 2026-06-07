@@ -69,39 +69,40 @@ async function main(): Promise<number> {
   }
 
   const runToken = randomUUID();
-  if (!(await claimManualRun(supabase, runToken, config.scheduler.lockTtlSeconds))) {
-    console.error(
-      '[decide] the bot is mid-cycle (run-lock held) — refusing this manual run. Retry shortly.',
-    );
-    return 1;
-  }
 
-  // WATCHDOG — once we hold the lock, GUARANTEE the process exits before the lock can
-  // expire, independent of EVERY await on the way out. A force-exit placed after the
-  // release (round 2) is itself defeated when the release hangs — exactly the Supabase
-  // stall we tolerate — leaving an orphaned (timed-out) cycle alive past lockTtl for a
-  // beat/reset to reclaim mid-write. This timer can be wedged by NO blocking call: it
-  // fires at an absolute deadline (cycle budget + a small grace), strictly below
-  // lockTtl, and force-exits — killing any orphan before the lock is free. Only a
-  // completed release clears it.
-  // (Note: the scheduled beat has the same shape — finishRun + the best-effort calls
-  //  are awaited before beat.ts's process.exit(0) — so a hung release there could also
-  //  strand an orphan. A common guard to add to the beat later; out of scope here.)
+  // WATCHDOG — armed BEFORE the claim. The lock's life begins at the claim's DB commit
+  // (it sets locked_until = now() + lockTtl), which can happen even if the claim's HTTP
+  // response then stalls past the TTL. Arming only after the claim RETURNS would leave
+  // that window unguarded — the process could own (or have owned) the lock with no
+  // watchdog running, and start a cycle under an already-expired/reclaimed lock. Since
+  // arm-time ≤ claim-commit-time and (maxCycleSeconds + grace) < lockTtl, this absolute
+  // deadline provably fires before the lock can expire in EVERY case (the claim
+  // included), independent of any await on the claim / cycle / release path. A
+  // force-exit placed after an awaited call (round 2/3) is itself defeated when that
+  // call hangs — exactly the Supabase stall we tolerate; the watchdog cannot be wedged.
   const watchdog = setTimeout(() => {
     console.error(
-      `[decide] watchdog: still holding the run-lock ${config.scheduler.maxCycleSeconds}s+ after ` +
-        'claiming it — a call on the exit path stalled; force-exiting to free the lock before its TTL.',
+      `[decide] watchdog: the run-lock has been (or could be) held past ${config.scheduler.maxCycleSeconds}s+ — ` +
+        'a call on the claim/exit path stalled; force-exiting to free the lock before its TTL.',
     );
     process.exit(1);
   }, config.scheduler.maxCycleSeconds * 1000 + WATCHDOG_GRACE_MS);
 
+  let claimed = false;
   try {
+    claimed = await claimManualRun(supabase, runToken, config.scheduler.lockTtlSeconds);
+    if (!claimed) {
+      console.error(
+        '[decide] the bot is mid-cycle (run-lock held) — refusing this manual run. Retry shortly.',
+      );
+      return 1;
+    }
     return await runCycle();
   } finally {
-    // Best-effort release; if IT hangs, the watchdog (not yet cleared) fires. Fenced
-    // by the token: if our lock expired and was reclaimed, this is a no-op. Only a
-    // completed release clears the watchdog and lets the clean force-exit run.
-    if (!(await releaseManualRun(supabase, runToken))) {
+    // Release only if we actually claimed (best-effort; if IT hangs, the watchdog —
+    // still armed — fires). Fenced by the token: a reclaimed lock makes it a no-op.
+    // Then cancel the watchdog: only a completed release lets the clean force-exit run.
+    if (claimed && !(await releaseManualRun(supabase, runToken))) {
       console.warn('[decide] run-lock was already reclaimed (overran lockTtl) before release.');
     }
     clearTimeout(watchdog);
