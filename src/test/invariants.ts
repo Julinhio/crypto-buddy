@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { dec } from '../money.js';
 import { derivePortfolio, type PriceLookup } from '../portfolio/derive.js';
 import type { LedgerEntry } from '../persistence/executions.js';
@@ -14,6 +15,7 @@ import { planMovements } from '../execution/plan.js';
 import type { OrderResult } from '../execution/testnetOrder.js';
 import { clampAllocation } from '../risk/clamp.js';
 import { buildEquitySnapshot, prepareEquitySnapshot } from '../persistence/equitySnapshots.js';
+import { loadStartingCapital } from '../persistence/startingCapital.js';
 import { config, type AppConfig } from '../config/index.js';
 
 /**
@@ -343,6 +345,74 @@ assert.equal(prepareEquitySnapshot('decided', 9, null), null, 'no valued book (c
 const prepared = prepareEquitySnapshot('error', 9, snapPort);
 assert.ok(prepared !== null && prepared.decision_id === 9, 'decided / error / parse_failed with prices → a photo, keyed to the decision');
 console.log('  ok: prepareEquitySnapshot photographs decided/error/parse_failed, never skipped / null-id / null-book');
+passed += 1;
+
+// Starting capital reads from the DB (bot_state) with NO error-code guessing: a
+// successful read uses the value (or NULL → env bootstrap), and ANY read failure
+// throws so the cycle backs off rather than derive on a stale/guessed value. (We rely
+// on the hard "migration before deploy" rule, so a failure is a real infra fault.)
+const fakeSupabase = (result: { data?: unknown; error?: unknown }): SupabaseClient => {
+  const builder = {
+    select: () => builder,
+    eq: () => builder,
+    maybeSingle: () => Promise.resolve(result),
+  };
+  return { from: () => builder } as unknown as SupabaseClient;
+};
+
+assert.equal(
+  (await loadStartingCapital(fakeSupabase({ data: { starting_capital_usd: '1000' } })))?.toString(),
+  '1000',
+  'present value → used (the DB is the source of truth)',
+);
+assert.equal(
+  await loadStartingCapital(fakeSupabase({ data: { starting_capital_usd: null } })),
+  null,
+  'NULL value → null → caller bootstraps on the env',
+);
+assert.equal(await loadStartingCapital(null), null, 'no client (local/dev) → null → env bootstrap');
+await assert.rejects(
+  loadStartingCapital(fakeSupabase({ error: { message: 'connection refused' } })),
+  /could not read starting capital/,
+  'ANY read error → throw (fail loud, never fall back)',
+);
+await assert.rejects(
+  loadStartingCapital(fakeSupabase({ data: null })),
+  /singleton row/,
+  'absent singleton row (data === null) → throw (structural anomaly, NOT a bootstrap)',
+);
+await assert.rejects(
+  loadStartingCapital(fakeSupabase({ data: { starting_capital_usd: '0' } })),
+  /not usable/,
+  'present but non-positive (corrupt) → throw',
+);
+// Postgres `numeric` accepts NaN / ±Infinity / magnitudes outside the JS double range:
+// projected to a Number they become Infinity (→ null), or OVERFLOW (1e400 → Infinity) /
+// UNDERFLOW (1e-400 → 0) — a book rounded to garbage. The reader validates the Number
+// projection (finite AND > 0), rejecting them all; present-but-unusable = fault.
+for (const bad of ['Infinity', '-Infinity', 'NaN', '1e400', '1e-400']) {
+  await assert.rejects(
+    loadStartingCapital(fakeSupabase({ data: { starting_capital_usd: bad } })),
+    /not usable/,
+    `present but non-finite (${bad}) → throw`,
+  );
+}
+console.log('  ok: starting-capital reader — value used, NULL/no-client → bootstrap; missing-row / non-finite / non-positive / ANY error → fail loud');
+passed += 1;
+
+// Bootstrap invariance — VALUE-AGNOSTIC: a read that returns NULL (no capital set yet,
+// the steady state after the seedless migration) makes the derivation fall back to the
+// CONFIGURED capital, whatever it is — so the portfolio is unchanged for any configured
+// value, not just our current default. Mirrors decide()'s
+// `(await loadStartingCapital(...)) ?? dec(config.execution.startingCapitalUsd)`.
+const configuredCapital = dec(config.execution.startingCapitalUsd);
+const nullRead = await loadStartingCapital(fakeSupabase({ data: { starting_capital_usd: null } }));
+const bootstrapped = nullRead ?? configuredCapital;
+assert.ok(
+  bootstrapped.equals(configuredCapital),
+  'NULL read → derivation bootstraps on the configured capital (any value)',
+);
+console.log('  ok: a NULL read bootstraps on the configured capital — value-agnostic invariance');
 passed += 1;
 
 console.log(`\n${passed} invariant checks passed.`);
