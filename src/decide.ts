@@ -10,30 +10,45 @@ import { claimManualRun, releaseManualRun } from './persistence/schedulerState.j
 import { prepareEquitySnapshot, writeEquitySnapshot } from './persistence/equitySnapshots.js';
 
 /**
+ * Outcome of a manual cycle: the process exit code, and whether decide() SETTLED —
+ * i.e. returned OR threw, leaving no background orphan — vs timed out, where the
+ * underlying decide() keeps running after the wrapper returns. The run-lock may be
+ * released ONLY when settled; never while an orphan might still write.
+ */
+interface CycleRun {
+  exitCode: number;
+  settled: boolean;
+}
+
+/**
  * Runs ONE cycle under the SAME hard timeout the beat uses (maxCycleSeconds, strictly
  * below lockTtl), then prints it and writes the best-effort snapshot. Reuses the
- * scheduler's runCycleWithTimeout unchanged (additive). A timed-out cycle keeps
- * running in the background — the force-exit in main() kills it before the lock can
- * expire, so the manual run inherits the beat's anti-freeze guarantee. The closure
- * captures the full DecideResult (which the wrapper reduces away) so we can still
- * print it on the success path; on a timeout/throw the capture stays null.
- * Returns the process exit code (0 = clean cycle, 1 = did not complete).
+ * scheduler's runCycleWithTimeout unchanged (additive). On a TIMEOUT the underlying
+ * decide() keeps running in the background (the orphan); `settled` stays false then
+ * (the closure's finally has not run) — which is how main() knows NOT to release the
+ * lock. The closure captures the full DecideResult (the wrapper reduces it away) so we
+ * can still print it on the success path.
  */
-async function runCycle(): Promise<number> {
-  // Hold the result in an object so it survives the wrapper's reduction to a
-  // CycleOutcome — and TS's narrowing (a `let` mutated only inside the closure gets
-  // narrowed back to null at the use site).
-  const cycle: { result: DecideResult | null } = { result: null };
+async function runCycle(): Promise<CycleRun> {
+  // Hold the captured result + a settled flag. settled is set in the closure's finally,
+  // so it is true once decide() RETURNS or THROWS (no orphan) and false while it is
+  // still in flight (the timeout case). The object also survives the wrapper's reduction
+  // and TS's narrowing (a `let` mutated only inside the closure narrows back to null).
+  const cycle: { result: DecideResult | null; settled: boolean } = { result: null, settled: false };
   const outcome = await runCycleWithTimeout(async () => {
-    const result = await decide();
-    cycle.result = result;
-    return result;
+    try {
+      const result = await decide();
+      cycle.result = result;
+      return result;
+    } finally {
+      cycle.settled = true;
+    }
   }, config.scheduler.maxCycleSeconds * 1000);
 
   const result = cycle.result;
   if (!result) {
     console.error(`[decide] cycle did not complete cleanly — ${outcome.detail}`);
-    return 1;
+    return { exitCode: 1, settled: cycle.settled };
   }
   printDecision(result);
   printEconomics(result);
@@ -41,7 +56,7 @@ async function runCycle(): Promise<number> {
     getSupabaseClient(),
     prepareEquitySnapshot(result.status, result.decisionId, result.portfolio),
   );
-  return 0;
+  return { exitCode: 0, settled: true };
 }
 
 /**
@@ -57,7 +72,9 @@ const WATCHDOG_GRACE_MS = 15_000;
  * scheduled beat AND with a reset, through the SAME run-lock, AND carry the SAME
  * anti-freeze protection: claim the lock NOW (no "due?" check, like reset_bot), run
  * the cycle under the hard timeout, and GUARANTEE the process exits before the lock's
- * TTL via a watchdog. If a cycle or a reset holds the lock, refuse cleanly.
+ * TTL via a watchdog. If a cycle or a reset holds the lock, refuse cleanly. On a clean
+ * finish it releases the lock; on a TIMEOUT it exits KEEPING the lock — never freeing
+ * it while a background orphan might still write — and lets it expire at its TTL.
  */
 async function main(): Promise<number> {
   const supabase = getSupabaseClient();
@@ -65,7 +82,7 @@ async function main(): Promise<number> {
   // No Supabase (local dev, decide-only): nothing is shared, no lock to take — run
   // unguarded (still under the timeout). loadLedger → [], capital → env bootstrap.
   if (!supabase) {
-    return runCycle();
+    return (await runCycle()).exitCode;
   }
 
   const runToken = randomUUID();
@@ -89,6 +106,7 @@ async function main(): Promise<number> {
   }, config.scheduler.maxCycleSeconds * 1000 + WATCHDOG_GRACE_MS);
 
   let claimed = false;
+  let settled = false; // decide() returned/threw (no orphan) → safe to release the lock
   try {
     claimed = await claimManualRun(supabase, runToken, config.scheduler.lockTtlSeconds);
     if (!claimed) {
@@ -97,13 +115,28 @@ async function main(): Promise<number> {
       );
       return 1;
     }
-    return await runCycle();
+    const run = await runCycle();
+    settled = run.settled;
+    return run.exitCode;
   } finally {
-    // Release only if we actually claimed (best-effort; if IT hangs, the watchdog —
-    // still armed — fires). Fenced by the token: a reclaimed lock makes it a no-op.
-    // Then cancel the watchdog: only a completed release lets the clean force-exit run.
-    if (claimed && !(await releaseManualRun(supabase, runToken))) {
-      console.warn('[decide] run-lock was already reclaimed (overran lockTtl) before release.');
+    if (claimed && settled) {
+      // The cycle SETTLED (success or error) — no background orphan — so release the
+      // lock (best-effort; if IT hangs, the watchdog still force-exits). A stalled
+      // release is harmless here: there is no orphan to race against.
+      if (!(await releaseManualRun(supabase, runToken))) {
+        console.warn('[decide] run-lock was already reclaimed (overran lockTtl) before release.');
+      }
+    } else if (claimed) {
+      // TIMEOUT: decide() may still be writing in the background. Do NOT release —
+      // freeing the lock now would mark it AVAILABLE while the orphan still writes,
+      // letting a reset/beat claim and write concurrently (the very race this PR
+      // closes). Exit KEEPING the lock: process.exit kills the orphan, and the lock
+      // expires on its own at its TTL. The bot stays blocked until then — a rare,
+      // abnormal case where a temporary block beats a corruption race.
+      console.warn(
+        '[decide] cycle timed out — KEEPING the run-lock (a background orphan may still ' +
+          'write); it expires at its TTL and the scheduler resumes then.',
+      );
     }
     clearTimeout(watchdog);
   }
@@ -111,12 +144,12 @@ async function main(): Promise<number> {
 
 main()
   .then((code) => {
-    // Force a clean exit — exactly like beat.ts. A cycle that hit the hard timeout
-    // keeps running in the background (a promise race can't cancel it); exiting now
-    // kills that orphan BEFORE the lock TTL can expire, so a reset/beat can never
-    // reclaim a lock whose manual cycle is still alive. All important DB writes are
-    // awaited above (the lock is already released); any partial work on a timeout is
-    // covered by PR B's booking-first replay safety.
+    // Force a clean exit — like beat.ts. A timed-out cycle keeps running in the
+    // background (a promise race can't cancel it); exiting now kills that orphan BEFORE
+    // the lock's TTL, so a reset/beat can never reclaim a lock whose manual cycle is
+    // still alive. On a clean finish the lock was already released above; on a timeout
+    // it is deliberately KEPT (never freed while the orphan lives) and expires on its
+    // own. Any partial work is covered by PR B's booking-first replay safety.
     process.exit(code);
   })
   .catch((err: unknown) => {
