@@ -8,6 +8,7 @@ import {
   type DecisionRow,
 } from '../persistence/decisions.js';
 import { loadLedger } from '../persistence/executions.js';
+import { loadStartingCapital } from '../persistence/startingCapital.js';
 import { derivePortfolio, type VirtualPortfolio } from '../portfolio/derive.js';
 import {
   buildPriceLookup,
@@ -68,8 +69,14 @@ export async function decide(): Promise<DecideResult> {
   const reserveStable = reserveStables(config)[0] ?? 'USDT';
   const priceOf = buildPriceLookup(context, reserveStable);
   const ledger = await loadLedger(supabase);
+  // The sovereign starting capital now lives in the DB (bot_state) so the upcoming
+  // reset utility can redefine it from the dashboard. Fall back to the env bootstrap
+  // when the DB has no value yet (pre-migration / vierge base / unreachable): the
+  // derived portfolio is identical because the seed equals the env value.
+  const startingCapital =
+    (await loadStartingCapital(supabase)) ?? dec(config.execution.startingCapitalUsd);
   const portfolio = derivePortfolio(ledger, {
-    startingCapital: dec(config.execution.startingCapitalUsd),
+    startingCapital,
     reserveAsset: reserveStable,
     priceOf,
   });

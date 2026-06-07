@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { dec } from '../money.js';
+import { dec, fromNumeric } from '../money.js';
 import { derivePortfolio, type PriceLookup } from '../portfolio/derive.js';
 import type { LedgerEntry } from '../persistence/executions.js';
 import {
@@ -343,6 +343,18 @@ assert.equal(prepareEquitySnapshot('decided', 9, null), null, 'no valued book (c
 const prepared = prepareEquitySnapshot('error', 9, snapPort);
 assert.ok(prepared !== null && prepared.decision_id === 9, 'decided / error / parse_failed with prices → a photo, keyed to the decision');
 console.log('  ok: prepareEquitySnapshot photographs decided/error/parse_failed, never skipped / null-id / null-book');
+passed += 1;
+
+// Starting capital moves to the DB (bot_state) but the VALUE is unchanged: migration
+// 0009 seeds the exact env bootstrap, so the derived portfolio is byte-identical
+// whether the bot reads the DB or falls back to the env. This guards the env side of
+// that equality — the SQL seed (500) must stay in sync with the env bootstrap, and
+// fromNumeric(seed) must parse to the same Decimal as dec(envValue).
+assert.ok(
+  fromNumeric('500').equals(dec(config.execution.startingCapitalUsd)),
+  `starting-capital invariance: the DB seed (500) must equal the env bootstrap (got ${config.execution.startingCapitalUsd})`,
+);
+console.log('  ok: starting-capital DB seed equals the env bootstrap (derived portfolio unchanged)');
 passed += 1;
 
 console.log(`\n${passed} invariant checks passed.`);
