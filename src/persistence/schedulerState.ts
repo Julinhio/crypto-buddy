@@ -130,3 +130,40 @@ export async function finishRun(supabase: SupabaseClient, p: FinishRunParams): P
   if (error) throw new Error(`finish_run RPC failed: ${error.message}`);
   return data === true;
 }
+
+/**
+ * Claims the run-lock for a MANUAL one-shot cycle (`npm run decide`) — the same
+ * atomic compare-and-set as claim_due_run MINUS the "due?" check (a manual run wants
+ * to run NOW, like reset_bot). Returns true on a claim, false when a live lock is
+ * held (a scheduled cycle or a reset owns it → the manual run must refuse). THROWS on
+ * an infra fault (RPC error) so the manual process exits non-zero.
+ */
+export async function claimManualRun(
+  supabase: SupabaseClient,
+  runToken: string,
+  lockTtlSeconds: number,
+): Promise<boolean> {
+  const { data, error } = await supabase.rpc('claim_manual_run', {
+    p_run_token: runToken,
+    p_lock_ttl_seconds: lockTtlSeconds,
+  });
+  if (error) throw new Error(`claim_manual_run RPC failed: ${error.message}`);
+  return data === true;
+}
+
+/**
+ * Releases a manual run's lock, FENCED by the run_token (like finish_run): true if we
+ * still held it, false if it had already been reclaimed (our run overran lockTtl).
+ * Leaves next_check_at untouched — a manual run is orthogonal to the scheduler's
+ * cadence. THROWS on an infra fault (RPC error).
+ */
+export async function releaseManualRun(
+  supabase: SupabaseClient,
+  runToken: string,
+): Promise<boolean> {
+  const { data, error } = await supabase.rpc('release_manual_run', {
+    p_run_token: runToken,
+  });
+  if (error) throw new Error(`release_manual_run RPC failed: ${error.message}`);
+  return data === true;
+}

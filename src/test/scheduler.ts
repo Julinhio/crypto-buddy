@@ -18,6 +18,8 @@ import {
   recordHeartbeat,
   claimDueRun,
   finishRun,
+  claimManualRun,
+  releaseManualRun,
   type FinishRunParams,
 } from '../persistence/schedulerState.js';
 import { runHeartbeat, runCycleWithTimeout } from '../scheduler/heartbeat.js';
@@ -158,6 +160,16 @@ ok('claimDueRun maps a claimed row', (await claimDueRun(rpc([claimRow]), 'tok', 
 await okThrows('finishRun throws on an RPC error', finishRun(rpcError(), fp));
 await okResolves('finishRun → true when the RPC reports success', finishRun(rpc(true), fp), true);
 await okResolves('finishRun → false ONLY for the fencing case', finishRun(rpc(false), fp), false);
+
+// claim_manual_run / release_manual_run: throw on RPC error; the boolean is the result
+// (claimed / busy, released / reclaimed). The manual entrypoint routes through these
+// so it honors the SAME lock as the beat and the reset.
+await okThrows('claimManualRun throws on an RPC error', claimManualRun(rpcError(), 'tok', 600));
+await okResolves('claimManualRun → true when the lock is claimed', claimManualRun(rpc(true), 'tok', 600), true);
+await okResolves('claimManualRun → false when a live lock is held (busy)', claimManualRun(rpc(false), 'tok', 600), false);
+await okThrows('releaseManualRun throws on an RPC error', releaseManualRun(rpcError(), 'tok'));
+await okResolves('releaseManualRun → true when we still held the lock', releaseManualRun(rpc(true), 'tok'), true);
+await okResolves('releaseManualRun → false when the lock was reclaimed (fencing)', releaseManualRun(rpc(false), 'tok'), false);
 
 // Orchestrator: an unconfigured Supabase client is a config error → throw, not no-op.
 await okThrows('runHeartbeat throws when Supabase is unconfigured', runHeartbeat({ supabase: null }));
