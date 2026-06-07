@@ -45,12 +45,19 @@ async function runCycle(): Promise<number> {
 }
 
 /**
+ * Grace added to the cycle budget for the watchdog deadline: enough for a clean
+ * release to finish, while keeping the deadline well below lockTtl (config: the
+ * cycle budget 300s + 15s ≪ the 600s lock TTL).
+ */
+const WATCHDOG_GRACE_MS = 15_000;
+
+/**
  * Manual one-shot cycle (`npm run decide`). A manual run is a REAL mutation path — it
  * persists decisions and places orders — so it must be mutually exclusive with the
  * scheduled beat AND with a reset, through the SAME run-lock, AND carry the SAME
  * anti-freeze protection: claim the lock NOW (no "due?" check, like reset_bot), run
- * the cycle under the hard timeout, release, then force-exit. If a cycle or a reset
- * holds the lock, refuse cleanly.
+ * the cycle under the hard timeout, and GUARANTEE the process exits before the lock's
+ * TTL via a watchdog. If a cycle or a reset holds the lock, refuse cleanly.
  */
 async function main(): Promise<number> {
   const supabase = getSupabaseClient();
@@ -69,14 +76,35 @@ async function main(): Promise<number> {
     return 1;
   }
 
+  // WATCHDOG — once we hold the lock, GUARANTEE the process exits before the lock can
+  // expire, independent of EVERY await on the way out. A force-exit placed after the
+  // release (round 2) is itself defeated when the release hangs — exactly the Supabase
+  // stall we tolerate — leaving an orphaned (timed-out) cycle alive past lockTtl for a
+  // beat/reset to reclaim mid-write. This timer can be wedged by NO blocking call: it
+  // fires at an absolute deadline (cycle budget + a small grace), strictly below
+  // lockTtl, and force-exits — killing any orphan before the lock is free. Only a
+  // completed release clears it.
+  // (Note: the scheduled beat has the same shape — finishRun + the best-effort calls
+  //  are awaited before beat.ts's process.exit(0) — so a hung release there could also
+  //  strand an orphan. A common guard to add to the beat later; out of scope here.)
+  const watchdog = setTimeout(() => {
+    console.error(
+      `[decide] watchdog: still holding the run-lock ${config.scheduler.maxCycleSeconds}s+ after ` +
+        'claiming it — a call on the exit path stalled; force-exiting to free the lock before its TTL.',
+    );
+    process.exit(1);
+  }, config.scheduler.maxCycleSeconds * 1000 + WATCHDOG_GRACE_MS);
+
   try {
     return await runCycle();
   } finally {
-    // Release even if the cycle threw/timed out. Fenced by the token: if our lock
-    // expired and was reclaimed, this is a no-op — we never clobber the new owner.
+    // Best-effort release; if IT hangs, the watchdog (not yet cleared) fires. Fenced
+    // by the token: if our lock expired and was reclaimed, this is a no-op. Only a
+    // completed release clears the watchdog and lets the clean force-exit run.
     if (!(await releaseManualRun(supabase, runToken))) {
       console.warn('[decide] run-lock was already reclaimed (overran lockTtl) before release.');
     }
+    clearTimeout(watchdog);
   }
 }
 
