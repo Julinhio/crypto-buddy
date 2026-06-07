@@ -4,6 +4,15 @@ import type { VirtualPortfolio } from '../portfolio/derive.js';
 
 const TABLE = 'equity_snapshots';
 
+/**
+ * Hard cap on the snapshot write. Best-effort must mean NON-BLOCKING: a request
+ * that HANGS (rather than rejects) would never reach the catch and would keep the
+ * cycle pending until the scheduler's whole budget elapsed. Mirrors the Telegram
+ * best-effort timeout (alerting/telegram.ts). AbortSignal.timeout is unref'd, so
+ * it never delays the manual `npm run decide` exit either.
+ */
+const SNAPSHOT_WRITE_TIMEOUT_MS = 5_000;
+
 /** One open position in a snapshot's composition (plain numbers — see below). */
 interface SnapshotPosition {
   asset: string;
@@ -63,10 +72,11 @@ export function buildEquitySnapshot(
  * Writes ONE equity photo for a wake-up — best-effort, never blocking.
  *
  * This is OBSERVABILITY, not trading: same posture as the Telegram / Healthchecks
- * calls in the beat. It NEVER throws and NEVER affects the cycle — a failed write
- * is logged and swallowed. A missed snapshot is a missing curve point, never a
- * missed or rolled-back trade; its fate is deliberately decoupled from the
- * decision's and the execution's.
+ * calls in the beat. It NEVER throws, and NEVER blocks the cycle — the write is
+ * bounded by a short abort timeout, so even a HUNG request can't stall it — and a
+ * failed/timed-out write is logged and swallowed. A missed snapshot is a missing
+ * curve point, never a missed or rolled-back trade, nor a poisoned cycle outcome;
+ * its fate is deliberately decoupled from the decision's and the execution's.
  *
  * Skips silently when there is no durable decision to attach the photo to (no
  * Supabase client, or the decision insert failed → no id): a snapshot is 1:1 with
@@ -82,7 +92,10 @@ export async function recordEquitySnapshot(
   try {
     const { error } = await supabase
       .from(TABLE)
-      .insert(buildEquitySnapshot(decisionId, portfolio));
+      .insert(buildEquitySnapshot(decisionId, portfolio))
+      // Abort a hung write so it can't burn the cycle budget (= block the cycle and
+      // misclassify an already-committed decision/trade as a timeout error).
+      .abortSignal(AbortSignal.timeout(SNAPSHOT_WRITE_TIMEOUT_MS));
     if (error) throw new Error(error.message);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
