@@ -1,15 +1,17 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Decimal } from '../money.js';
+import type { DecisionStatus } from './decisions.js';
 import type { VirtualPortfolio } from '../portfolio/derive.js';
 
 const TABLE = 'equity_snapshots';
 
 /**
- * Hard cap on the snapshot write. Best-effort must mean NON-BLOCKING: a request
- * that HANGS (rather than rejects) would never reach the catch and would keep the
- * cycle pending until the scheduler's whole budget elapsed. Mirrors the Telegram
- * best-effort timeout (alerting/telegram.ts). AbortSignal.timeout is unref'd, so
- * it never delays the manual `npm run decide` exit either.
+ * Hard cap on the snapshot write. The write already lives OUTSIDE the timed cycle
+ * (see writeEquitySnapshot), so it can never weigh on the cycle verdict; this
+ * timeout is the second guarantee — that the photo gets a bounded window to write
+ * before the one-shot beat / CLI process exits, rather than hanging it. Mirrors the
+ * Telegram best-effort timeout (alerting/telegram.ts). AbortSignal.timeout is
+ * unref'd on Node 22, so it never delays a clean process exit either.
  */
 const SNAPSHOT_WRITE_TIMEOUT_MS = 5_000;
 
@@ -69,39 +71,58 @@ export function buildEquitySnapshot(
 }
 
 /**
- * Writes ONE equity photo for a wake-up — best-effort, never blocking.
+ * Decides whether a wake-up warrants a photo and, if so, BUILDS it — PURE, no I/O,
+ * so it is safe to run anywhere, including inside the timed cycle. This is the ONE
+ * place that encodes "which wake-ups get a snapshot":
+ *   - `skipped`  = empty universe = no prices  → no photo;
+ *   - a cycle that timed out / threw before returning a valued book (portfolio
+ *     null), or a decision that wasn't persisted (no id) → nothing to key a photo
+ *     to → no photo;
+ *   - `decided` / `error` / `parse_failed` (all past the empty-universe guard, so
+ *     the book IS valued) → a photo.
+ * The actual write (writeEquitySnapshot) is then done OUTSIDE the cycle.
+ */
+export function prepareEquitySnapshot(
+  status: DecisionStatus,
+  decisionId: number | null,
+  portfolio: VirtualPortfolio | null,
+): EquitySnapshotInsert | null {
+  if (status === 'skipped' || decisionId == null || portfolio == null) return null;
+  return buildEquitySnapshot(decisionId, portfolio);
+}
+
+/**
+ * Writes ONE prepared equity photo — best-effort, and the ONLY part of the snapshot
+ * path that performs I/O. It is called STRICTLY OUTSIDE the promise whose result
+ * determines the cycle's success/failure (beat.ts after the beat's real work, or
+ * the CLI after the cycle), so a slow or hung write can NEVER lose the cycle's
+ * timeout race, flip a committed cycle to an error, or trigger backoff/alerts. Same
+ * best-effort tier as the Telegram / Healthchecks calls.
  *
- * This is OBSERVABILITY, not trading: same posture as the Telegram / Healthchecks
- * calls in the beat. It NEVER throws, and NEVER blocks the cycle — the write is
- * bounded by a short abort timeout, so even a HUNG request can't stall it — and a
- * failed/timed-out write is logged and swallowed. A missed snapshot is a missing
- * curve point, never a missed or rolled-back trade, nor a poisoned cycle outcome;
- * its fate is deliberately decoupled from the decision's and the execution's.
- *
- * Skips silently when there is no durable decision to attach the photo to (no
- * Supabase client, or the decision insert failed → no id): a snapshot is 1:1 with
- * a `decisions` row, so without an id there is nothing to key it to. The DB's
+ * No-ops on a null snapshot (the wake-up didn't warrant one — see
+ * prepareEquitySnapshot) or a missing client. It NEVER throws; a failed or
+ * timed-out write is logged and swallowed. A missed snapshot is a missing curve
+ * point, never a missed/rolled-back trade nor a poisoned cycle outcome. The DB's
  * UNIQUE(decision_id) is the backstop against a double photo of the same wake-up.
  */
-export async function recordEquitySnapshot(
+export async function writeEquitySnapshot(
   supabase: SupabaseClient | null,
-  decisionId: number | null,
-  portfolio: VirtualPortfolio,
+  snapshot: EquitySnapshotInsert | null,
 ): Promise<void> {
-  if (!supabase || decisionId == null) return;
+  if (!supabase || snapshot == null) return;
   try {
     const { error } = await supabase
       .from(TABLE)
-      .insert(buildEquitySnapshot(decisionId, portfolio))
-      // Abort a hung write so it can't burn the cycle budget (= block the cycle and
-      // misclassify an already-committed decision/trade as a timeout error).
+      .insert(snapshot)
+      // Bound the write so even a HUNG request can't stall the one-shot process
+      // before it exits (the write is already off the cycle's critical path).
       .abortSignal(AbortSignal.timeout(SNAPSHOT_WRITE_TIMEOUT_MS));
     if (error) throw new Error(error.message);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(
-      `[warn] equity snapshot not written for decision #${decisionId} (${msg}) — ` +
-        'best-effort, cycle continues.',
+      `[warn] equity snapshot not written for decision #${snapshot.decision_id} (${msg}) — ` +
+        'best-effort, ignored.',
     );
   }
 }

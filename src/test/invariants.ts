@@ -13,7 +13,7 @@ import { snapQty, validateMovement, type SymbolRules } from '../execution/symbol
 import { planMovements } from '../execution/plan.js';
 import type { OrderResult } from '../execution/testnetOrder.js';
 import { clampAllocation } from '../risk/clamp.js';
-import { buildEquitySnapshot } from '../persistence/equitySnapshots.js';
+import { buildEquitySnapshot, prepareEquitySnapshot } from '../persistence/equitySnapshots.js';
 import { config, type AppConfig } from '../config/index.js';
 
 /**
@@ -333,6 +333,16 @@ const staleBtc = staleSnap.positions.find((p) => p.asset === 'BTC');
 assert.equal(staleBtc?.price_stale, true, 'no live price → position flagged price_stale');
 assert.equal(staleBtc!.price, Number(stalePort.positions[0]!.price.toFixed(2)), 'a stale position is valued at avg cost');
 console.log('  ok: a position with no live price is flagged price_stale (valued at avg cost)');
+passed += 1;
+
+// prepareEquitySnapshot — the ONE place encoding which wake-ups get a photo (pure,
+// no I/O, so it can sit inside the timed cycle; the WRITE happens outside it).
+assert.equal(prepareEquitySnapshot('skipped', 9, snapPort), null, 'skipped (empty universe = no prices) → no photo');
+assert.equal(prepareEquitySnapshot('decided', null, snapPort), null, 'no persisted decision id → no photo');
+assert.equal(prepareEquitySnapshot('decided', 9, null), null, 'no valued book (cycle timed out / threw) → no photo');
+const prepared = prepareEquitySnapshot('error', 9, snapPort);
+assert.ok(prepared !== null && prepared.decision_id === 9, 'decided / error / parse_failed with prices → a photo, keyed to the decision');
+console.log('  ok: prepareEquitySnapshot photographs decided/error/parse_failed, never skipped / null-id / null-book');
 passed += 1;
 
 console.log(`\n${passed} invariant checks passed.`);
