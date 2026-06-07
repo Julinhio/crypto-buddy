@@ -381,10 +381,11 @@ await assert.rejects(
   /not usable/,
   'present but non-positive (corrupt) → throw',
 );
-// Postgres `numeric` accepts NaN / ±Infinity / magnitudes beyond Number.MAX_VALUE: all
-// pass a bare positivity check but break (→ Infinity → null) once projected to a Number,
-// so the reader must reject them too — present-but-unusable = fault, never a fallback.
-for (const bad of ['Infinity', '-Infinity', 'NaN', '1e400']) {
+// Postgres `numeric` accepts NaN / ±Infinity / magnitudes outside the JS double range:
+// projected to a Number they become Infinity (→ null), or OVERFLOW (1e400 → Infinity) /
+// UNDERFLOW (1e-400 → 0) — a book rounded to garbage. The reader validates the Number
+// projection (finite AND > 0), rejecting them all; present-but-unusable = fault.
+for (const bad of ['Infinity', '-Infinity', 'NaN', '1e400', '1e-400']) {
   await assert.rejects(
     loadStartingCapital(fakeSupabase({ data: { starting_capital_usd: bad } })),
     /not usable/,

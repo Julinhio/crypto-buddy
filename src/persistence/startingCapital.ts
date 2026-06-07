@@ -52,16 +52,19 @@ export async function loadStartingCapital(
   if (raw == null || raw === '') return null; // query OK, no value set → env bootstrap
 
   const capital = fromNumeric(raw);
-  // A present value is only usable if it's POSITIVE and FINITE once projected to a JS
-  // Number — the form toPortfolioView / the snapshot builder serialize it into. Postgres
-  // `numeric` accepts NaN, ±Infinity, and magnitudes beyond Number.MAX_VALUE; those slip
-  // past a bare positivity check and then become Infinity (serialized to null) downstream,
-  // corrupting the portfolio and the decision context. Present-but-unusable is a fault,
-  // exactly like non-positive: fail loud, never a silent fallback. Validating here, at the
-  // point of use, protects the book whatever the value's origin (reset write, manual edit).
-  if (!capital.gt(0) || !Number.isFinite(capital.toNumber())) {
+  // Validate the Number PROJECTION (the form toPortfolioView / the snapshot builder
+  // serialize the book into) — NOT the Decimal — because that projection is where a
+  // bad value does its damage. Project once, then require finite AND strictly positive.
+  // This single condition is EXHAUSTIVE for Number projections: it rejects NaN, ±Infinity,
+  // overflow (1e400 → Infinity), underflow (1e-400 → 0), zero, and negatives. (Testing
+  // positivity on the Decimal would miss underflow: 1e-400 is a positive Decimal but
+  // projects to 0.) Postgres `numeric` admits all of these. Present-but-unusable is a
+  // fault, exactly like non-positive: fail loud, never a silent fallback — and at the
+  // point of use, so the book is protected whatever the value's origin (reset, manual edit).
+  const n = capital.toNumber();
+  if (!Number.isFinite(n) || n <= 0) {
     throw new Error(
-      `starting capital in bot_state is not usable (must be a positive, finite Number): ${capital.toString()}`,
+      `starting capital in bot_state is not usable (must project to a positive, finite Number): ${capital.toString()}`,
     );
   }
   return capital;
