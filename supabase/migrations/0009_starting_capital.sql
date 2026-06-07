@@ -26,11 +26,14 @@
 -- Decimal (contrast equity_snapshots' double-precision observability columns).
 --
 -- How to apply: paste into the Supabase SQL editor and Run (or `supabase db push`).
--- DEPLOY ORDER: apply this migration BEFORE deploying the new bot code, so the
--- column exists and the bot takes the NULL → env-bootstrap path. (If the code ships
--- first, the bot reads a not-yet-existing column; it treats undefined_column as the
--- same objective absence and still bootstraps on the env — but migration-first is
--- the clean path and avoids relying on that detection.)
+-- DEPLOY ORDER — a HARD design constraint, not a recommendation: apply this migration
+-- BEFORE deploying the new bot code. The reader does NOT special-case a missing
+-- column (it doesn't sniff Postgres SQLSTATE / PostgREST codes — they aren't reliably
+-- surfaced). So if the code ships first, the SELECT of this not-yet-existing column
+-- FAILS, and the bot fails the cycle loudly (backoff) rather than bootstrapping — by
+-- design, that loud failure is the correct signal that the migration was skipped, not
+-- something to paper over. With migration-first, the column exists and the bot takes
+-- the clean NULL → env-bootstrap path.
 
 alter table public.bot_state
   add column if not exists starting_capital_usd numeric;
