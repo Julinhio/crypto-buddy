@@ -13,6 +13,7 @@ import { snapQty, validateMovement, type SymbolRules } from '../execution/symbol
 import { planMovements } from '../execution/plan.js';
 import type { OrderResult } from '../execution/testnetOrder.js';
 import { clampAllocation } from '../risk/clamp.js';
+import { buildEquitySnapshot, prepareEquitySnapshot } from '../persistence/equitySnapshots.js';
 import { config, type AppConfig } from '../config/index.js';
 
 /**
@@ -294,6 +295,54 @@ assert.equal(trace.intent_execution_id, 99, 'a trace links back to its intent');
 assert.equal(trace.validation_status, null, 'a trace has no sovereign validation_status');
 assert.ok(trace.ledger_base_delta.isZero() && trace.ledger_quote_delta.isZero(), 'a testnet trace NEVER moves the book');
 console.log('  ok: only a booked intent moves the book — crumbs and testnet traces carry zero ledger delta');
+passed += 1;
+
+// --- Equity snapshot: faithful projection of the derived book (pure, no network) ---
+console.log('\nEquity snapshot — a faithful projection of the existing derivation:');
+
+// A book with one open BTC position, valued at a LIVE wake-up price.
+const snapBook: LedgerEntry[] = [entry('BTC/USDT', 0.01, -500, 50000)]; // bought 0.01 BTC for 500
+const snapPort = derivePortfolio(snapBook, { startingCapital: CAPITAL, reserveAsset: 'USDT', priceOf: defaultPrices });
+const snap = buildEquitySnapshot(77, snapPort);
+
+assert.equal(snap.decision_id, 77, 'snapshot carries its decision_id (the FK / dedup key)');
+assert.equal(snap.reserve_asset, 'USDT', 'snapshot records the reserve asset');
+assert.equal(snap.equity_usd, Number(snapPort.equity.toFixed(2)), 'equity_usd == derived equity (2 dp)');
+assert.equal(snap.cash_usd, Number(snapPort.cash.toFixed(2)), 'cash_usd == derived cash (2 dp)');
+
+// The accounting identity survives the projection: equity == cash + Σ position values.
+const sumValues = snap.positions.reduce((s, p) => s + p.value_usd, 0);
+assert.ok(
+  Math.abs(snap.equity_usd - (snap.cash_usd + sumValues)) < 0.01,
+  `equity == cash + Σ position values (got ${snap.equity_usd} vs ${snap.cash_usd + sumValues})`,
+);
+
+const btc = snap.positions.find((p) => p.asset === 'BTC');
+assert.ok(btc, 'BTC position present in the composition');
+assert.equal(btc!.price, 50000, 'BTC valued at the live wake-up price');
+assert.equal(btc!.price_stale, false, 'live price → not stale');
+assert.equal(typeof btc!.qty, 'number', 'qty serialized as a plain number (clean curve read)');
+console.log('  ok: equity / cash / composition match the derivation, and the identity holds (live price)');
+passed += 1;
+
+// Same book, but NO live price this wake-up → valued at avg cost, flagged stale.
+const stalePrices: PriceLookup = (a) => (a === 'USDT' ? dec(1) : null);
+const stalePort = derivePortfolio(snapBook, { startingCapital: CAPITAL, reserveAsset: 'USDT', priceOf: stalePrices });
+const staleSnap = buildEquitySnapshot(78, stalePort);
+const staleBtc = staleSnap.positions.find((p) => p.asset === 'BTC');
+assert.equal(staleBtc?.price_stale, true, 'no live price → position flagged price_stale');
+assert.equal(staleBtc!.price, Number(stalePort.positions[0]!.price.toFixed(2)), 'a stale position is valued at avg cost');
+console.log('  ok: a position with no live price is flagged price_stale (valued at avg cost)');
+passed += 1;
+
+// prepareEquitySnapshot — the ONE place encoding which wake-ups get a photo (pure,
+// no I/O, so it can sit inside the timed cycle; the WRITE happens outside it).
+assert.equal(prepareEquitySnapshot('skipped', 9, snapPort), null, 'skipped (empty universe = no prices) → no photo');
+assert.equal(prepareEquitySnapshot('decided', null, snapPort), null, 'no persisted decision id → no photo');
+assert.equal(prepareEquitySnapshot('decided', 9, null), null, 'no valued book (cycle timed out / threw) → no photo');
+const prepared = prepareEquitySnapshot('error', 9, snapPort);
+assert.ok(prepared !== null && prepared.decision_id === 9, 'decided / error / parse_failed with prices → a photo, keyed to the decision');
+console.log('  ok: prepareEquitySnapshot photographs decided/error/parse_failed, never skipped / null-id / null-book');
 passed += 1;
 
 console.log(`\n${passed} invariant checks passed.`);

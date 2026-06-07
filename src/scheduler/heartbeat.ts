@@ -4,6 +4,7 @@ import { config } from '../config/index.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
 import { decide, type DecideResult } from '../decision/decide.js';
 import { recordHeartbeat, claimDueRun, finishRun } from '../persistence/schedulerState.js';
+import { prepareEquitySnapshot, type EquitySnapshotInsert } from '../persistence/equitySnapshots.js';
 import {
   canClaim,
   classifyOutcome,
@@ -30,6 +31,12 @@ export interface HeartbeatResult {
    * flags are already persisted by finishRun, so a failed send is never retried.
    */
   alerts?: AlertPayload[];
+  /**
+   * Best-effort equity photo for THIS beat's cycle, to be WRITTEN by beat.ts after
+   * the beat's real work — outside the timed cycle, same tier as Telegram/Healthchecks.
+   * Absent on a no-op beat (no cycle ran); null when the wake-up warranted none.
+   */
+  equitySnapshot?: EquitySnapshotInsert | null;
 }
 
 /** The cycle's result, normalized — a timeout or a throw both become a technical error. */
@@ -38,6 +45,13 @@ export interface CycleOutcome {
   appliedDelayMinutes: number | null;
   decisionId: number | null;
   detail: string;
+  /**
+   * The equity photo to write best-effort AFTER the verdict is sealed. PREPARED
+   * here (pure, no I/O — safe inside the timed wrapper) but WRITTEN outside it, so
+   * the stall-capable write can never lose the timeout race. Null when the wake-up
+   * warrants none (skipped) or the cycle didn't return a valued book (timeout/throw).
+   */
+  equitySnapshot: EquitySnapshotInsert | null;
 }
 
 /**
@@ -75,6 +89,8 @@ export async function runCycleWithTimeout(
         appliedDelayMinutes: null,
         decisionId: null,
         detail: `cycle exceeded the ${Math.round(timeoutMs / 1000)}s budget — treated as a technical error (backoff)`,
+        // Timed out → decide() never returned a valued book; nothing to photograph.
+        equitySnapshot: null,
       };
     }
     return {
@@ -82,6 +98,9 @@ export async function runCycleWithTimeout(
       appliedDelayMinutes: raced.row.applied_delay_minutes ?? null,
       decisionId: raced.decisionId,
       detail: `status=${raced.status}`,
+      // PURE prepare only (object mapping, no I/O). The WRITE happens outside this
+      // raced promise (beat.ts / CLI), so it can never weigh on the verdict above.
+      equitySnapshot: prepareEquitySnapshot(raced.status, raced.decisionId, raced.portfolio),
     };
   } catch (err) {
     // Capture the STACK (not just the message) for the post-mortem in scheduler_runs.
@@ -90,6 +109,8 @@ export async function runCycleWithTimeout(
       appliedDelayMinutes: null,
       decisionId: null,
       detail: `cycle threw: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+      // Threw before returning a valued book → nothing to photograph.
+      equitySnapshot: null,
     };
   } finally {
     // Essential: clear the timer on the resolve path, else a pending 5-min timer
@@ -165,7 +186,7 @@ export async function runHeartbeat(
   //    under a hard timeout = maxCycleSeconds. A timeout or a throw → technical
   //    error (backoff); beat.ts force-exits afterwards so a timed-out cycle can't
   //    keep running and act after the lock is released.
-  const { status, appliedDelayMinutes: appliedDelay, decisionId, detail } = await runCycleWithTimeout(
+  const { status, appliedDelayMinutes: appliedDelay, decisionId, detail, equitySnapshot } = await runCycleWithTimeout(
     decide,
     config.scheduler.maxCycleSeconds * 1000,
   );
@@ -217,7 +238,7 @@ export async function runHeartbeat(
     );
     // Do NOT alert on the fencing path: the flags were not persisted (the fenced
     // UPDATE affected 0 rows), so the reclaiming run owns the alert evaluation.
-    return { action: 'ran', reason: outcome, outcome, delayMinutes, missedBeats: missed, lockLost: true };
+    return { action: 'ran', reason: outcome, outcome, delayMinutes, missedBeats: missed, lockLost: true, equitySnapshot };
   }
 
   // Build the alerts that crossed UP on this beat (at most one per trigger). The DB
@@ -237,5 +258,5 @@ export async function runHeartbeat(
     `[beat] run #${claim.runId} done — outcome=${outcome}, next check in ${delayMinutes} min ` +
       `(consecutive_failures=${failuresAfter}, floor_streak=${floorStreak}).`,
   );
-  return { action: 'ran', reason: outcome, outcome, delayMinutes, missedBeats: missed, lockLost: false, alerts };
+  return { action: 'ran', reason: outcome, outcome, delayMinutes, missedBeats: missed, lockLost: false, alerts, equitySnapshot };
 }
