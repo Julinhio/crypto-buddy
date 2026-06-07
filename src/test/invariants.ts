@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { dec, fromNumeric } from '../money.js';
+import { dec } from '../money.js';
 import { derivePortfolio, type PriceLookup } from '../portfolio/derive.js';
 import type { LedgerEntry } from '../persistence/executions.js';
 import {
@@ -14,6 +14,7 @@ import { planMovements } from '../execution/plan.js';
 import type { OrderResult } from '../execution/testnetOrder.js';
 import { clampAllocation } from '../risk/clamp.js';
 import { buildEquitySnapshot, prepareEquitySnapshot } from '../persistence/equitySnapshots.js';
+import { isSchemaNotMigrated } from '../persistence/startingCapital.js';
 import { config, type AppConfig } from '../config/index.js';
 
 /**
@@ -345,16 +346,26 @@ assert.ok(prepared !== null && prepared.decision_id === 9, 'decided / error / pa
 console.log('  ok: prepareEquitySnapshot photographs decided/error/parse_failed, never skipped / null-id / null-book');
 passed += 1;
 
-// Starting capital moves to the DB (bot_state) but the VALUE is unchanged: migration
-// 0009 seeds the exact env bootstrap, so the derived portfolio is byte-identical
-// whether the bot reads the DB or falls back to the env. This guards the env side of
-// that equality — the SQL seed (500) must stay in sync with the env bootstrap, and
-// fromNumeric(seed) must parse to the same Decimal as dec(envValue).
+// Starting capital reads from the DB (bot_state) with a STRICT fallback policy: the
+// env bootstrap fires ONLY on an OBJECTIVE absence of value — never on a real read
+// failure, which must fail the cycle so the book is never derived on a possibly-stale
+// value after a divergent reset. isSchemaNotMigrated is the load-bearing distinction.
+assert.equal(isSchemaNotMigrated({ code: '42703' }), true, 'undefined_column → schema not in place → env bootstrap');
+assert.equal(isSchemaNotMigrated({ code: '42P01' }), true, 'undefined_table → schema not in place → env bootstrap');
+assert.equal(isSchemaNotMigrated({ code: '08006' }), false, 'connection failure → real read error → fail (no fallback)');
+assert.equal(isSchemaNotMigrated({ code: '57014' }), false, 'query canceled / timeout → real read error → fail (no fallback)');
+assert.equal(isSchemaNotMigrated({ code: '' }), false, 'a network error (no SQLSTATE) is a real failure → fail');
+assert.equal(isSchemaNotMigrated(null), false, 'a non-PostgREST throw is a real failure → fail');
+console.log('  ok: starting-capital fallback only on objective absence (schema not migrated), never on a real read error');
+passed += 1;
+
+// Invariance: with NO seed, the live bot's bot_state value is NULL, so it bootstraps
+// on the env var (still 500) and derives the portfolio exactly as before this PR.
 assert.ok(
-  fromNumeric('500').equals(dec(config.execution.startingCapitalUsd)),
-  `starting-capital invariance: the DB seed (500) must equal the env bootstrap (got ${config.execution.startingCapitalUsd})`,
+  dec(config.execution.startingCapitalUsd).equals(dec(500)),
+  `starting-capital invariance: the env bootstrap must be 500 (got ${config.execution.startingCapitalUsd})`,
 );
-console.log('  ok: starting-capital DB seed equals the env bootstrap (derived portfolio unchanged)');
+console.log('  ok: starting-capital env bootstrap is 500 → derived portfolio unchanged (DB NULL after seedless migration)');
 passed += 1;
 
 console.log(`\n${passed} invariant checks passed.`);
