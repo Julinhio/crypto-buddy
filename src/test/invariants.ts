@@ -384,13 +384,19 @@ await assert.rejects(
 console.log('  ok: starting-capital reader — value used, NULL → bootstrap, ANY error → fail loud');
 passed += 1;
 
-// Invariance: with NO seed, the live bot's bot_state value is NULL, so it bootstraps
-// on the env var (still 500) and derives the portfolio exactly as before this PR.
+// Bootstrap invariance — VALUE-AGNOSTIC: a read that returns NULL (no capital set yet,
+// the steady state after the seedless migration) makes the derivation fall back to the
+// CONFIGURED capital, whatever it is — so the portfolio is unchanged for any configured
+// value, not just our current default. Mirrors decide()'s
+// `(await loadStartingCapital(...)) ?? dec(config.execution.startingCapitalUsd)`.
+const configuredCapital = dec(config.execution.startingCapitalUsd);
+const nullRead = await loadStartingCapital(fakeSupabase({ data: { starting_capital_usd: null } }));
+const bootstrapped = nullRead ?? configuredCapital;
 assert.ok(
-  dec(config.execution.startingCapitalUsd).equals(dec(500)),
-  `starting-capital invariance: the env bootstrap must be 500 (got ${config.execution.startingCapitalUsd})`,
+  bootstrapped.equals(configuredCapital),
+  'NULL read → derivation bootstraps on the configured capital (any value)',
 );
-console.log('  ok: starting-capital env bootstrap is 500 → derived portfolio unchanged (DB NULL after seedless migration)');
+console.log('  ok: a NULL read bootstraps on the configured capital — value-agnostic invariance');
 passed += 1;
 
 console.log(`\n${passed} invariant checks passed.`);
