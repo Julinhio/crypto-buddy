@@ -8,6 +8,7 @@ import {
   type DecisionRow,
 } from '../persistence/decisions.js';
 import { loadLedger } from '../persistence/executions.js';
+import { recordEquitySnapshot } from '../persistence/equitySnapshots.js';
 import { derivePortfolio, type VirtualPortfolio } from '../portfolio/derive.js';
 import {
   buildPriceLookup,
@@ -117,6 +118,10 @@ export async function decide(): Promise<DecideResult> {
       latency_ms: latencyMs,
     });
     const { persisted, id } = await insertDecision(supabase, row);
+    // Prices WERE available (we're past the empty-universe guard) — photograph the
+    // valued book even though no decision came out, so the curve has no gap on a
+    // wake-up where equity still moved. Best-effort; never fails the cycle.
+    await recordEquitySnapshot(supabase, id, portfolio);
     return emptyResult('error', persisted, id, row, portfolio);
   }
 
@@ -139,6 +144,9 @@ export async function decide(): Promise<DecideResult> {
       output_tokens: llm.outputTokens,
     });
     const { persisted, id } = await insertDecision(supabase, row);
+    // Same as the error path: prices were available and the book is valued, so the
+    // curve gets its point even though the model's output was unusable.
+    await recordEquitySnapshot(supabase, id, portfolio);
     return emptyResult('parse_failed', persisted, id, row, portfolio);
   }
 
@@ -201,6 +209,13 @@ export async function decide(): Promise<DecideResult> {
       targetReserve,
     });
   }
+
+  // Equity photo LAST — after the (already-placed) orders, so a slow snapshot write
+  // can never delay or block a trade. It captures the SAME pre-trade book the AI saw
+  // (executeMovements does not mutate `portfolio`): the live dashboard re-derives
+  // post-trade from the full ledger, so the two reconcile on the next wake-up. This
+  // transient, read-only divergence is the accepted price of best-effort decoupling.
+  await recordEquitySnapshot(supabase, id, portfolio);
 
   return {
     status: 'decided',
