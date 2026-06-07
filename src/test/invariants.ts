@@ -378,10 +378,20 @@ await assert.rejects(
 );
 await assert.rejects(
   loadStartingCapital(fakeSupabase({ data: { starting_capital_usd: '0' } })),
-  /non-positive/,
+  /not usable/,
   'present but non-positive (corrupt) → throw',
 );
-console.log('  ok: starting-capital reader — value used, NULL → bootstrap, ANY error → fail loud');
+// Postgres `numeric` accepts NaN / ±Infinity / magnitudes beyond Number.MAX_VALUE: all
+// pass a bare positivity check but break (→ Infinity → null) once projected to a Number,
+// so the reader must reject them too — present-but-unusable = fault, never a fallback.
+for (const bad of ['Infinity', '-Infinity', 'NaN', '1e400']) {
+  await assert.rejects(
+    loadStartingCapital(fakeSupabase({ data: { starting_capital_usd: bad } })),
+    /not usable/,
+    `present but non-finite (${bad}) → throw`,
+  );
+}
+console.log('  ok: starting-capital reader — value used, NULL → bootstrap, non-positive/non-finite & ANY error → fail loud');
 passed += 1;
 
 // Bootstrap invariance — VALUE-AGNOSTIC: a read that returns NULL (no capital set yet,

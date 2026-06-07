@@ -52,10 +52,17 @@ export async function loadStartingCapital(
   if (raw == null || raw === '') return null; // query OK, no value set → env bootstrap
 
   const capital = fromNumeric(raw);
-  if (!capital.gt(0)) {
-    // Present but non-positive = corrupt data (the CHECK constraint should forbid it).
-    // Fail loud rather than derive the book on a bad initial condition.
-    throw new Error(`starting capital in bot_state is non-positive (${capital.toString()})`);
+  // A present value is only usable if it's POSITIVE and FINITE once projected to a JS
+  // Number — the form toPortfolioView / the snapshot builder serialize it into. Postgres
+  // `numeric` accepts NaN, ±Infinity, and magnitudes beyond Number.MAX_VALUE; those slip
+  // past a bare positivity check and then become Infinity (serialized to null) downstream,
+  // corrupting the portfolio and the decision context. Present-but-unusable is a fault,
+  // exactly like non-positive: fail loud, never a silent fallback. Validating here, at the
+  // point of use, protects the book whatever the value's origin (reset write, manual edit).
+  if (!capital.gt(0) || !Number.isFinite(capital.toNumber())) {
+    throw new Error(
+      `starting capital in bot_state is not usable (must be a positive, finite Number): ${capital.toString()}`,
+    );
   }
   return capital;
 }
