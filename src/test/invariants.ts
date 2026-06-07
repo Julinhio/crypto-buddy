@@ -377,6 +377,11 @@ await assert.rejects(
   'ANY read error → throw (fail loud, never fall back)',
 );
 await assert.rejects(
+  loadStartingCapital(fakeSupabase({ data: null })),
+  /singleton row/,
+  'absent singleton row (data === null) → throw (structural anomaly, NOT a bootstrap)',
+);
+await assert.rejects(
   loadStartingCapital(fakeSupabase({ data: { starting_capital_usd: '0' } })),
   /not usable/,
   'present but non-positive (corrupt) → throw',
@@ -392,7 +397,7 @@ for (const bad of ['Infinity', '-Infinity', 'NaN', '1e400', '1e-400']) {
     `present but non-finite (${bad}) → throw`,
   );
 }
-console.log('  ok: starting-capital reader — value used, NULL → bootstrap, non-positive/non-finite & ANY error → fail loud');
+console.log('  ok: starting-capital reader — value used, NULL/no-client → bootstrap; missing-row / non-finite / non-positive / ANY error → fail loud');
 passed += 1;
 
 // Bootstrap invariance — VALUE-AGNOSTIC: a read that returns NULL (no capital set yet,

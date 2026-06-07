@@ -5,32 +5,34 @@ const TABLE = 'bot_state';
 
 /**
  * Reads the sovereign starting capital from the DB (the bot_state singleton) — the
- * INITIAL CONDITION of the whole virtual-portfolio derivation. THREE outcomes, with
- * NO dependency on any error code:
+ * INITIAL CONDITION of the whole virtual-portfolio derivation.
  *
- *   1. The query SUCCEEDS with a usable (positive) value → return it. The DB is the
- *      source of truth.
- *   2. The query SUCCEEDS but the value is NULL → return null, so the caller
- *      bootstraps on the env var. This is the legitimate steady state until the
- *      future reset writes a capital. (NULL is detected by the query's SUCCESS, not
- *      by sniffing an error code.)
- *   3. The query FAILS, whatever the error → THROW. We never guess. The cycle treats
- *      it as the infra failure it is (runCycleWithTimeout → technical error → backoff),
- *      like the other reads the bot depends on (recordHeartbeat). We never derive the
- *      book on a stale/guessed value.
+ * The env bootstrap (returning null, so the caller does `?? dec(config...)`) is allowed
+ * in EXACTLY two legitimate situations; EVERY other case fails loud (throws), so the
+ * book is never derived on a wrong/guessed value and no silent-bootstrap angle is left:
  *
- * Why no "schema not migrated" branch? We rely on the HARD operational invariant that
- * the migration is ALWAYS applied before the code is deployed (migrations are run by
- * hand in Supabase first). So the column always exists when this runs, and a failure
- * here is a genuine fault — not a missing schema. If the migration were somehow
- * skipped, failing loud is the RIGHT signal (it surfaces the mistake) rather than a
- * silent env bootstrap that would mask it. This also avoids depending on a Postgres
- * SQLSTATE that the PostgREST Data API does not reliably surface.
+ *   LEGITIMATE → null (env bootstrap):
+ *     - No Supabase client. Only the manual `npm run decide` dev path reaches here with
+ *       no client; the scheduled path can't, because runHeartbeat already fails loud on
+ *       an unconfigured Supabase BEFORE decide() runs. So this can't mask a prod
+ *       misconfig — it's a deliberate local-dev affordance (same posture as loadLedger).
+ *     - The singleton row is PRESENT but starting_capital_usd is NULL: no capital set
+ *       yet, the steady state until the future reset writes one.
+ *
+ *   ANOMALOUS → throw (fail loud → technical error → backoff):
+ *     - The read fails (any error) — we rely on the migration-before-deploy invariant,
+ *       so a failure is a genuine fault, not a not-yet-migrated schema.
+ *     - The singleton row is ABSENT (`data === null` after a SUCCESSFUL query): a
+ *       structural anomaly, NOT a missing value. Treating it as an absence would
+ *       silently bootstrap and, via the manual entrypoint that doesn't pre-create the
+ *       row, derive/persist/execute on a wrong book.
+ *     - The value is present but does not project to a positive, FINITE JS Number
+ *       (NaN / ±Infinity / overflow / underflow / zero / negative).
  */
 export async function loadStartingCapital(
   supabase: SupabaseClient | null,
 ): Promise<Decimal | null> {
-  if (!supabase) return null; // not configured (local/dev) → bootstrap on env
+  if (!supabase) return null; // local/dev with no Supabase → env bootstrap (see above)
 
   const { data, error } = await supabase
     .from(TABLE)
@@ -38,9 +40,8 @@ export async function loadStartingCapital(
     .eq('id', 1)
     .maybeSingle();
 
-  // Any read failure → fail loud, never fall back. A value might exist but be
-  // momentarily unreadable, and deriving on a stale env value (after a divergent
-  // reset) could drive a wrong trade. No error-code classification.
+  // (1) Read failure → fail loud. No error-code guessing (migration-before-deploy means
+  //     a failure is a genuine fault, not a not-yet-migrated column).
   if (error) {
     throw new Error(
       `could not read starting capital from bot_state (${error.message}) — ` +
@@ -48,19 +49,24 @@ export async function loadStartingCapital(
     );
   }
 
-  const raw = data?.starting_capital_usd as string | number | null | undefined;
-  if (raw == null || raw === '') return null; // query OK, no value set → env bootstrap
+  // (2) Singleton row ABSENT → structural anomaly, not a legitimate "no value". Fail
+  //     loud rather than silently bootstrap (which the manual entrypoint would derive on).
+  if (data == null) {
+    throw new Error(
+      'bot_state singleton row (id=1) is missing — refusing to bootstrap the starting ' +
+        'capital on an absent state row (is migration 0006 applied?).',
+    );
+  }
 
+  // (3) Row present, no capital set yet → the legitimate env bootstrap.
+  const raw = data.starting_capital_usd as string | number | null | undefined;
+  if (raw == null || raw === '') return null;
+
+  // (4) Present value → must project to a positive, finite Number (the form
+  //     toPortfolioView / the snapshot builder serialize into), else fail loud. This
+  //     single condition is exhaustive: it rejects NaN, ±Infinity, overflow (→ Infinity),
+  //     underflow (→ 0), zero, and negatives. Present-but-unusable is a fault.
   const capital = fromNumeric(raw);
-  // Validate the Number PROJECTION (the form toPortfolioView / the snapshot builder
-  // serialize the book into) — NOT the Decimal — because that projection is where a
-  // bad value does its damage. Project once, then require finite AND strictly positive.
-  // This single condition is EXHAUSTIVE for Number projections: it rejects NaN, ±Infinity,
-  // overflow (1e400 → Infinity), underflow (1e-400 → 0), zero, and negatives. (Testing
-  // positivity on the Decimal would miss underflow: 1e-400 is a positive Decimal but
-  // projects to 0.) Postgres `numeric` admits all of these. Present-but-unusable is a
-  // fault, exactly like non-positive: fail loud, never a silent fallback — and at the
-  // point of use, so the book is protected whatever the value's origin (reset, manual edit).
   const n = capital.toNumber();
   if (!Number.isFinite(n) || n <= 0) {
     throw new Error(
