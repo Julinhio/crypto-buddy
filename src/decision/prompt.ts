@@ -6,9 +6,9 @@ import type { DecisionSummary } from '../persistence/decisions.js';
  * Bump this whenever the mandate below changes, so decisions stay traceable to
  * the exact instructions that produced them. v2 adds the portfolio book + the
  * hard allocation caps; v3 expands the universe to 4 assets (BTC/ETH/BNB/XRP) and
- * states the per-asset caps explicitly.
+ * states the per-asset caps explicitly; v4 adds the notification_summary field.
  */
-export const PROMPT_VERSION = 'v3';
+export const PROMPT_VERSION = 'v4';
 
 /**
  * Frozen system prompt = the mandate + temperament + hard caps. Kept byte-stable
@@ -68,6 +68,11 @@ export function buildSystemPrompt(cfg: AppConfig = config): string {
     '- confidence: one of "low", "medium", "high".',
     '- market_state: one of "trend", "range", "high_vol", "risk_off".',
     '- reasoning: your full rationale, written for a human. Concise but complete. Non-empty.',
+    '- notification_summary: a SHORT plain-language one-liner (≤ ~200 characters, 1-2',
+    '  sentences max) for a PHONE notification — the "why" behind any trades this cycle,',
+    '  in plain words, no numbers-heavy detail. WRITE IT IN FRENCH — this field ONLY;',
+    '  what_changed and reasoning stay in English. Non-empty even on a hold.',
+    "  Example (in French): \"BTC RSI repassé sous 35, j'accumule vers le bas ; ETH proche de sa résistance mensuelle, j'allège.\"",
     '- next_delay_minutes: how many minutes until you want to be woken again. The code',
     '  clamps this to [15, 240], so pick a sensible cadence in that range.',
   ].join('\n');

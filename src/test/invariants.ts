@@ -16,6 +16,8 @@ import { planMovements } from '../execution/plan.js';
 import type { OrderResult } from '../execution/testnetOrder.js';
 import { clampAllocation } from '../risk/clamp.js';
 import { buildSystemPrompt } from '../decision/prompt.js';
+import { prepareActivityNotification, formatActivity } from '../alerting/activity.js';
+import type { DecideResult } from '../decision/decide.js';
 import { buildEquitySnapshot, prepareEquitySnapshot } from '../persistence/equitySnapshots.js';
 import { loadStartingCapital } from '../persistence/startingCapital.js';
 import { config, type AppConfig } from '../config/index.js';
@@ -502,5 +504,83 @@ assert.ok(
 );
 console.log('  ok: a NULL read bootstraps on the configured capital — value-agnostic invariance');
 passed += 1;
+
+// --- Activity notification: built from the LEDGER fact (not action_type), only when
+//     the bot actually placed orders; the text matches the validated mockup. ---
+console.log('\nActivity notification — ledger-fact movements, $ amounts, résultante, French text:');
+{
+  // A cycle that bought ~$50 BTC and sold ~$30 ETH. bookedLedger = the sovereign
+  // deltas (side = sign of baseDelta, $ = |quoteDelta|); portfolioAfter = the result.
+  const bookedLedger: LedgerEntry[] = [
+    { symbol: 'BTC/USDT', side: 'buy', valuationPrice: dec(50000), baseDelta: dec('0.001'), quoteDelta: dec('-50.05') },
+    { symbol: 'ETH/USDT', side: 'sell', valuationPrice: dec(3000), baseDelta: dec('-0.01'), quoteDelta: dec('29.97') },
+  ];
+  const afterPort = derivePortfolio([entry('BTC/USDT', 0.001, -50, 50000)], {
+    startingCapital: CAPITAL, reserveAsset: 'USDT', priceOf: defaultPrices,
+  }); // 10% BTC, 90% cash, total 500
+  const decided = {
+    status: 'decided',
+    row: { notification_summary: "BTC RSI repassé sous 35, j'accumule vers le bas ; ETH proche de sa résistance mensuelle, j'allège." },
+    execution: { bookedLedger },
+    portfolioAfter: afterPort,
+  } as unknown as DecideResult;
+
+  const notif = prepareActivityNotification(decided, '2026-06-08T14:05:00Z');
+  assert.ok(notif, 'a decided cycle with booked movements yields a notification');
+  assert.equal(notif!.movements.length, 2, 'one movement per asset');
+  assert.equal(notif!.movements[0]!.asset, 'BTC', 'biggest movement first (BTC $50 > ETH $30)');
+  assert.equal(notif!.movements[0]!.side, 'buy', 'BTC side = buy (baseDelta > 0)');
+  assert.equal(Math.round(notif!.movements[0]!.usd), 50, 'BTC $ from |quoteDelta| ≈ 50');
+  assert.equal(notif!.movements[1]!.side, 'sell', 'ETH side = sell (baseDelta < 0)');
+  assert.equal(Math.round(notif!.totalUsd), 500, 'total = post-trade equity');
+  assert.ok(notif!.allocation.some((a) => a.label === 'cash'), 'allocation includes cash');
+
+  const text = formatActivity(notif!);
+  assert.ok(text.includes('🤖 Crypto-Buddy a bougé · 14h05'), 'header with UTC HHhMM time');
+  assert.ok(text.includes('Achat ~50$ de BTC'), 'buy line, dollars, "de BTC" (consonant)');
+  assert.ok(text.includes("Vente ~30$ d'ETH"), 'sell line, dollars, "d\'ETH" (vowel elision)');
+  assert.ok(text.includes('Pourquoi : BTC RSI'), 'the why = notification_summary');
+  assert.ok(text.includes('Total : ~500$'), 'resulting total');
+  console.log('  ok: movements from the ledger ($ amounts), résultante alloc+total, French elision, mockup layout');
+  passed += 1;
+}
+{
+  // A HOLD (nothing booked) and a non-decided cycle send NOTHING (no spam).
+  const hold = { status: 'decided', row: {}, execution: { bookedLedger: [] }, portfolioAfter: snapPort } as unknown as DecideResult;
+  assert.equal(prepareActivityNotification(hold, '2026-06-08T14:05:00Z'), null, 'a hold (no booked movement) → no notification');
+  const skipped = { status: 'skipped', row: {}, execution: null, portfolioAfter: null } as unknown as DecideResult;
+  assert.equal(prepareActivityNotification(skipped, '2026-06-08T14:05:00Z'), null, 'a non-decided cycle → no notification');
+  console.log('  ok: a hold / skip / error sends nothing — only real orders ping (no spam)');
+  passed += 1;
+}
+{
+  // Allocation order: positions by decreasing size, then cash ALWAYS last — even when
+  // cash dominates (the ≥30% floor usually makes it the biggest slice). Locks the
+  // intentional "positions first, cash in the tail" convention against a re-flag.
+  const cashHeavy = derivePortfolio([entry('BTC/USDT', 0.001, -50, 50000)], {
+    startingCapital: CAPITAL, reserveAsset: 'USDT', priceOf: defaultPrices,
+  }); // BTC 10%, cash 90%
+  const result = {
+    status: 'decided',
+    row: { notification_summary: 'test' },
+    execution: { bookedLedger: [{ symbol: 'BTC/USDT', side: 'buy', valuationPrice: dec(50000), baseDelta: dec('0.001'), quoteDelta: dec('-50') }] },
+    portfolioAfter: cashHeavy,
+  } as unknown as DecideResult;
+  const notif = prepareActivityNotification(result, '2026-06-08T14:05:00Z')!;
+  assert.equal(notif.allocation[0]!.label, 'BTC', 'positions come first');
+  assert.equal(notif.allocation.at(-1)!.label, 'cash', 'cash is ALWAYS the last slice, even at 90%');
+  assert.ok(formatActivity(notif).includes('Alloc : 10% BTC · 90% cash'), 'cash-dominant alloc reads "10% BTC · 90% cash" (cash last)');
+  console.log('  ok: cash is always last in the allocation, even when it dominates (positions read first)');
+  passed += 1;
+}
+{
+  // The notif UI is French ("Pourquoi"/"Achat"/"Vente"), so notification_summary MUST
+  // be instructed in French — else the model emits English and the notif is franglais.
+  const p = buildSystemPrompt();
+  assert.ok(p.includes('WRITE IT IN FRENCH'), 'the mandate requires notification_summary in French');
+  assert.ok(p.includes("j'accumule vers le bas"), 'the notification_summary example is in French');
+  console.log('  ok: notification_summary is instructed in French (no franglais in the notif)');
+  passed += 1;
+}
 
 console.log(`\n${passed} invariant checks passed.`);

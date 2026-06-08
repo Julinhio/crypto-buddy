@@ -37,6 +37,8 @@ export interface DecisionRow {
   confidence: string | null;
   market_state: string | null;
   reasoning: string | null;
+  /** Short phone-friendly "why" for the activity notification (migration 0014). */
+  notification_summary: string | null;
   requested_delay_minutes: number | null;
   applied_delay_minutes: number | null;
   market_context: unknown;
