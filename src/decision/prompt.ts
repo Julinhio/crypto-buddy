@@ -70,8 +70,9 @@ export function buildSystemPrompt(cfg: AppConfig = config): string {
     '- reasoning: your full rationale, written for a human. Concise but complete. Non-empty.',
     '- notification_summary: a SHORT plain-language one-liner (≤ ~200 characters, 1-2',
     '  sentences max) for a PHONE notification — the "why" behind any trades this cycle,',
-    '  in plain words, no numbers-heavy detail. e.g. "BTC RSI back under 35, accumulating',
-    '  toward the lows; ETH near monthly resistance, lightening." Non-empty even on a hold.',
+    '  in plain words, no numbers-heavy detail. WRITE IT IN FRENCH — this field ONLY;',
+    '  what_changed and reasoning stay in English. Non-empty even on a hold.',
+    "  Example (in French): \"BTC RSI repassé sous 35, j'accumule vers le bas ; ETH proche de sa résistance mensuelle, j'allège.\"",
     '- next_delay_minutes: how many minutes until you want to be woken again. The code',
     '  clamps this to [15, 240], so pick a sensible cadence in that range.',
   ].join('\n');

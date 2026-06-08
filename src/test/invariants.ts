@@ -520,7 +520,7 @@ console.log('\nActivity notification — ledger-fact movements, $ amounts, résu
   }); // 10% BTC, 90% cash, total 500
   const decided = {
     status: 'decided',
-    row: { notification_summary: 'BTC RSI back under 35, accumulating; ETH near monthly resistance, lightening.' },
+    row: { notification_summary: "BTC RSI repassé sous 35, j'accumule vers le bas ; ETH proche de sa résistance mensuelle, j'allège." },
     execution: { bookedLedger },
     portfolioAfter: afterPort,
   } as unknown as DecideResult;
@@ -551,6 +551,15 @@ console.log('\nActivity notification — ledger-fact movements, $ amounts, résu
   const skipped = { status: 'skipped', row: {}, execution: null, portfolioAfter: null } as unknown as DecideResult;
   assert.equal(prepareActivityNotification(skipped, '2026-06-08T14:05:00Z'), null, 'a non-decided cycle → no notification');
   console.log('  ok: a hold / skip / error sends nothing — only real orders ping (no spam)');
+  passed += 1;
+}
+{
+  // The notif UI is French ("Pourquoi"/"Achat"/"Vente"), so notification_summary MUST
+  // be instructed in French — else the model emits English and the notif is franglais.
+  const p = buildSystemPrompt();
+  assert.ok(p.includes('WRITE IT IN FRENCH'), 'the mandate requires notification_summary in French');
+  assert.ok(p.includes("j'accumule vers le bas"), 'the notification_summary example is in French');
+  console.log('  ok: notification_summary is instructed in French (no franglais in the notif)');
   passed += 1;
 }
 
