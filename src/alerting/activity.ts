@@ -36,7 +36,12 @@ export interface ActivityNotification {
   movements: ActivityMovement[];
   /** The model's concise notification_summary (the "why"). */
   why: string;
-  /** Resulting allocation (open positions + cash), biggest first. */
+  /**
+   * Resulting allocation: open positions by DECREASING size, then cash ALWAYS last.
+   * Cash is the reserve, not a position — and with the ≥30% floor it is usually the
+   * biggest slice, so it is deliberately KEPT IN THE TAIL (never sorted in with the
+   * positions) so the positions read first. This ordering is intentional, not a bug.
+   */
   allocation: ActivityAllocationSlice[];
   /** Resulting total equity (USD). */
   totalUsd: number;
@@ -70,7 +75,10 @@ export function prepareActivityNotification(
   }
   const movements = [...byAsset.values()].sort((a, b) => b.usd - a.usd);
 
-  // Resulting allocation: open positions (weight %), biggest first, then cash.
+  // Resulting allocation: positions biggest-first (after.positions is already sorted
+  // by value desc), then cash ALWAYS appended last — NOT sorted in with the positions.
+  // The cash floor (≥30%, often more) usually makes cash the largest slice, but it
+  // stays in the tail so the positions read first. Intentional (see the field doc).
   const allocation: ActivityAllocationSlice[] = [];
   const equityPositive = after.equity.gt(0);
   for (const p of after.positions) {

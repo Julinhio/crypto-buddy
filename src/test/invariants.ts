@@ -554,6 +554,26 @@ console.log('\nActivity notification — ledger-fact movements, $ amounts, résu
   passed += 1;
 }
 {
+  // Allocation order: positions by decreasing size, then cash ALWAYS last — even when
+  // cash dominates (the ≥30% floor usually makes it the biggest slice). Locks the
+  // intentional "positions first, cash in the tail" convention against a re-flag.
+  const cashHeavy = derivePortfolio([entry('BTC/USDT', 0.001, -50, 50000)], {
+    startingCapital: CAPITAL, reserveAsset: 'USDT', priceOf: defaultPrices,
+  }); // BTC 10%, cash 90%
+  const result = {
+    status: 'decided',
+    row: { notification_summary: 'test' },
+    execution: { bookedLedger: [{ symbol: 'BTC/USDT', side: 'buy', valuationPrice: dec(50000), baseDelta: dec('0.001'), quoteDelta: dec('-50') }] },
+    portfolioAfter: cashHeavy,
+  } as unknown as DecideResult;
+  const notif = prepareActivityNotification(result, '2026-06-08T14:05:00Z')!;
+  assert.equal(notif.allocation[0]!.label, 'BTC', 'positions come first');
+  assert.equal(notif.allocation.at(-1)!.label, 'cash', 'cash is ALWAYS the last slice, even at 90%');
+  assert.ok(formatActivity(notif).includes('Alloc : 10% BTC · 90% cash'), 'cash-dominant alloc reads "10% BTC · 90% cash" (cash last)');
+  console.log('  ok: cash is always last in the allocation, even when it dominates (positions read first)');
+  passed += 1;
+}
+{
   // The notif UI is French ("Pourquoi"/"Achat"/"Vente"), so notification_summary MUST
   // be instructed in French — else the model emits English and the notif is franglais.
   const p = buildSystemPrompt();
