@@ -22,7 +22,8 @@ import {
   releaseManualRun,
   type FinishRunParams,
 } from '../persistence/schedulerState.js';
-import { runHeartbeat, runCycleWithTimeout } from '../scheduler/heartbeat.js';
+import { runHeartbeat } from '../scheduler/heartbeat.js';
+import { runCycleWithTimeout, runGuardedCycle } from '../scheduler/cycleGuard.js';
 import type { DecideResult } from '../decision/decide.js';
 
 /**
@@ -196,5 +197,68 @@ ok(
 
 const threw = await runCycleWithTimeout(() => Promise.reject(new Error('kaboom')), 1000);
 ok('a thrown cycle is a technical error with the stack captured', threw.status === 'error' && threw.detail.includes('kaboom'));
+
+// ── Guarded cycle: SETTLED detection — the bit that drives keep-vs-release the lock ──
+console.log('\nGuarded cycle — settled detection (returned/threw = no orphan; timeout = orphan):');
+const gReturned = await runGuardedCycle(() => Promise.resolve(fakeResult('decided', 60)), 1000);
+ok('a returned cycle is SETTLED (safe to finalize)', gReturned.settled === true && gReturned.outcome.status === 'decided' && gReturned.result !== null);
+const gThrew = await runGuardedCycle(() => Promise.reject(new Error('boom')), 1000);
+ok('a thrown cycle is SETTLED — no orphan → release, don\'t block a full TTL', gThrew.settled === true && gThrew.outcome.status === 'error' && gThrew.result === null);
+const gTimedOut = await runGuardedCycle(
+  () => new Promise<DecideResult>((r) => setTimeout(() => r(fakeResult('decided', 60)), 40)),
+  5,
+);
+ok('a TIMED-OUT cycle is NOT settled (orphan still running) → must KEEP the lock', gTimedOut.settled === false && gTimedOut.outcome.status === 'error' && gTimedOut.result === null);
+
+// ── runHeartbeat watchdog branch: a TIMED-OUT cycle keeps the lock (no finish_run);
+//    a SETTLED one finalizes (finish_run). A dispatching fake client records the RPCs
+//    so we can assert finish_run is/ isn't called — the load-bearing behavior change. ──
+console.log('\nrunHeartbeat watchdog branch (timeout keeps the lock; settled finalizes):');
+
+function dispatchClient(calls: string[]): SupabaseClient {
+  return {
+    rpc: async (fn: string) => {
+      calls.push(fn);
+      if (fn === 'record_heartbeat') {
+        // due (next_check in the past) + unlocked → claimable
+        return {
+          data: [{
+            next_check_at: new Date(NOW - MIN).toISOString(), run_token: null, locked_until: null,
+            last_heartbeat_at: new Date(NOW).toISOString(), last_success_at: null,
+            consecutive_failures: 0, floor_delay_streak: 0, floor_alert_sent: false, failure_alert_sent: false,
+          }],
+          error: null,
+        };
+      }
+      if (fn === 'claim_due_run') {
+        return { data: [{ run_id: 1, prev_next_check_at: null, db_now: new Date(NOW).toISOString(), consecutive_failures: 0, floor_delay_streak: 0 }], error: null };
+      }
+      if (fn === 'finish_run') return { data: true, error: null };
+      return { data: null, error: null };
+    },
+  } as unknown as SupabaseClient;
+}
+
+const timedOutCycle = async () => ({
+  outcome: { status: 'error' as const, appliedDelayMinutes: null, decisionId: null, detail: 'frozen', equitySnapshot: null },
+  settled: false, result: null,
+});
+const settledThrow = async () => ({
+  outcome: { status: 'error' as const, appliedDelayMinutes: null, decisionId: null, detail: 'threw', equitySnapshot: null },
+  settled: true, result: null,
+});
+
+{
+  const calls: string[] = [];
+  const res = await runHeartbeat({ supabase: dispatchClient(calls), runCycle: timedOutCycle });
+  ok('timeout → action=timed-out', res.action === 'timed-out');
+  ok('timeout → finish_run is NEVER called (lock KEPT, no reschedule)', !calls.includes('finish_run'));
+}
+{
+  const calls: string[] = [];
+  const res = await runHeartbeat({ supabase: dispatchClient(calls), runCycle: settledThrow });
+  ok('settled (throw) → action=ran', res.action === 'ran');
+  ok('settled → finish_run IS called (release + reschedule + close)', calls.includes('finish_run'));
+}
 
 console.log(`\n${passed} scheduler checks passed.`);

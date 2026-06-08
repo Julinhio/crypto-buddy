@@ -203,10 +203,13 @@ export const config: AppConfig = {
   scheduler: {
     // Railway's native cron beats every 5 min (wired in the deploy PR).
     beatIntervalMinutes: 5,
-    // Worst-case cycle budget. The external timeouts (binance.ts ~15s/req,
-    // llm.ts 60s × 1 retry) keep a real cycle well under this; lockTtl exceeds it.
-    maxCycleSeconds: 300,
-    lockTtlSeconds: 600,
+    // Worst-case cycle budget + run-lock TTL. The external timeouts (binance.ts
+    // ~15s/req, llm.ts 60s × 1 retry) keep a real cycle well under the budget; the
+    // lock TTL exceeds it (invariant validated below). Both are env-overridable so
+    // the watchdog/lock timing can be shrunk for a live proof (and tuned in ops)
+    // without a code change — the prod defaults (300 / 600) are unchanged.
+    maxCycleSeconds: envNumber('MAX_CYCLE_SECONDS', 300),
+    lockTtlSeconds: envNumber('LOCK_TTL_SECONDS', 600),
     // Soft skip → a modest fixed retry; backoff (hard errors) reuses the decision
     // delay bounds (min 15 / max 240).
     softSkipDelayMinutes: 30,
