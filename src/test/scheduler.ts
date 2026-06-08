@@ -24,7 +24,7 @@ import {
 } from '../persistence/schedulerState.js';
 import { runHeartbeat } from '../scheduler/heartbeat.js';
 import { runCycleWithTimeout, runGuardedCycle } from '../scheduler/cycleGuard.js';
-import { validateSchedulerConfig, WATCHDOG_GRACE_SECONDS } from '../config/index.js';
+import { schedulerSecondsEnv, validateSchedulerConfig, WATCHDOG_GRACE_SECONDS } from '../config/index.js';
 import type { DecideResult } from '../decision/decide.js';
 
 /**
@@ -281,5 +281,26 @@ throwsCfg('rejects lockTtl above the budget but below budget+grace (the Codex ca
 throwsCfg('rejects a budget+grace TIE (the watchdog would fire exactly as the lease expires — racy)', 300 + WATCHDOG_GRACE_SECONDS);
 acceptsCfg('accepts lockTtl just over budget+grace (300/316)', 300 + WATCHDOG_GRACE_SECONDS + 1);
 acceptsCfg('accepts the prod defaults (300/600)', 600);
+
+// ── Scheduler env override reader: ONLY a positive integer of seconds passes; every
+//    other shape (fractional, zero, negative, NaN/garbage, out-of-range) fails loud at
+//    STARTUP — before the SQL integer claim could break at runtime. The whole class. ──
+console.log('\nScheduler env override (positive integer seconds, else fail-loud):');
+const ENV = 'SCHED_ENV_TEST';
+const withEnv = (val: string | undefined, fn: () => void) => {
+  const prev = process.env[ENV];
+  if (val === undefined) delete process.env[ENV];
+  else process.env[ENV] = val;
+  try { fn(); } finally { if (prev === undefined) delete process.env[ENV]; else process.env[ENV] = prev; }
+};
+withEnv(undefined, () => ok('unset → the default', schedulerSecondsEnv(ENV, 300) === 300));
+withEnv('   ', () => ok('blank → the default (an absent override, not an error)', schedulerSecondsEnv(ENV, 300) === 300));
+withEnv('120', () => ok('a valid integer of seconds → its value', schedulerSecondsEnv(ENV, 300) === 120));
+withEnv('86400', () => ok('the sane max (86400) → accepted', schedulerSecondsEnv(ENV, 300) === 86_400));
+for (const v of ['315.5', '0', '-5', 'abc', '120abc', 'NaN', 'Infinity', '99999999']) {
+  withEnv(v, () => assert.throws(() => schedulerSecondsEnv(ENV, 300)));
+  console.log(`  ok: rejects ${JSON.stringify(v)} (fractional / zero / negative / garbage / out-of-range → fail-loud)`);
+  passed += 1;
+}
 
 console.log(`\n${passed} scheduler checks passed.`);
