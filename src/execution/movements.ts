@@ -118,6 +118,24 @@ export function computeMovements(
   return movements;
 }
 
+/**
+ * The deterministic idempotency key for ONE (decision, movement). The same decision
+ * and movement always yield the same string, so two attempts recognize each other as
+ * one act. Used BOTH as the ledger's `idempotency_key` (unique → one booking) AND as
+ * the order's `clientOrderId` (one real order) — the two faces share one identity by
+ * construction.
+ *
+ * Format: `cb_<decisionId>_<symbol with '/' → '-'>_<side>`. Charset is [A-Za-z0-9_-]
+ * and the length stays well under Binance's 36-char clientOrderId limit for the bot's
+ * universe (short tickers + a small bigint id), so the same string is a valid
+ * clientOrderId verbatim. One movement per (asset, side) per decision makes
+ * (decision, symbol, side) a stable, collision-free identity. (A bound is asserted in
+ * the invariants test.)
+ */
+export function movementKey(decisionId: number, symbol: string, side: 'buy' | 'sell'): string {
+  return `cb_${decisionId}_${symbol.replace('/', '-')}_${side}`;
+}
+
 // Shared empty testnet-trace fields for an intent row (states 2-4 live on the
 // separate execution row, written after the exchange responds).
 const NO_TRACE = {
@@ -148,6 +166,7 @@ export function bookedIntent(
   decisionId: number,
   priceSource: string,
   feePercent: number,
+  idempotencyKey: string,
 ): ExecutionInsert {
   const isBuy = m.side === 'buy';
   const notional = snappedQty.times(m.price);
@@ -156,6 +175,9 @@ export function bookedIntent(
     decision_id: decisionId,
     event_type: 'intent',
     intent_execution_id: null,
+    // The ONLY rows that claim the idempotency key — the booked, book-moving,
+    // order-triggering intents. Unique → a replay of this movement no-ops.
+    idempotency_key: idempotencyKey,
     symbol: m.symbol,
     side: m.side,
     requested_qty: m.qty,
@@ -193,6 +215,10 @@ export function rejectedIntent(
     decision_id: decisionId,
     event_type: 'intent',
     intent_execution_id: null,
+    // NOT keyed: a rejected intent doesn't book and doesn't order, so it must never
+    // occupy the unique slot — else a transient rejection (e.g. mainnet filters
+    // momentarily unavailable) would block the movement's later real booking.
+    idempotency_key: null,
     symbol: m.symbol,
     side: m.side,
     requested_qty: m.qty,
@@ -227,6 +253,9 @@ export function executionTrace(
     decision_id: decisionId,
     event_type: 'execution',
     intent_execution_id: intentId,
+    // A trace is keyed by its parent intent (intent_execution_id), not by the
+    // idempotency key — that belongs to the booking. NULL → exempt from the unique index.
+    idempotency_key: null,
     symbol: m.symbol,
     side: m.side,
     requested_qty: m.qty, // the sovereign qty (NOT NULL column); context for the trace

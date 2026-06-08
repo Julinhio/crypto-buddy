@@ -6,6 +6,7 @@ import type { LedgerEntry } from '../persistence/executions.js';
 import {
   computeMovements,
   bookedIntent,
+  movementKey,
   rejectedIntent,
   executionTrace,
   type Movement,
@@ -88,7 +89,7 @@ function cashFloorHolds(
   const replayed: LedgerEntry[] = [
     ...initial,
     ...movements
-      .map((m) => bookedIntent(m, m.qty, 1, 'test', cfg.execution.feePercent))
+      .map((m) => bookedIntent(m, m.qty, 1, 'test', cfg.execution.feePercent, movementKey(1, m.symbol, m.side)))
       .map((f) => ({
         symbol: f.symbol,
         side: f.side,
@@ -146,7 +147,12 @@ function cashFloorHoldsSnapped(
     ...initial,
     ...plan
       .filter((p) => p.verdict.kind === 'ok')
-      .map((p) => bookedIntent(p.movement, p.snappedQty, 1, 'test', cfg.execution.feePercent))
+      .map((p) =>
+        bookedIntent(
+          p.movement, p.snappedQty, 1, 'test', cfg.execution.feePercent,
+          movementKey(1, p.movement.symbol, p.movement.side),
+        ),
+      )
       .map((f) => ({
         symbol: f.symbol,
         side: f.side,
@@ -275,16 +281,19 @@ const buy: Movement = {
   symbol: 'BTC/USDT', asset: 'BTC', side: 'buy',
   qty: dec('0.001'), price: dec(50000), notional: dec(50), fee: dec('0.05'),
 };
-const booked = bookedIntent(buy, dec('0.001'), 1, 'mainnet', 0.1);
+const buyKey = movementKey(1, buy.symbol, buy.side);
+const booked = bookedIntent(buy, dec('0.001'), 1, 'mainnet', 0.1, buyKey);
 assert.equal(booked.event_type, 'intent');
 assert.equal(booked.validation_status, 'executed');
 assert.equal(booked.ledger_base_delta.toString(), '0.001', 'booked buy adds the base qty');
 assert.equal(booked.ledger_quote_delta.toString(), '-50.05', 'booked buy removes notional + fee'); // 50 + 50*0.001
+assert.equal(booked.idempotency_key, buyKey, 'a booked intent CLAIMS the idempotency key');
 
 const rej = rejectedIntent(buy, dec('0.001'), 1, 'mainnet', 'rejected', 'below min-notional');
 assert.equal(rej.event_type, 'intent');
 assert.notEqual(rej.validation_status, 'executed', 'a crumb is NOT booked');
 assert.ok(rej.ledger_base_delta.isZero() && rej.ledger_quote_delta.isZero(), 'a crumb leaves the book intact');
+assert.equal(rej.idempotency_key, null, 'a rejected intent does NOT claim the key (no transient-rejection poisoning)');
 
 const fakeOrder: OrderResult = {
   outcome: 'filled', orderId: '42', status: 'closed',
@@ -296,7 +305,31 @@ assert.equal(trace.event_type, 'execution', 'a trace is an execution row');
 assert.equal(trace.intent_execution_id, 99, 'a trace links back to its intent');
 assert.equal(trace.validation_status, null, 'a trace has no sovereign validation_status');
 assert.ok(trace.ledger_base_delta.isZero() && trace.ledger_quote_delta.isZero(), 'a testnet trace NEVER moves the book');
+assert.equal(trace.idempotency_key, null, 'a trace does NOT claim the key (keyed by its parent intent)');
 console.log('  ok: only a booked intent moves the book — crumbs and testnet traces carry zero ledger delta');
+passed += 1;
+
+// --- Idempotency key: deterministic, stable, collision-free, Binance-safe ---
+console.log('\nIdempotency key — deterministic per (decision, movement), Binance-safe:');
+// Stable: the SAME decision + movement always yields the SAME key (two attempts
+// recognize each other as one act).
+assert.equal(movementKey(54, 'BTC/USDT', 'buy'), 'cb_54_BTC-USDT_buy', 'key format is stable');
+assert.equal(movementKey(54, 'BTC/USDT', 'buy'), movementKey(54, 'BTC/USDT', 'buy'), 'key is deterministic');
+// Distinct across the dimensions that make a movement different.
+assert.notEqual(movementKey(54, 'BTC/USDT', 'buy'), movementKey(55, 'BTC/USDT', 'buy'), 'differs by decision');
+assert.notEqual(movementKey(54, 'BTC/USDT', 'buy'), movementKey(54, 'ETH/USDT', 'buy'), 'differs by symbol');
+assert.notEqual(movementKey(54, 'BTC/USDT', 'buy'), movementKey(54, 'BTC/USDT', 'sell'), 'differs by side');
+// Binance-safe: charset [A-Za-z0-9_-] and length < 36, even for a large id / long
+// ticker (so the SAME string is a valid clientOrderId verbatim).
+for (const [id, sym] of [[54, 'BTC/USDT'], [9_999_999, 'MATIC/USDT'], [1, 'AVAX/USDT']] as const) {
+  for (const side of ['buy', 'sell'] as const) {
+    const k = movementKey(id, sym, side);
+    assert.ok(/^[A-Za-z0-9_-]+$/.test(k), `key ${k} uses only Binance-safe chars`);
+    assert.ok(k.length <= 36, `key ${k} (len ${k.length}) is within Binance's 36-char clientOrderId limit`);
+    assert.ok(!k.includes('/'), `key ${k} has no slash`);
+  }
+}
+console.log('  ok: idempotency key is deterministic, collision-free across (decision, symbol, side), and Binance-safe');
 passed += 1;
 
 // --- Equity snapshot: faithful projection of the derived book (pure, no network) ---

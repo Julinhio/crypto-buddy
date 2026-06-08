@@ -23,6 +23,13 @@ export interface ExecutionInsert {
   event_type: EventType;
   /** On an execution row, the id of the intent it traces; null on an intent row. */
   intent_execution_id: number | null;
+  /**
+   * Deterministic per-(decision, movement) idempotency key. Set ONLY on a BOOKED
+   * sovereign intent (the unique-constrained row that moves the book and triggers a
+   * real order); NULL on a rejected intent and on an execution trace (multiple NULLs
+   * are exempt from the unique index). See migration 0013.
+   */
+  idempotency_key: string | null;
   symbol: string;
   side: ExecutionSide;
   requested_qty: Decimal;
@@ -66,6 +73,7 @@ function toPayload(r: ExecutionInsert): Record<string, unknown> {
     decision_id: r.decision_id,
     event_type: r.event_type,
     intent_execution_id: r.intent_execution_id,
+    idempotency_key: r.idempotency_key,
     symbol: r.symbol,
     side: r.side,
     requested_qty: r.requested_qty.toString(),
@@ -156,5 +164,48 @@ export async function insertExecution(
       `[error] failed to journal a ${row.event_type} row for ${row.symbol} (${msg}).`,
     );
     return { id: null };
+  }
+}
+
+/** The three ways an idempotent booking attempt resolves (see bookIntent). */
+export type BookIntentOutcome =
+  | { kind: 'booked'; id: number } // we WON the insert — this attempt owns the order
+  | { kind: 'duplicate' } // already booked by a prior attempt — idempotent no-op
+  | { kind: 'unpersisted' }; // Supabase down / insert failed — caller must not order
+
+/**
+ * Books a SOVEREIGN intent IDEMPOTENTLY. The row MUST carry a non-null
+ * `idempotency_key`. Inserts ON CONFLICT (idempotency_key) DO NOTHING, so a
+ * REPLAY of the same decision's movement can neither double-book nor reach a
+ * second order:
+ *   - inserted (we won)              → { booked, id } — caller places the order;
+ *   - conflict (already booked)      → { duplicate }  — caller no-ops, NO order;
+ *   - Supabase null / insert failed  → { unpersisted } — caller skips (no order
+ *                                       without a durable booking, as before).
+ * The conflict path returns NO error, so a replay is a clean journaled no-op —
+ * it never throws nor restarts the scheduler's backoff. DO NOTHING also means the
+ * winning row is left intact (we never overwrite the first booking's fields).
+ */
+export async function bookIntent(
+  supabase: SupabaseClient | null,
+  row: ExecutionInsert,
+): Promise<BookIntentOutcome> {
+  if (!supabase) return { kind: 'unpersisted' };
+  try {
+    const { data, error } = await supabase
+      .from(TABLE)
+      .upsert(toPayload(row), { onConflict: 'idempotency_key', ignoreDuplicates: true })
+      .select('id')
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    // ignoreDuplicates ⇒ a conflict inserts nothing and returns no row.
+    if (data && (data as { id?: unknown }).id != null) {
+      return { kind: 'booked', id: Number((data as { id: number }).id) };
+    }
+    return { kind: 'duplicate' };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[error] failed to book intent for ${row.symbol} (${msg}).`);
+    return { kind: 'unpersisted' };
   }
 }

@@ -20,6 +20,7 @@ const SKIP_LABEL: Record<Exclude<ExecutionLine['verdict'], 'ok'>, string> = {
   block: 'skip·block',
   rules_error: 'skip·rules',
   not_booked: 'skip·not-booked',
+  already_booked: 'noop·idempotent',
 };
 
 /** The testnet half of the line (states 2-3-4) for a booked movement. */
@@ -118,7 +119,8 @@ export function printEconomics(result: DecideResult): void {
 
   console.log('');
   console.log(
-    `   summary: ${execution.booked} booked, ${execution.skipped} skipped · ` +
+    `   summary: ${execution.booked} booked, ${execution.skipped} skipped` +
+      `${execution.deduped > 0 ? ` (${execution.deduped} idempotent no-op)` : ''} · ` +
       `testnet: ${execution.filled} filled, ${execution.partial} partial, ` +
       `${execution.unfilled} unfilled, ${execution.rejected} rejected, ${execution.errored} error`,
   );
