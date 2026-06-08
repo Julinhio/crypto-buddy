@@ -11,7 +11,7 @@ import {
   rejectedIntent,
   type Movement,
 } from './movements.js';
-import { bookIntent, insertExecution } from '../persistence/executions.js';
+import { bookIntent, insertExecution, type LedgerEntry } from '../persistence/executions.js';
 
 /** Per-movement record of how the four states resolved this cycle. */
 export interface ExecutionLine {
@@ -27,6 +27,13 @@ export interface ExecutionLine {
 
 export interface ExecutionSummary {
   lines: ExecutionLine[];
+  /**
+   * The ledger entries booked THIS cycle (the sovereign intents that moved the
+   * book), as LedgerEntry. Lets the caller derive the POST-trade portfolio by
+   * replaying [pre-trade ledger, ...bookedLedger] — no re-read — and powers the
+   * activity notification's "what moved" (side = sign of baseDelta, $ = |quoteDelta|).
+   */
+  bookedLedger: LedgerEntry[];
   booked: number;
   skipped: number;
   /** Movements that were already booked by a prior attempt (idempotent replay no-op). */
@@ -99,6 +106,7 @@ export async function executeMovements(
   const planned = new Map(plan.map((p) => [p.movement, p]));
 
   const lines: ExecutionLine[] = [];
+  const bookedLedger: LedgerEntry[] = [];
   for (const m of movements) {
     // Rules unavailable → can't validate authoritatively, so don't book or send.
     if (!rulesCache.has(m.symbol)) {
@@ -136,10 +144,8 @@ export async function executeMovements(
     // timeout, a re-entered cycle) a clean no-op: it can neither double-book nor reach
     // a second order. Three outcomes:
     const key = movementKey(decisionId, m.symbol, m.side);
-    const outcome = await bookIntent(
-      supabase,
-      bookedIntent(m, snappedQty, decisionId, priceSource, feePercent, key),
-    );
+    const intentRow = bookedIntent(m, snappedQty, decisionId, priceSource, feePercent, key);
+    const outcome = await bookIntent(supabase, intentRow);
 
     // Already booked by a prior attempt → idempotent no-op. Do NOT re-book, do NOT
     // place an order; journal a line, never throw (a replay won't restart backoff).
@@ -182,19 +188,28 @@ export async function executeMovements(
       symbol: m.symbol, side: m.side, wantedQty: m.qty, snappedQty,
       booked: true, verdict: 'ok', reason: null, order,
     });
+    // The sovereign delta that moved the book this cycle (the SAME row just booked).
+    bookedLedger.push({
+      symbol: intentRow.symbol,
+      side: intentRow.side,
+      valuationPrice: intentRow.valuation_price,
+      baseDelta: intentRow.ledger_base_delta,
+      quoteDelta: intentRow.ledger_quote_delta,
+    });
   }
 
-  return summarize(lines);
+  return summarize(lines, bookedLedger);
 }
 
 /** A zeroed summary — used when there's nothing to execute (already at target). */
 export function emptyExecutionSummary(): ExecutionSummary {
-  return summarize([]);
+  return summarize([], []);
 }
 
-function summarize(lines: ExecutionLine[]): ExecutionSummary {
+function summarize(lines: ExecutionLine[], bookedLedger: LedgerEntry[]): ExecutionSummary {
   const s: ExecutionSummary = {
     lines,
+    bookedLedger,
     booked: 0, skipped: 0, deduped: 0, ordersPlaced: 0,
     filled: 0, partial: 0, unfilled: 0, rejected: 0, errored: 0,
   };

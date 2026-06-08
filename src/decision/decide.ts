@@ -35,6 +35,13 @@ export interface DecideResult {
   row: DecisionRow;
   /** The virtual book the AI saw (null only when the cycle was skipped). */
   portfolio: VirtualPortfolio | null;
+  /**
+   * The book AFTER this cycle's bookings (the "résultante"): the pre-trade ledger
+   * replayed with the booked intents, valued at the SAME prices. Equals `portfolio`
+   * when nothing booked. Null on a non-decided cycle. Powers the activity
+   * notification's resulting allocation + total — re-derived in-memory, no re-read.
+   */
+  portfolioAfter: VirtualPortfolio | null;
   /** The risk-wrapper result (only on a decided cycle). */
   clamp: ClampResult | null;
   /** Movements computed to reach the bounded allocation. */
@@ -164,6 +171,7 @@ export async function decide(): Promise<DecideResult> {
     confidence: v.confidence,
     market_state: v.marketState,
     reasoning: v.reasoning,
+    notification_summary: v.notificationSummary,
     requested_delay_minutes: v.requestedDelayMinutes,
     applied_delay_minutes: v.appliedDelayMinutes,
     model: llm.model,
@@ -209,12 +217,23 @@ export async function decide(): Promise<DecideResult> {
     });
   }
 
+  // The book AFTER this cycle's bookings — pure, in-memory: replay the pre-trade
+  // ledger with the sovereign intents just booked, valued at the SAME prices. No
+  // re-read (the booked rows are already in hand), and equal to `portfolio` when
+  // nothing booked. This is the "résultante" the activity notification reports.
+  const bookedLedger = execution?.bookedLedger ?? [];
+  const portfolioAfter =
+    bookedLedger.length > 0
+      ? derivePortfolio([...ledger, ...bookedLedger], { startingCapital, reserveAsset: reserveStable, priceOf })
+      : portfolio;
+
   return {
     status: 'decided',
     persisted,
     decisionId: id,
     row,
     portfolio,
+    portfolioAfter,
     clamp,
     movements,
     execution,
@@ -234,6 +253,7 @@ function emptyResult(
     decisionId: id,
     row,
     portfolio,
+    portfolioAfter: null,
     clamp: null,
     movements: [],
     execution: null,
@@ -258,6 +278,7 @@ function makeRow(
     confidence: over.confidence ?? null,
     market_state: over.market_state ?? null,
     reasoning: over.reasoning ?? null,
+    notification_summary: over.notification_summary ?? null,
     requested_delay_minutes: over.requested_delay_minutes ?? null,
     applied_delay_minutes: over.applied_delay_minutes ?? null,
     market_context: marketContext,

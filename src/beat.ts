@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { runHeartbeat } from './scheduler/heartbeat.js';
 import { formatAlert } from './alerting/messages.js';
+import { formatActivity } from './alerting/activity.js';
 import { sendTelegram } from './alerting/telegram.js';
 import { pingHealthchecks } from './alerting/healthchecks.js';
 import { writeEquitySnapshot } from './persistence/equitySnapshots.js';
@@ -34,6 +35,14 @@ async function main(): Promise<number> {
   // Internal alerts that crossed their threshold this beat (debounced upstream).
   for (const alert of result.alerts ?? []) {
     await sendTelegram(formatAlert(alert));
+  }
+
+  // Activity notification — "here's what I did" on a wake-up that actually placed
+  // orders (null on a hold/skip/error → nothing sent, no spam). Same best-effort tier
+  // as the alerts: sendTelegram self-guards (5s timeout, never throws), and it runs
+  // OUTSIDE the fenced cycle, so it can never weigh on the trading verdict.
+  if (result.activityNotification) {
+    await sendTelegram(formatActivity(result.activityNotification));
   }
 
   // Equity photo — observability, fully decoupled from the cycle's verdict. The

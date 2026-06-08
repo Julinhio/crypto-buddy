@@ -17,6 +17,8 @@ export interface DecisionOutput {
   confidence: Confidence;
   market_state: MarketState;
   reasoning: string;
+  /** A SHORT, phone-friendly one-liner for the activity notification (the "why"). */
+  notification_summary: string;
   next_delay_minutes: number;
 }
 
@@ -99,6 +101,7 @@ export function buildDecisionSchema(assets: string[]) {
     confidence: confidenceSchema,
     market_state: marketStateSchema,
     reasoning: z.string().min(1),
+    notification_summary: z.string().min(1),
     next_delay_minutes: z.number(),
   });
 }
@@ -110,6 +113,7 @@ export interface ValidatedDecision {
   confidence: Confidence;
   marketState: MarketState;
   reasoning: string;
+  notificationSummary: string;
   requestedDelayMinutes: number;
   appliedDelayMinutes: number;
 }
@@ -165,6 +169,9 @@ export function validateDecision(
   const reasoning = (parsed.reasoning ?? '').trim();
   if (!reasoning) return { ok: false, error: 'reasoning is empty' };
 
+  const notificationSummary = (parsed.notification_summary ?? '').trim();
+  if (!notificationSummary) return { ok: false, error: 'notification_summary is empty' };
+
   const requested = parsed.next_delay_minutes;
   if (typeof requested !== 'number' || !Number.isFinite(requested)) {
     return { ok: false, error: 'next_delay_minutes is not a finite number' };
@@ -182,6 +189,7 @@ export function validateDecision(
       confidence: parsed.confidence,
       marketState: parsed.market_state,
       reasoning,
+      notificationSummary,
       requestedDelayMinutes: requested,
       appliedDelayMinutes: applied,
     },

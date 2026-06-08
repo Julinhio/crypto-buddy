@@ -16,6 +16,7 @@ import {
   type RunOutcome,
 } from './policy.js';
 import type { AlertPayload } from '../alerting/messages.js';
+import { prepareActivityNotification, type ActivityNotification } from '../alerting/activity.js';
 
 export interface HeartbeatResult {
   /**
@@ -44,6 +45,12 @@ export interface HeartbeatResult {
    * Absent on a no-op/timed-out beat (no finalized cycle); null when the wake-up warranted none.
    */
   equitySnapshot?: EquitySnapshotInsert | null;
+  /**
+   * Best-effort activity notification for THIS beat — SENT by beat.ts best-effort,
+   * same tier as the alerts. Non-null ONLY when the cycle actually booked movements
+   * (a hold/skip/error → null → nothing sent, no spam).
+   */
+  activityNotification?: ActivityNotification | null;
 }
 
 /**
@@ -128,7 +135,7 @@ export async function runHeartbeat(
     // 4. Run the cycle exactly ONCE on the current market (no replay of missed beats),
     //    under the hard timeout, capturing whether it SETTLED (returned/threw → no
     //    orphan) or timed out (an orphan keeps running in the background).
-    const { outcome, settled } = await runCycle();
+    const { outcome, settled, result } = await runCycle();
     const { status, appliedDelayMinutes: appliedDelay, decisionId, detail, equitySnapshot } = outcome;
 
     // 5b. TIMED OUT → crash behavior. Do NOT finish_run: KEEP the lock and do NOT
@@ -151,6 +158,12 @@ export async function runHeartbeat(
     if (status === 'error' || status === 'parse_failed') {
       console.error(`[error] cycle did not complete cleanly — ${detail}`);
     }
+
+    // Activity notification (best-effort, sent by beat.ts): non-null ONLY when the
+    // cycle actually booked movements at the ledger — a hold/skip/error/throw yields
+    // null → nothing sent (no spam). Built from the LEDGER fact, never action_type;
+    // the claim time dates it, like the alerts.
+    const activityNotification = result ? prepareActivityNotification(result, claim.dbNow) : null;
 
     // 5a. Pure policy → the next state. Reschedule ALWAYS, whatever the outcome.
     const runOutcome = classifyOutcome(status);
@@ -195,8 +208,9 @@ export async function runHeartbeat(
           'The reclaiming run owns rescheduling; the cycle still ran.',
       );
       // Do NOT alert on the fencing path: the flags were not persisted (the fenced
-      // UPDATE affected 0 rows), so the reclaiming run owns the alert evaluation.
-      return { action: 'ran', reason: runOutcome, outcome: runOutcome, delayMinutes, missedBeats: missed, lockLost: true, equitySnapshot };
+      // UPDATE affected 0 rows), so the reclaiming run owns the alert evaluation. The
+      // activity notification still reflects what THIS cycle actually booked.
+      return { action: 'ran', reason: runOutcome, outcome: runOutcome, delayMinutes, missedBeats: missed, lockLost: true, equitySnapshot, activityNotification };
     }
 
     // Build the alerts that crossed UP on this beat (at most one per trigger). The DB
@@ -216,7 +230,7 @@ export async function runHeartbeat(
       `[beat] run #${claim.runId} done — outcome=${runOutcome}, next check in ${delayMinutes} min ` +
         `(consecutive_failures=${failuresAfter}, floor_streak=${floorStreak}).`,
     );
-    return { action: 'ran', reason: runOutcome, outcome: runOutcome, delayMinutes, missedBeats: missed, lockLost: false, alerts, equitySnapshot };
+    return { action: 'ran', reason: runOutcome, outcome: runOutcome, delayMinutes, missedBeats: missed, lockLost: false, alerts, equitySnapshot, activityNotification };
   } finally {
     // Disarm on every path: a settled finalize is done, a timeout hands off to
     // beat.ts's immediate non-zero exit (synchronous — no await to stall), and a
