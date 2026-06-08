@@ -63,6 +63,23 @@ export function variation(current: number, base: number | null | undefined): Var
   return { usd, pct: base !== 0 ? (usd / base) * 100 : null };
 }
 
+/**
+ * The 24h reference equity, or null if the closest snapshot is too OLD to honestly
+ * label "Sur 24h". The query returns the closest snapshot at-or-before the 24h mark;
+ * after a multi-day outage or a gap in snapshot writes that "closest" point can be days
+ * old, which would mislabel a multi-day change as 24h. We accept a reference only within
+ * `maxAgeMs` of now (24h + one max cadence gap — see gather); beyond that it falls back
+ * to the same "—" the first bilan shows. Pure → unit-tested.
+ */
+export function freshReference(
+  ref: { equityUsd: number; createdAtMs: number } | null,
+  nowMs: number,
+  maxAgeMs: number,
+): number | null {
+  if (!ref || !Number.isFinite(ref.createdAtMs)) return null;
+  return nowMs - ref.createdAtMs <= maxAgeMs ? ref.equityUsd : null;
+}
+
 function fmtVariation(v: Variation | null): string {
   if (!v) return '—';
   const sign = v.usd >= 0 ? '+' : '-';
@@ -111,18 +128,24 @@ async function readLatestSnapshot(sb: SupabaseClient): Promise<SnapRow | null> {
   } catch (err) { warn('latest snapshot', err); return null; }
 }
 
-async function readEquity24hAgo(sb: SupabaseClient, sinceIso: string): Promise<number | null> {
+async function readEquity24hAgo(
+  sb: SupabaseClient,
+  sinceIso: string,
+): Promise<{ equityUsd: number; createdAtMs: number } | null> {
   try {
+    // The closest snapshot AT OR BEFORE the 24h mark — WITH its timestamp, so the caller
+    // can reject a reference too old to honestly label "Sur 24h" (a gap/outage left no
+    // snapshot near the mark; freshReference handles that).
     const { data, error } = await sb
       .from('equity_snapshots')
-      .select('equity_usd')
+      .select('equity_usd, created_at')
       .lte('created_at', sinceIso)
       .order('created_at', { ascending: false })
       .limit(1)
       .abortSignal(AbortSignal.timeout(READ_TIMEOUT_MS))
       .maybeSingle();
     if (error) throw new Error(error.message);
-    return data ? Number(data.equity_usd) : null;
+    return data ? { equityUsd: Number(data.equity_usd), createdAtMs: Date.parse(data.created_at) } : null;
   } catch (err) { warn('24h-ago snapshot', err); return null; }
 }
 
@@ -188,7 +211,7 @@ function snapshotAllocation(snap: SnapRow): AllocationSlice[] {
  */
 async function gather(sb: SupabaseClient, now: Date, dateLabel: string): Promise<DailySummary | null> {
   const sinceIso = new Date(now.getTime() - DAY_MS).toISOString();
-  const [latest, equity24h, startCap, wakeups, trades] = await Promise.all([
+  const [latest, ref24h, startCap, wakeups, trades] = await Promise.all([
     readLatestSnapshot(sb),
     readEquity24hAgo(sb, sinceIso),
     readStartingCapital(sb),
@@ -197,6 +220,13 @@ async function gather(sb: SupabaseClient, now: Date, dateLabel: string): Promise
   ]);
   if (!latest) return null;
   const currentUsd = Number(latest.equity_usd);
+  // Reject a 24h reference that is too old to honestly carry the "Sur 24h" label: the
+  // closest snapshot before the mark may be days old after an outage/gap. "Near enough"
+  // = within 24h + one max CADENCE gap (the bot snapshots once per decided cycle, whose
+  // delay is clamped to ≤ maxDelayMinutes; +one beat for jitter). Beyond → "—".
+  const maxRefAgeMs =
+    DAY_MS + (config.decision.maxDelayMinutes + config.scheduler.beatIntervalMinutes) * 60_000;
+  const equity24h = freshReference(ref24h, now.getTime(), maxRefAgeMs);
   return {
     dateLabel,
     currentUsd,
@@ -210,6 +240,14 @@ async function gather(sb: SupabaseClient, now: Date, dateLabel: string): Promise
 
 // BOUNDED like every other I/O on this path (reads, Telegram send): a hung PostgREST
 // must not leave this await unsettled and block the beat before its Healthchecks ping.
+//
+// ACCEPTED RESIDUAL (best-effort observability, NOT the money path): if PostgreSQL
+// COMMITS the claim but the response is lost/delayed past the timeout, this throws
+// AFTER the mark was persisted; the outer catch then sends nothing and never releases,
+// so today's bilan is MISSED. It self-heals the NEXT day (tomorrow IS DISTINCT FROM
+// today's mark → claims → sends). At-most-once delivery would need a lease + durable
+// dedup — disproportionate machinery for a daily observability ping; we reserve that
+// for the money path (trades, cycle lock). A one-day miss is benign and bounded.
 async function claimDailySummary(sb: SupabaseClient, localDate: string): Promise<boolean> {
   const { data, error } = await sb
     .rpc('claim_daily_summary', { p_local_date: localDate })
@@ -255,6 +293,11 @@ export async function runDailySummary(
   const summary = await deps.gather();
   const delivered = summary != null && (await deps.send(formatDailySummary(summary)));
   if (delivered) return 'sent'; // confirmed → the day is COMMITTED (mark kept)
+  // ACCEPTED RESIDUAL (best-effort observability, NOT the money path): if Telegram
+  // RECEIVED the message but its HTTP response was lost/late (sendTelegram → false on
+  // timeout), releasing here makes the next beat re-send → ONE duplicate bilan.
+  // Cosmetic. Exactly-once is impossible without durable idempotency; for a daily ping
+  // at-least-once is the right trade — a duplicate is benign, a miss self-heals next day.
   await deps.release(localDate); // not delivered → roll the claim back → retry next beat
   return 'retry';
 }

@@ -17,7 +17,7 @@ import type { OrderResult } from '../execution/testnetOrder.js';
 import { clampAllocation } from '../risk/clamp.js';
 import { buildSystemPrompt } from '../decision/prompt.js';
 import { prepareActivityNotification, formatActivity } from '../alerting/activity.js';
-import { localNow, variation, formatDailySummary, runDailySummary, type DailySummary } from '../alerting/dailySummary.js';
+import { localNow, variation, freshReference, formatDailySummary, runDailySummary, type DailySummary } from '../alerting/dailySummary.js';
 import type { DecideResult } from '../decision/decide.js';
 import { buildEquitySnapshot, prepareEquitySnapshot } from '../persistence/equitySnapshots.js';
 import { loadStartingCapital } from '../persistence/startingCapital.js';
@@ -608,6 +608,20 @@ console.log('\nDaily summary — local-time trigger, variation fallbacks, French
   const v0 = variation(503, 0);
   assert.ok(v0 && v0.usd === 503 && v0.pct === null, 'zero base → Δ$ but no % (avoid /0)');
   console.log('  ok: variation computes Δ$/Δ% at the PORTFOLIO level, degrades cleanly with no reference');
+  passed += 1;
+}
+{
+  // The 24h reference must be NEAR the 24h mark. The query returns the closest snapshot
+  // before the mark; after an outage/gap that "closest" point can be days old, which
+  // would mislabel a multi-day change as "Sur 24h". Too old → "—" (first-bilan fallback).
+  const now = Date.parse('2026-06-08T09:00:00Z');
+  const H = 3_600_000;
+  const maxAge = 24 * H + 5 * H; // 24h + a cadence-gap window
+  assert.equal(freshReference(null, now, maxAge), null, 'no reference → null (→ "—")');
+  assert.equal(freshReference({ equityUsd: 500, createdAtMs: now - 25 * H }, now, maxAge), 500, '~25h old → fresh enough');
+  assert.equal(freshReference({ equityUsd: 500, createdAtMs: now - 72 * H }, now, maxAge), null, '3 days old (gap/outage) → rejected → "—"');
+  assert.equal(freshReference({ equityUsd: 500, createdAtMs: NaN }, now, maxAge), null, 'unparseable timestamp → null');
+  console.log('  ok: 24h reference bounded — a too-old snapshot falls back to "—", never mislabeled "Sur 24h"');
   passed += 1;
 }
 {
