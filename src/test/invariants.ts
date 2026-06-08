@@ -15,6 +15,7 @@ import { snapQty, validateMovement, type SymbolRules } from '../execution/symbol
 import { planMovements } from '../execution/plan.js';
 import type { OrderResult } from '../execution/testnetOrder.js';
 import { clampAllocation } from '../risk/clamp.js';
+import { buildSystemPrompt } from '../decision/prompt.js';
 import { buildEquitySnapshot, prepareEquitySnapshot } from '../persistence/equitySnapshots.js';
 import { loadStartingCapital } from '../persistence/startingCapital.js';
 import { config, type AppConfig } from '../config/index.js';
@@ -36,9 +37,14 @@ const defaultPrices: PriceLookup = (a) =>
 // A 3-coin world (all "big") to exercise rotation-with-redeploy at the floor.
 const threeCoinPrices: PriceLookup = (a) =>
   a === 'ALT' ? dec(10) : defaultPrices(a);
+// ALT gets the same 35% cap as BTC/ETH so the rotation can stack past the 70%
+// deployable headroom and actually exercise the cash-floor pass.
 const threeCoinConfig: AppConfig = {
   ...config,
-  execution: { ...config.execution, coinClass: { BTC: 'big', ETH: 'big', ALT: 'big' } },
+  execution: {
+    ...config.execution,
+    caps: { ...config.execution.caps, perAsset: { ...config.execution.caps.perAsset, ALT: 35 } },
+  },
 };
 
 const CAPITAL = dec(config.execution.startingCapitalUsd);
@@ -217,6 +223,55 @@ const negative = errors.filter((e) => e.includes('NEGATIVE position'));
 assert.equal(negative.length, 0, `never over-sell: expected no negative-position logs, got ${negative.length}:\n${negative.join('\n')}`);
 console.log('  ok: no over-sell — the negative-position guard never fired');
 passed += 1;
+
+// --- Per-asset caps: each enforced INDEPENDENTLY (they need not sum to 100) ---
+console.log('\nPer-asset caps — independent limits, surplus to cash, tightest default for the unlisted:');
+{
+  // BNB 40→20 and XRP 30→15 (their own caps); BTC/ETH within 35; the 35 surplus → cash.
+  const c = clampAllocation({ BTC: 10, ETH: 10, BNB: 40, XRP: 30, USDT: 10 }, 'USDT');
+  assert.equal(c.applied.BNB, 20, 'BNB capped at its own 20%');
+  assert.equal(c.applied.XRP, 15, 'XRP capped at its own 15%');
+  assert.equal(c.applied.BTC, 10, 'BTC under its 35% cap is untouched');
+  assert.equal(c.applied.ETH, 10, 'ETH under its 35% cap is untouched');
+  assert.equal(c.applied.USDT, 45, 'the 20+15 surplus moves to cash (10 + 35)');
+  assert.ok(c.clamped, 'clamped flag set');
+  console.log('  ok: BNB→20, XRP→15 independently; surplus→cash, never to another coin');
+  passed += 1;
+}
+{
+  // A tradable asset with no explicit cap falls back to the tightest default (15).
+  const c = clampAllocation({ FOO: 30, USDT: 70 }, 'USDT');
+  assert.equal(c.applied.FOO, config.execution.caps.defaultPerAsset, 'an uncapped asset uses defaultPerAsset');
+  assert.equal(config.execution.caps.defaultPerAsset, 15, 'the default is the tightest leash');
+  console.log('  ok: an uncapped tradable asset falls back to the tightest default cap (15)');
+  passed += 1;
+}
+
+// --- Mandate caps are generated from the TRADABLE assets and resolved like the
+//     clamp, so the prompt and the risk wrapper can never state different caps. ---
+console.log('\nMandate per-asset caps — built from tradable assets, matching the clamp:');
+{
+  const prompt = buildSystemPrompt();
+  assert.ok(prompt.includes('at most 35% of equity in BTC'), 'mandate states BTC 35%');
+  assert.ok(prompt.includes('at most 20% of equity in BNB'), 'mandate states BNB 20%');
+  assert.ok(prompt.includes('at most 15% of equity in XRP'), 'mandate states XRP 15%');
+  console.log('  ok: the mandate lists each tradable asset at its configured cap');
+  passed += 1;
+}
+{
+  // A tradable asset with NO explicit cap: the clamp applies defaultPerAsset (15),
+  // and the mandate must state that SAME cap — else the model would propose over it
+  // in a loop (the divergence this closes). Prompt and clamp read one source.
+  const cfg: AppConfig = { ...config, tradablePairs: [...config.tradablePairs, 'FOO/USDT'] };
+  const clampCap = clampAllocation({ FOO: 30, USDT: 70 }, 'USDT', cfg).applied.FOO;
+  assert.equal(clampCap, cfg.execution.caps.defaultPerAsset, 'clamp caps the uncapped asset at the default');
+  assert.ok(
+    buildSystemPrompt(cfg).includes(`at most ${clampCap}% of equity in FOO`),
+    'the mandate states the SAME default cap for the uncapped asset — no prompt/clamp divergence',
+  );
+  console.log('  ok: an uncapped tradable asset is stated in the mandate at the cap the clamp applies');
+  passed += 1;
+}
 
 // --- PR B: the four-state plumbing (pure checks, no network) ---
 console.log('\nPR B — validation, snapping, and the two-event journal:');

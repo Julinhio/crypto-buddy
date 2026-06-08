@@ -32,11 +32,12 @@ order is executable.
 
 Pairs are split into two families, kept strictly separate in the context:
 
-- **Tradable** (default: `BTC/USDT`, `ETH/USDT`) — the bot may take positions
-  on these later, under risk guardrails. Their base assets are balance-tracked.
-- **Reference** watchlist (default: `SOL/USDT`, `BNB/USDT`) — priced and
-  analyzed for market context only, **never traded, never allocated, no
-  balance tracked**.
+- **Tradable** (default: `BTC/USDT`, `ETH/USDT`, `BNB/USDT`, `XRP/USDT`) — the
+  bot may take positions on these, under the per-asset risk caps. Their base
+  assets are balance-tracked. (All four are verified TRADING on the Binance
+  testnet, where execution happens.)
+- **Reference** watchlist (default: `SOL/USDT`) — priced and analyzed for market
+  context only, **never traded, never allocated, no balance tracked**.
 
 For every pair in **both** families:
 
@@ -140,7 +141,7 @@ price/indicators), that asset is **not** offered to the model — same spirit as
 the skip rule, so we never journal a `decided` on an asset we know nothing
 about. The reserve stable is **USDT** (the quote we actually hold and trade
 against on the testnet), not the USDC shown in early drafts. Reference/watchlist
-assets (SOL, BNB) are context only and can never appear — the structured-output
+assets (SOL) are context only and can never appear — the structured-output
 schema fixes the keys, so the model can't even emit them. Percentages must sum
 to 100 (small rounding tolerance), each ≥ 0; `next_delay_minutes` is clamped by
 code to `[15, 240]` (raw value kept in `requested_delay_minutes`, clamped in
@@ -199,12 +200,16 @@ code bounds the allocation to hard caps and writes the result onto the decision
 (`applied_allocation`, `clamped`, `clamp_reason`). Every overage is "too much
 risk", so the surplus always goes to **cash** (USDT), never to another coin:
 
-- at most **35%** per large-cap (BTC, ETH);
-- at most **15%** per small-cap (more volatile, shorter leash — dormant until a
-  small cap is added);
-- at least **30%** in cash — sacred capital protection.
+- at most **35%** in BTC, **35%** in ETH, **20%** in BNB, **15%** in XRP;
+- at least **30%** in cash — the sacred floor.
 
-Caps are configurable per coin class in [`src/config/index.ts`](src/config/index.ts).
+These are **independent per-asset caps** — deliberately NOT summing to 100. The
+real collective guard is the 30% cash floor, which bounds total deployed capital
+to **70%**; the per-asset caps just keep the more volatile names on a shorter
+leash (XRP tightest, BNB a notch above, BTC/ETH the core). Any surplus a proposal
+puts above a cap is trimmed back to cash, never to another coin. Caps are
+configured per asset in [`src/config/index.ts`](src/config/index.ts) (`caps.perAsset`);
+an asset without an explicit cap falls back to the tightest default.
 
 **Movements.** The cycle computes the buys/sells to move from the current book to
 the bounded allocation, sized on equity at real prices. These movements are the
@@ -521,9 +526,11 @@ function, the live script proves the DB round-trip and trigger independence.
 All knobs live in [`src/config/index.ts`](src/config/index.ts):
 
 - `tradablePairs` — pairs the bot may allocate. Add one by appending a string
-  (e.g. `'SOL/USDT'`); its base asset is automatically balance-tracked.
-- `referencePairs` — context-only watchlist. Add one to enrich the market
-  read without ever trading or tracking it.
+  AND giving its base asset a cap in `execution.caps.perAsset`; its base asset is
+  automatically balance-tracked. A tradable asset must be TRADING on the testnet
+  (where execution happens), not just on mainnet.
+- `referencePairs` — context-only watchlist (e.g. `'SOL/USDT'`). Add one to
+  enrich the market read without ever trading or tracking it.
 - `primaryTimeframe` / `primaryLimit` — series used for indicators and
   month/year levels.
 - `longTermTimeframe` / `longTermLimit` — series used to seed ATH/ATL.

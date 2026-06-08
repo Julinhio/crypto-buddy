@@ -57,13 +57,6 @@ export interface DecisionConfig {
 }
 
 /**
- * Risk classes for tradable coins. Caps are configured per class, so adding a
- * coin only means tagging its class — large caps get more rope, small caps a
- * shorter leash. Anything not listed in `coinClass` defaults to 'small'.
- */
-export type CoinClass = 'big' | 'small';
-
-/**
  * Execution layer (brick 4) tuning — the economic brain.
  *
  * The bot manages its OWN virtual portfolio valued at real market prices,
@@ -77,13 +70,19 @@ export interface ExecutionConfig {
   feePercent: number;
   /** Allocation caps the risk wrapper enforces (percent of equity). */
   caps: {
-    /** Max % of equity per coin, by risk class. */
-    byClass: Record<CoinClass, number>;
-    /** Minimum % of equity kept in the reserve stable — sacred capital protection. */
+    /**
+     * Max % of equity PER ASSET — INDEPENDENT caps, deliberately NOT summing to
+     * 100. They only stop over-concentration on the more volatile names (the
+     * tighter the cap, the shorter the leash); the real COLLECTIVE guard is
+     * `minCashPercent`, which bounds total deployed capital. A tradable asset
+     * without an explicit cap falls back to `defaultPerAsset`.
+     */
+    perAsset: Record<string, number>;
+    /** Cap for a tradable asset not listed in `perAsset` — the tightest leash. */
+    defaultPerAsset: number;
+    /** Minimum % of equity kept in the reserve stable — the sacred collective guard. */
     minCashPercent: number;
   };
-  /** Coin → risk class. Unlisted coins default to 'small'. */
-  coinClass: Record<string, CoinClass>;
 }
 
 /**
@@ -184,13 +183,17 @@ export function schedulerSecondsEnv(name: string, fallback: number): number {
 }
 
 export const config: AppConfig = {
-  // Pairs the bot may take positions on (subject to risk guardrails, later).
-  // Add a tradable pair by appending one line — small caps go here too.
-  tradablePairs: ['BTC/USDT', 'ETH/USDT'],
+  // Pairs the bot may take positions on (subject to the risk caps). Add a tradable
+  // pair by appending one line AND giving it a cap in execution.caps.perAsset.
+  // Universe (4 assets): BTC + ETH (the core), BNB (promoted from watchlist), XRP
+  // (a lower-BTC-correlation, payments-narrative name). All four verified TRADING
+  // on the Binance testnet (status + LOT_SIZE/PRICE_FILTER/NOTIONAL filters), since
+  // the bot decides on mainnet but EXECUTES on testnet.
+  tradablePairs: ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'XRP/USDT'],
 
   // Reference-only watchlist: priced and analyzed for market context,
   // never traded, never allocated, no balance tracked.
-  referencePairs: ['SOL/USDT', 'BNB/USDT'],
+  referencePairs: ['SOL/USDT'],
 
   primaryTimeframe: '1d',
   primaryLimit: 500,
@@ -226,14 +229,19 @@ export const config: AppConfig = {
     startingCapitalUsd: envNumber('STARTING_CAPITAL_USD', 500),
     feePercent: envNumber('FEE_PERCENT', 0.1),
     caps: {
-      // Revised caps (Julien): big coins get 35%, small caps a shorter 15%,
-      // and at least 30% stays in cash — the real capital protection. With only
-      // BTC+ETH today (35+35=70) the 30% floor is already implied; the small-cap
-      // cap is dormant until a small cap is added.
-      byClass: { big: 35, small: 15 },
+      // Per-asset caps (Julien's explicit guard-rail — do not change without asking).
+      // INDEPENDENT limits, deliberately NOT summing to 100: BTC/ETH are the core
+      // (35), BNB a notch tighter (20), XRP the shortest leash (15). The real
+      // COLLECTIVE guard is the 30% cash floor below, which bounds total deployed
+      // capital to 70% — so 35+35+20+15=105 of cap headroom never deploys past 70%.
+      // Any surplus a proposal puts above a cap is trimmed back to CASH (never to
+      // another coin), as before.
+      perAsset: { BTC: 35, ETH: 35, BNB: 20, XRP: 15 },
+      // A tradable asset added without its own cap falls back here — the tightest
+      // leash, so a forgotten cap is safe (never looser than the smallest).
+      defaultPerAsset: 15,
       minCashPercent: 30,
     },
-    coinClass: { BTC: 'big', ETH: 'big' },
   },
 
   scheduler: {
@@ -263,11 +271,6 @@ export const config: AppConfig = {
   },
 };
 
-/** Risk class for a coin (defaults to 'small' — shorter leash — when unlisted). */
-export function coinClassOf(asset: string, cfg: AppConfig = config): CoinClass {
-  return cfg.execution.coinClass[asset] ?? 'small';
-}
-
 /**
  * Fails fast on an incoherent execution config so the risk wrapper's invariants
  * hold BY CONSTRUCTION. In particular, the cash-floor pass can only produce a
@@ -287,9 +290,12 @@ function validateExecutionConfig(cfg: ExecutionConfig): void {
   if (!(caps.minCashPercent > 0 && caps.minCashPercent < 100)) {
     problems.push(`caps.minCashPercent must be in (0, 100) (got ${caps.minCashPercent})`);
   }
-  for (const [cls, cap] of Object.entries(caps.byClass)) {
+  if (!(caps.defaultPerAsset >= 0 && caps.defaultPerAsset <= 100)) {
+    problems.push(`caps.defaultPerAsset must be in [0, 100] (got ${caps.defaultPerAsset})`);
+  }
+  for (const [asset, cap] of Object.entries(caps.perAsset)) {
     if (!(cap >= 0 && cap <= 100)) {
-      problems.push(`caps.byClass.${cls} must be in [0, 100] (got ${cap})`);
+      problems.push(`caps.perAsset.${asset} must be in [0, 100] (got ${cap})`);
     }
   }
   if (problems.length > 0) {
@@ -378,4 +384,25 @@ export function tradableAssets(cfg: AppConfig = config): Set<string> {
     if (quote) assets.add(quote);
   }
   return assets;
+}
+
+/**
+ * The BASE assets of the tradable pairs (the coins the bot may hold), in config
+ * order, e.g. [BTC, ETH, BNB, XRP]. The reserve stable (the quote) is excluded —
+ * it's the cash side, governed by the cash floor, not a per-asset cap. This is the
+ * universe the mandate enumerates for the caps; resolving each via
+ * `caps.perAsset[asset] ?? caps.defaultPerAsset` matches exactly what the risk
+ * wrapper applies, so the prompt and the clamp can never state different caps.
+ */
+export function tradableBaseAssets(cfg: AppConfig = config): string[] {
+  const bases: string[] = [];
+  const seen = new Set<string>();
+  for (const pair of cfg.tradablePairs) {
+    const base = pair.split('/')[0];
+    if (base && !seen.has(base)) {
+      seen.add(base);
+      bases.push(base);
+    }
+  }
+  return bases;
 }
