@@ -1,4 +1,4 @@
-import { config } from '../config/index.js';
+import { config, WATCHDOG_GRACE_SECONDS } from '../config/index.js';
 import { decide, type DecideResult } from '../decision/decide.js';
 import { prepareEquitySnapshot, type EquitySnapshotInsert } from '../persistence/equitySnapshots.js';
 import type { CycleStatus } from './policy.js';
@@ -137,13 +137,6 @@ export async function runGuardedCycle(
 }
 
 /**
- * Grace added to the cycle budget for the watchdog deadline: enough for a clean
- * finalize to finish, while keeping the deadline well below lockTtl (prod: cycle
- * budget 300s + 15s ≪ the 600s lock TTL).
- */
-const WATCHDOG_GRACE_MS = 15_000;
-
-/**
  * Arms the absolute anti-freeze watchdog for a REAL mutation cycle and returns a
  * disarm fn. It force-exits the process at maxCycleSeconds + grace — BEFORE the
  * run-lock's TTL — INDEPENDENT of any await, so a stalled call on the
@@ -154,10 +147,11 @@ const WATCHDOG_GRACE_MS = 15_000;
  * (it sets locked_until = now() + lockTtl), which can happen even if the claim's
  * HTTP response then stalls past the TTL. Arming only after the claim returns would
  * leave that window unguarded. Since arm-time ≤ claim-commit-time and
- * (maxCycleSeconds + grace) < lockTtl, this absolute deadline provably fires before
- * the lock can expire, in EVERY case, regardless of which await stalls. A
- * force-exit placed after an awaited call is itself defeated when that call hangs —
- * exactly the Supabase stall we tolerate; this timer cannot be wedged.
+ * (maxCycleSeconds + grace) < lockTtl — enforced by validateSchedulerConfig — this
+ * absolute deadline provably fires before the lease can expire, in EVERY case,
+ * regardless of which await stalls. A force-exit placed after an awaited call is
+ * itself defeated when that call hangs — exactly the Supabase stall we tolerate;
+ * this timer cannot be wedged.
  */
 export function armCycleWatchdog(label: string): () => void {
   const watchdog = setTimeout(() => {
@@ -167,6 +161,6 @@ export function armCycleWatchdog(label: string): () => void {
         `force-exiting so the lock expires at its TTL and a later beat reclaims via the expired lease.`,
     );
     process.exit(1);
-  }, config.scheduler.maxCycleSeconds * 1000 + WATCHDOG_GRACE_MS);
+  }, (config.scheduler.maxCycleSeconds + WATCHDOG_GRACE_SECONDS) * 1000);
   return () => clearTimeout(watchdog);
 }

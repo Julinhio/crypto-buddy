@@ -90,19 +90,22 @@ export interface ExecutionConfig {
  * Scheduler (heartbeat) tuning. A fixed external cron beats the entry point every
  * `beatIntervalMinutes`; the state machine turns that into a variable cadence.
  *
- * The load-bearing safety relation is `lockTtlSeconds > maxCycleSeconds`: the lock
- * must outlive the WORST-case cycle (slow LLM call included), otherwise a
- * slow-but-alive run could see its lock expire and a parallel beat reclaim it,
- * running a SECOND concurrent cycle. The fencing token stops state corruption, not
- * two concurrent executions — so we bound the external calls (see binance.ts /
- * llm.ts timeouts) AND keep the lock longer than the declared cycle budget.
+ * The load-bearing safety relation is `lockTtlSeconds > maxCycleSeconds +
+ * WATCHDOG_GRACE_SECONDS`: the lease must outlive not just the cycle budget but the
+ * WATCHDOG's force-exit deadline (budget + grace). Otherwise a slow-but-alive run's
+ * lease could expire — and be reclaimed by a parallel beat — in the window before
+ * the watchdog kills the orphan, running a SECOND concurrent cycle (and a second
+ * order). The fencing token stops state corruption, not two concurrent executions —
+ * so we bound the external calls (see binance.ts / llm.ts timeouts), keep the lease
+ * longer than budget + grace, AND force-exit before the lease expires.
  */
 export interface SchedulerConfig {
   /** The external cron cadence, in minutes (used for missed-beat accounting). */
   beatIntervalMinutes: number;
   /** Declared worst-case cycle budget. MUST stay above the sum of external timeouts. */
   maxCycleSeconds: number;
-  /** Run-lock TTL. MUST exceed maxCycleSeconds so a live run never loses its lock. */
+  /** Run-lock TTL. MUST exceed maxCycleSeconds + WATCHDOG_GRACE_SECONDS so the
+   *  watchdog force-exits the orphan before the lease can expire and be reclaimed. */
   lockTtlSeconds: number;
   /** Reschedule delay after a soft skip (no usable data / nothing actionable). */
   softSkipDelayMinutes: number;
@@ -261,12 +264,24 @@ function validateExecutionConfig(cfg: ExecutionConfig): void {
 validateExecutionConfig(config.execution);
 
 /**
- * Fails fast on an unsafe scheduler config. The critical invariant is
- * `lockTtlSeconds > maxCycleSeconds`: if the lock could expire before the worst
- * cycle finishes, a parallel beat would reclaim it and run a second concurrent
- * cycle (the fencing token prevents state corruption, not double execution).
+ * Grace added to the cycle budget for the watchdog's force-exit deadline (see
+ * armCycleWatchdog in scheduler/cycleGuard.ts, which imports this). It is the SINGLE
+ * source of the grace so the timer and the invariant below can never drift: the
+ * watchdog fires at maxCycleSeconds + this, and the lease TTL must exceed that.
  */
-function validateSchedulerConfig(cfg: SchedulerConfig): void {
+export const WATCHDOG_GRACE_SECONDS = 15;
+
+/**
+ * Fails fast on an unsafe scheduler config. The critical invariant is
+ * `lockTtlSeconds > maxCycleSeconds + WATCHDOG_GRACE_SECONDS`: the watchdog only
+ * force-exits the process (killing the timed-out orphan) at budget + grace, so if
+ * the lease expired any earlier a parallel beat could reclaim it and run a second
+ * concurrent cycle — and place a second order — while the orphan is still alive.
+ * Checking merely `> maxCycleSeconds` would leave that grace-wide window open (now
+ * reachable via the MAX_CYCLE_SECONDS / LOCK_TTL_SECONDS env overrides). Exported
+ * for the offline test.
+ */
+export function validateSchedulerConfig(cfg: SchedulerConfig): void {
   const problems: string[] = [];
   if (!(cfg.beatIntervalMinutes > 0)) {
     problems.push(`beatIntervalMinutes must be > 0 (got ${cfg.beatIntervalMinutes})`);
@@ -274,10 +289,11 @@ function validateSchedulerConfig(cfg: SchedulerConfig): void {
   if (!(cfg.maxCycleSeconds > 0)) {
     problems.push(`maxCycleSeconds must be > 0 (got ${cfg.maxCycleSeconds})`);
   }
-  if (!(cfg.lockTtlSeconds > cfg.maxCycleSeconds)) {
+  if (!(cfg.lockTtlSeconds > cfg.maxCycleSeconds + WATCHDOG_GRACE_SECONDS)) {
     problems.push(
-      `lockTtlSeconds (${cfg.lockTtlSeconds}) must exceed maxCycleSeconds (${cfg.maxCycleSeconds}) ` +
-        `so a slow-but-alive run never loses its lock to a parallel beat`,
+      `lockTtlSeconds (${cfg.lockTtlSeconds}) must exceed maxCycleSeconds + the watchdog grace ` +
+        `(${cfg.maxCycleSeconds} + ${WATCHDOG_GRACE_SECONDS} = ${cfg.maxCycleSeconds + WATCHDOG_GRACE_SECONDS}) ` +
+        `so the watchdog force-exits the orphan BEFORE the lease can expire and be reclaimed`,
     );
   }
   if (!(cfg.softSkipDelayMinutes > 0)) {

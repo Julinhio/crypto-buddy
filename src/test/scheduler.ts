@@ -24,6 +24,7 @@ import {
 } from '../persistence/schedulerState.js';
 import { runHeartbeat } from '../scheduler/heartbeat.js';
 import { runCycleWithTimeout, runGuardedCycle } from '../scheduler/cycleGuard.js';
+import { validateSchedulerConfig, WATCHDOG_GRACE_SECONDS } from '../config/index.js';
 import type { DecideResult } from '../decision/decide.js';
 
 /**
@@ -260,5 +261,25 @@ const settledThrow = async () => ({
   ok('settled (throw) → action=ran', res.action === 'ran');
   ok('settled → finish_run IS called (release + reschedule + close)', calls.includes('finish_run'));
 }
+
+// ── Config invariant: the lease must outlive the watchdog deadline, not just the
+//    budget — else (with the env overrides) the lease can expire and be reclaimed in
+//    the grace-wide window while the timed-out orphan is still alive. ──
+console.log('\nScheduler config invariant (lockTtl > maxCycle + watchdog grace):');
+const baseSched = { beatIntervalMinutes: 5, softSkipDelayMinutes: 30 };
+const throwsCfg = (label: string, lockTtlSeconds: number, maxCycleSeconds = 300) => {
+  assert.throws(() => validateSchedulerConfig({ ...baseSched, maxCycleSeconds, lockTtlSeconds }));
+  console.log(`  ok: ${label}`);
+  passed += 1;
+};
+const acceptsCfg = (label: string, lockTtlSeconds: number, maxCycleSeconds = 300) => {
+  assert.doesNotThrow(() => validateSchedulerConfig({ ...baseSched, maxCycleSeconds, lockTtlSeconds }));
+  console.log(`  ok: ${label}`);
+  passed += 1;
+};
+throwsCfg('rejects lockTtl above the budget but below budget+grace (the Codex case 300/301)', 301);
+throwsCfg('rejects a budget+grace TIE (the watchdog would fire exactly as the lease expires — racy)', 300 + WATCHDOG_GRACE_SECONDS);
+acceptsCfg('accepts lockTtl just over budget+grace (300/316)', 300 + WATCHDOG_GRACE_SECONDS + 1);
+acceptsCfg('accepts the prod defaults (300/600)', 600);
 
 console.log(`\n${passed} scheduler checks passed.`);
