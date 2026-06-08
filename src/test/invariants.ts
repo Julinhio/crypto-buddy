@@ -15,6 +15,7 @@ import { snapQty, validateMovement, type SymbolRules } from '../execution/symbol
 import { planMovements } from '../execution/plan.js';
 import type { OrderResult } from '../execution/testnetOrder.js';
 import { clampAllocation } from '../risk/clamp.js';
+import { buildSystemPrompt } from '../decision/prompt.js';
 import { buildEquitySnapshot, prepareEquitySnapshot } from '../persistence/equitySnapshots.js';
 import { loadStartingCapital } from '../persistence/startingCapital.js';
 import { config, type AppConfig } from '../config/index.js';
@@ -243,6 +244,32 @@ console.log('\nPer-asset caps — independent limits, surplus to cash, tightest 
   assert.equal(c.applied.FOO, config.execution.caps.defaultPerAsset, 'an uncapped asset uses defaultPerAsset');
   assert.equal(config.execution.caps.defaultPerAsset, 15, 'the default is the tightest leash');
   console.log('  ok: an uncapped tradable asset falls back to the tightest default cap (15)');
+  passed += 1;
+}
+
+// --- Mandate caps are generated from the TRADABLE assets and resolved like the
+//     clamp, so the prompt and the risk wrapper can never state different caps. ---
+console.log('\nMandate per-asset caps — built from tradable assets, matching the clamp:');
+{
+  const prompt = buildSystemPrompt();
+  assert.ok(prompt.includes('at most 35% of equity in BTC'), 'mandate states BTC 35%');
+  assert.ok(prompt.includes('at most 20% of equity in BNB'), 'mandate states BNB 20%');
+  assert.ok(prompt.includes('at most 15% of equity in XRP'), 'mandate states XRP 15%');
+  console.log('  ok: the mandate lists each tradable asset at its configured cap');
+  passed += 1;
+}
+{
+  // A tradable asset with NO explicit cap: the clamp applies defaultPerAsset (15),
+  // and the mandate must state that SAME cap — else the model would propose over it
+  // in a loop (the divergence this closes). Prompt and clamp read one source.
+  const cfg: AppConfig = { ...config, tradablePairs: [...config.tradablePairs, 'FOO/USDT'] };
+  const clampCap = clampAllocation({ FOO: 30, USDT: 70 }, 'USDT', cfg).applied.FOO;
+  assert.equal(clampCap, cfg.execution.caps.defaultPerAsset, 'clamp caps the uncapped asset at the default');
+  assert.ok(
+    buildSystemPrompt(cfg).includes(`at most ${clampCap}% of equity in FOO`),
+    'the mandate states the SAME default cap for the uncapped asset — no prompt/clamp divergence',
+  );
+  console.log('  ok: an uncapped tradable asset is stated in the mandate at the cap the clamp applies');
   passed += 1;
 }
 

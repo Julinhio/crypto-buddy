@@ -385,3 +385,24 @@ export function tradableAssets(cfg: AppConfig = config): Set<string> {
   }
   return assets;
 }
+
+/**
+ * The BASE assets of the tradable pairs (the coins the bot may hold), in config
+ * order, e.g. [BTC, ETH, BNB, XRP]. The reserve stable (the quote) is excluded —
+ * it's the cash side, governed by the cash floor, not a per-asset cap. This is the
+ * universe the mandate enumerates for the caps; resolving each via
+ * `caps.perAsset[asset] ?? caps.defaultPerAsset` matches exactly what the risk
+ * wrapper applies, so the prompt and the clamp can never state different caps.
+ */
+export function tradableBaseAssets(cfg: AppConfig = config): string[] {
+  const bases: string[] = [];
+  const seen = new Set<string>();
+  for (const pair of cfg.tradablePairs) {
+    const base = pair.split('/')[0];
+    if (base && !seen.has(base)) {
+      seen.add(base);
+      bases.push(base);
+    }
+  }
+  return bases;
+}

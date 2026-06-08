@@ -1,4 +1,4 @@
-import { config } from '../config/index.js';
+import { config, tradableBaseAssets, type AppConfig } from '../config/index.js';
 import type { DecisionContext } from './context.js';
 import type { DecisionSummary } from '../persistence/decisions.js';
 
@@ -15,8 +15,8 @@ export const PROMPT_VERSION = 'v3';
  * (the caps come from config, which doesn't change between runs) so it can be
  * prompt-cached; all volatile data goes in the user message.
  */
-export function buildSystemPrompt(): string {
-  const { caps } = config.execution;
+export function buildSystemPrompt(cfg: AppConfig = config): string {
+  const { caps } = cfg.execution;
   return [
     'You are the decision engine of an autonomous crypto-portfolio bot trading on',
     'Binance (spot, testnet). You PROPOSE a target allocation; deterministic code',
@@ -44,7 +44,13 @@ export function buildSystemPrompt(): string {
     'Hard per-asset caps the code enforces — INDEPENDENT limits (they need NOT sum to 100;',
     'the real collective guard is the cash floor below). Propose WITHIN them — if you exceed',
     'one, the code trims the excess to the cap and moves it to CASH (never to another coin):',
-    ...Object.entries(caps.perAsset).map(([asset, cap]) => `- at most ${cap}% of equity in ${asset};`),
+    // Enumerate the TRADABLE assets (not just the caps.perAsset entries) and resolve
+    // each cap exactly as the risk wrapper does (perAsset[asset] ?? defaultPerAsset),
+    // so the mandate states the SAME cap the clamp applies — even for an asset that
+    // has no explicit entry (it would otherwise be silently capped at the default).
+    ...tradableBaseAssets(cfg).map(
+      (asset) => `- at most ${caps.perAsset[asset] ?? caps.defaultPerAsset}% of equity in ${asset};`,
+    ),
     `- at least ${caps.minCashPercent}% kept in the reserve stable (cash) at all times — sacred;`,
     `  this bounds total deployed capital to at most ${100 - caps.minCashPercent}%.`,
     '',
