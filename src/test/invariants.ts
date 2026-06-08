@@ -17,6 +17,7 @@ import type { OrderResult } from '../execution/testnetOrder.js';
 import { clampAllocation } from '../risk/clamp.js';
 import { buildSystemPrompt } from '../decision/prompt.js';
 import { prepareActivityNotification, formatActivity } from '../alerting/activity.js';
+import { localNow, variation, freshReference, formatDailySummary, runDailySummary, type DailySummary } from '../alerting/dailySummary.js';
 import type { DecideResult } from '../decision/decide.js';
 import { buildEquitySnapshot, prepareEquitySnapshot } from '../persistence/equitySnapshots.js';
 import { loadStartingCapital } from '../persistence/startingCapital.js';
@@ -580,6 +581,130 @@ console.log('\nActivity notification — ledger-fact movements, $ amounts, résu
   assert.ok(p.includes('WRITE IT IN FRENCH'), 'the mandate requires notification_summary in French');
   assert.ok(p.includes("j'accumule vers le bas"), 'the notification_summary example is in French');
   console.log('  ok: notification_summary is instructed in French (no franglais in the notif)');
+  passed += 1;
+}
+
+// --- Daily summary: local-time trigger basis, variation fallbacks, French mockup ---
+console.log('\nDaily summary — local-time trigger, variation fallbacks, French mockup:');
+{
+  // localNow projects a UTC instant to the configured zone (date key for the claim,
+  // hour for the ≥9h gate, French label for the header). Paris is UTC+2 in June (CEST).
+  const paris = (iso: string) => localNow(new Date(iso), 'Europe/Paris');
+  assert.equal(paris('2026-06-08T07:30:00Z').hour, 9, '07:30 UTC → 09h Paris (past the send hour)');
+  assert.equal(paris('2026-06-08T06:45:00Z').hour, 8, '06:45 UTC → 08h Paris (before the send hour)');
+  assert.equal(paris('2026-06-08T07:30:00Z').dateKey, '2026-06-08', 'local date key drives the once-per-day claim');
+  assert.equal(paris('2026-06-08T07:30:00Z').label, '8 juin', 'French header label');
+  // The zone shifts the LOCAL DATE: 22:30 UTC is already the next day in Paris.
+  assert.equal(paris('2026-06-08T22:30:00Z').dateKey, '2026-06-09', 'late-UTC instant rolls to the next local day');
+  assert.equal(localNow(new Date('2026-06-08T07:30:00Z'), 'UTC').hour, 7, 'UTC zone → no offset');
+  console.log('  ok: localNow projects a UTC instant to the configured zone (date/hour/label) — the trigger basis');
+  passed += 1;
+}
+{
+  // Variation vs a base, with the clean fallbacks the brief asks for.
+  const v = variation(503, 500);
+  assert.ok(v && v.usd === 3 && Math.abs((v.pct ?? 0) - 0.6) < 1e-9, 'variation vs base = Δ$ + Δ%');
+  assert.equal(variation(503, null), null, 'no reference (first bilan after start/reset) → null → "—"');
+  const v0 = variation(503, 0);
+  assert.ok(v0 && v0.usd === 503 && v0.pct === null, 'zero base → Δ$ but no % (avoid /0)');
+  console.log('  ok: variation computes Δ$/Δ% at the PORTFOLIO level, degrades cleanly with no reference');
+  passed += 1;
+}
+{
+  // The 24h reference must be NEAR the 24h mark. The query returns the closest snapshot
+  // before the mark; after an outage/gap that "closest" point can be days old, which
+  // would mislabel a multi-day change as "Sur 24h". Too old → "—" (first-bilan fallback).
+  const now = Date.parse('2026-06-08T09:00:00Z');
+  const H = 3_600_000;
+  const maxAge = 24 * H + 5 * H; // 24h + a cadence-gap window
+  assert.equal(freshReference(null, now, maxAge), null, 'no reference → null (→ "—")');
+  assert.equal(freshReference({ equityUsd: 500, createdAtMs: now - 25 * H }, now, maxAge), 500, '~25h old → fresh enough');
+  assert.equal(freshReference({ equityUsd: 500, createdAtMs: now - 72 * H }, now, maxAge), null, '3 days old (gap/outage) → rejected → "—"');
+  assert.equal(freshReference({ equityUsd: 500, createdAtMs: NaN }, now, maxAge), null, 'unparseable timestamp → null');
+  console.log('  ok: 24h reference bounded — a too-old snapshot falls back to "—", never mislabeled "Sur 24h"');
+  passed += 1;
+}
+{
+  // formatDailySummary matches the validated mockup, incl. the "—" fallbacks.
+  const full = formatDailySummary({
+    dateLabel: '8 juin', currentUsd: 503,
+    change24h: { usd: 2.1, pct: 0.42 }, changeSinceStart: { usd: 3, pct: 0.6 },
+    allocation: [
+      { label: 'BTC', weight: 22 }, { label: 'ETH', weight: 12 },
+      { label: 'BNB', weight: 8 }, { label: 'cash', weight: 58 },
+    ],
+    wakeups: 3, trades: 2,
+  });
+  assert.ok(full.includes('📊 Bilan du jour · 8 juin'), 'header with the local date');
+  assert.ok(full.includes('Capital : 503$'), 'current capital');
+  assert.ok(full.includes('Sur 24h : +2.10$ (+0.42%)'), '24h variation — signed, 2dp');
+  assert.ok(full.includes('Depuis le début : +3.00$ (+0.60%)'), 'since-start variation');
+  assert.ok(full.includes('Alloc : 22% BTC · 12% ETH · 8% BNB · 58% cash'), 'allocation, cash last (shared helper)');
+  assert.ok(full.includes('Activité : 3 réveils, 2 trades'), 'activity counts, pluralized');
+
+  // First bilan (no references) → clean dashes, singular forms, no crash.
+  const firstDay = formatDailySummary({
+    dateLabel: '8 juin', currentUsd: 500, change24h: null, changeSinceStart: null,
+    allocation: [{ label: 'cash', weight: 100 }], wakeups: 1, trades: 0,
+  });
+  assert.ok(firstDay.includes('Sur 24h : —'), 'no 24h reference → dash');
+  assert.ok(firstDay.includes('Depuis le début : —'), 'no starting capital → dash');
+  assert.ok(firstDay.includes('Activité : 1 réveil, 0 trade'), 'singular réveil / trade (1 and 0)');
+  console.log('  ok: formatDailySummary matches the mockup, with clean — fallbacks on the first bilan');
+  passed += 1;
+}
+{
+  // The once-per-day claim predicate — mirrors claim_daily_summary (migration 0015):
+  //   last_daily_summary_date IS DISTINCT FROM p_local_date
+  // i.e. send once per DISTINCT local date, NOT once per "date moved forward". The SQL
+  // is the atomic source of truth (verified live); this locks the INTENT so nobody
+  // regresses to a monotone comparison. The key case is WESTWARD travel: after a TZ
+  // change the local date can move BACKWARD and the bilan must STILL go out.
+  const wouldClaim = (stored: string | null, localDate: string): boolean =>
+    stored === null || stored !== localDate; // IS DISTINCT FROM
+  assert.ok(wouldClaim(null, '2026-06-08'), 'first ever (null marker) → claims');
+  assert.ok(!wouldClaim('2026-06-08', '2026-06-08'), 'same local date → no re-send (intra-day idempotence)');
+  assert.ok(wouldClaim('2026-06-08', '2026-06-09'), 'next local day → claims');
+  assert.ok(wouldClaim('2026-06-09', '2026-06-08'), 'EARLIER local date (westward TZ travel) → STILL claims (not monotone)');
+  console.log('  ok: claim once per DISTINCT local date — westward travel still sends, never monotone');
+  passed += 1;
+}
+{
+  // Provisional claim: the day is consumed ONLY on a CONFIRMED send. The claim is first
+  // (atomic double-send guard), but a non-delivery (send=false, or no data) RELEASES the
+  // mark so the next beat retries — a daily message must not lose the day on a hiccup.
+  const sample = {
+    dateLabel: '8 juin', currentUsd: 503, change24h: null, changeSinceStart: null,
+    allocation: [{ label: 'cash', weight: 100 }], wakeups: 1, trades: 0,
+  } as DailySummary;
+  const harness = (over: { won?: boolean; summary?: DailySummary | null; delivered?: boolean }) => {
+    const c = { sent: 0, released: [] as string[] };
+    const deps = {
+      claim: async (_d: string) => ('won' in over ? over.won! : true),
+      gather: async () => ('summary' in over ? over.summary! : sample),
+      send: async (_t: string) => { c.sent += 1; return 'delivered' in over ? over.delivered! : true; },
+      release: async (d: string) => { c.released.push(d); },
+    };
+    return { c, deps };
+  };
+  // Confirmed send → committed, NO release.
+  let h = harness({ delivered: true });
+  assert.equal(await runDailySummary(h.deps, '2026-06-08'), 'sent', 'a confirmed send → sent');
+  assert.equal(h.c.released.length, 0, 'a confirmed send consumes the day — never released');
+  // Send returns false (creds/timeout/network/non-2xx) → released → retry.
+  h = harness({ delivered: false });
+  assert.equal(await runDailySummary(h.deps, '2026-06-08'), 'retry', 'a failed send → retry');
+  assert.deepEqual(h.c.released, ['2026-06-08'], 'a failed send releases the day (next beat retries)');
+  // No data (no snapshot yet) → no send, released → retry.
+  h = harness({ summary: null });
+  assert.equal(await runDailySummary(h.deps, '2026-06-08'), 'retry', 'no data → retry');
+  assert.equal(h.c.sent, 0, 'no data → nothing sent');
+  assert.deepEqual(h.c.released, ['2026-06-08'], 'no data → released (retry when a snapshot exists)');
+  // Lost the claim (a concurrent beat owns it) → do nothing.
+  h = harness({ won: false });
+  assert.equal(await runDailySummary(h.deps, '2026-06-08'), 'skip', 'lost claim → skip');
+  assert.equal(h.c.sent + h.c.released.length, 0, 'lost claim → no send, no release (another beat owns it)');
+  console.log('  ok: provisional claim — day consumed only on a confirmed send, else released → retry');
   passed += 1;
 }
 

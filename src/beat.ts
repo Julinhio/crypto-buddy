@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { runHeartbeat } from './scheduler/heartbeat.js';
 import { formatAlert } from './alerting/messages.js';
 import { formatActivity } from './alerting/activity.js';
+import { maybeSendDailySummary } from './alerting/dailySummary.js';
 import { sendTelegram } from './alerting/telegram.js';
 import { pingHealthchecks } from './alerting/healthchecks.js';
 import { writeEquitySnapshot } from './persistence/equitySnapshots.js';
@@ -51,6 +52,14 @@ async function main(): Promise<number> {
   // so that ping stays the genuine last signal; its own bounded abort timeout keeps
   // a hung write from delaying the beat.
   await writeEquitySnapshot(getSupabaseClient(), result.equitySnapshot ?? null);
+
+  // Daily summary — the once-a-day overview, TIME-triggered (claims atomically so it
+  // fires exactly once per local day, even though the beat runs every 5 min). Best-
+  // effort and self-contained: it never throws, runs OUTSIDE the fenced cycle, and is
+  // a cheap no-op on every beat except the first past the local send-hour that wins the
+  // claim. After the snapshot write (so it reports the freshest capital), before the
+  // dead-man ping (so that ping stays the genuine last signal).
+  await maybeSendDailySummary(getSupabaseClient(), new Date());
 
   // Dead-man's-switch — LAST, and only on a clean beat. A thrown infra fault never
   // reaches here (it lands in .catch → non-zero exit), nor does a timed-out beat
