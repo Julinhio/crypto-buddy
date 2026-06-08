@@ -209,7 +209,15 @@ async function gather(sb: SupabaseClient, now: Date, dateLabel: string): Promise
 }
 
 async function claimDailySummary(sb: SupabaseClient, localDate: string): Promise<boolean> {
-  const { data, error } = await sb.rpc('claim_daily_summary', { p_local_date: localDate });
+  // BOUNDED like every other I/O on this path (the reads, the Telegram send): a hung
+  // PostgREST that never responds nor errors must not leave this await unsettled and
+  // block the beat before its Healthchecks ping. On timeout the abort throws, gets
+  // caught upstream (no summary this beat), and the next beat retries — unless the
+  // UPDATE had already committed server-side, in which case the day's summary is simply
+  // skipped (same best-effort posture as a failed send). Never a block.
+  const { data, error } = await sb
+    .rpc('claim_daily_summary', { p_local_date: localDate })
+    .abortSignal(AbortSignal.timeout(READ_TIMEOUT_MS));
   if (error) throw new Error(`claim_daily_summary RPC failed: ${error.message}`);
   return data === true;
 }
