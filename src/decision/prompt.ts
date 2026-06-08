@@ -5,9 +5,10 @@ import type { DecisionSummary } from '../persistence/decisions.js';
 /**
  * Bump this whenever the mandate below changes, so decisions stay traceable to
  * the exact instructions that produced them. v2 adds the portfolio book + the
- * hard allocation caps.
+ * hard allocation caps; v3 expands the universe to 4 assets (BTC/ETH/BNB/XRP) and
+ * states the per-asset caps explicitly.
  */
-export const PROMPT_VERSION = 'v2';
+export const PROMPT_VERSION = 'v3';
 
 /**
  * Frozen system prompt = the mandate + temperament + hard caps. Kept byte-stable
@@ -37,14 +38,15 @@ export function buildSystemPrompt(): string {
     '3. Reference levels are your compass: accumulate toward lows (year low, ATL),',
     '   lighten toward highs (year high, ATH).',
     '4. A trade must be worth the cost of fees and spread. Ignore moves too small to matter.',
-    '5. Stay consistent with past decisions — no yo-yo flip-flopping. Keep small caps on',
-    '   a shorter leash: smaller sizing and quicker to de-risk.',
+    '5. Stay consistent with past decisions — no yo-yo flip-flopping. The more volatile',
+    '   names carry tighter caps; size them smaller and de-risk them quicker.',
     '',
-    'Hard limits the code enforces. Propose WITHIN them — if you exceed one, the code',
-    'trims the excess to the cap and moves it to CASH (never to another coin):',
-    `- at most ${caps.byClass.big}% of equity in any large-cap (e.g. BTC, ETH);`,
-    `- at most ${caps.byClass.small}% of equity in any small-cap (more volatile, shorter leash);`,
-    `- at least ${caps.minCashPercent}% kept in the reserve stable (cash) at all times — sacred.`,
+    'Hard per-asset caps the code enforces — INDEPENDENT limits (they need NOT sum to 100;',
+    'the real collective guard is the cash floor below). Propose WITHIN them — if you exceed',
+    'one, the code trims the excess to the cap and moves it to CASH (never to another coin):',
+    ...Object.entries(caps.perAsset).map(([asset, cap]) => `- at most ${cap}% of equity in ${asset};`),
+    `- at least ${caps.minCashPercent}% kept in the reserve stable (cash) at all times — sacred;`,
+    `  this bounds total deployed capital to at most ${100 - caps.minCashPercent}%.`,
     '',
     'The user message gives you: the assets you may allocate to, the current market',
     'context, your virtual portfolio, and your recent past decisions.',

@@ -36,9 +36,14 @@ const defaultPrices: PriceLookup = (a) =>
 // A 3-coin world (all "big") to exercise rotation-with-redeploy at the floor.
 const threeCoinPrices: PriceLookup = (a) =>
   a === 'ALT' ? dec(10) : defaultPrices(a);
+// ALT gets the same 35% cap as BTC/ETH so the rotation can stack past the 70%
+// deployable headroom and actually exercise the cash-floor pass.
 const threeCoinConfig: AppConfig = {
   ...config,
-  execution: { ...config.execution, coinClass: { BTC: 'big', ETH: 'big', ALT: 'big' } },
+  execution: {
+    ...config.execution,
+    caps: { ...config.execution.caps, perAsset: { ...config.execution.caps.perAsset, ALT: 35 } },
+  },
 };
 
 const CAPITAL = dec(config.execution.startingCapitalUsd);
@@ -217,6 +222,29 @@ const negative = errors.filter((e) => e.includes('NEGATIVE position'));
 assert.equal(negative.length, 0, `never over-sell: expected no negative-position logs, got ${negative.length}:\n${negative.join('\n')}`);
 console.log('  ok: no over-sell — the negative-position guard never fired');
 passed += 1;
+
+// --- Per-asset caps: each enforced INDEPENDENTLY (they need not sum to 100) ---
+console.log('\nPer-asset caps — independent limits, surplus to cash, tightest default for the unlisted:');
+{
+  // BNB 40→20 and XRP 30→15 (their own caps); BTC/ETH within 35; the 35 surplus → cash.
+  const c = clampAllocation({ BTC: 10, ETH: 10, BNB: 40, XRP: 30, USDT: 10 }, 'USDT');
+  assert.equal(c.applied.BNB, 20, 'BNB capped at its own 20%');
+  assert.equal(c.applied.XRP, 15, 'XRP capped at its own 15%');
+  assert.equal(c.applied.BTC, 10, 'BTC under its 35% cap is untouched');
+  assert.equal(c.applied.ETH, 10, 'ETH under its 35% cap is untouched');
+  assert.equal(c.applied.USDT, 45, 'the 20+15 surplus moves to cash (10 + 35)');
+  assert.ok(c.clamped, 'clamped flag set');
+  console.log('  ok: BNB→20, XRP→15 independently; surplus→cash, never to another coin');
+  passed += 1;
+}
+{
+  // A tradable asset with no explicit cap falls back to the tightest default (15).
+  const c = clampAllocation({ FOO: 30, USDT: 70 }, 'USDT');
+  assert.equal(c.applied.FOO, config.execution.caps.defaultPerAsset, 'an uncapped asset uses defaultPerAsset');
+  assert.equal(config.execution.caps.defaultPerAsset, 15, 'the default is the tightest leash');
+  console.log('  ok: an uncapped tradable asset falls back to the tightest default cap (15)');
+  passed += 1;
+}
 
 // --- PR B: the four-state plumbing (pure checks, no network) ---
 console.log('\nPR B — validation, snapping, and the two-event journal:');

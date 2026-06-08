@@ -1,4 +1,4 @@
-import { coinClassOf, config, type AppConfig } from '../config/index.js';
+import { config, type AppConfig } from '../config/index.js';
 
 export interface ClampResult {
   /** Allocation after bounding to the caps (same keys as the input, sums to ~100). */
@@ -18,10 +18,11 @@ const EPS = 1e-9;
  * another coin. We don't reject or re-ask the model; the code disposes.
  *
  * Two passes:
- *   1. Per-coin cap by risk class (big/small). Surplus accrues to cash.
+ *   1. Per-ASSET cap (independent caps, NOT summing to 100). Surplus accrues to cash.
  *   2. Cash floor: if cash is still below the minimum, scale the coins down
- *      proportionally until the floor is met (with BTC+ETH today this never
- *      triggers — 35+35 already leaves 30% — but it's correct as coins grow).
+ *      proportionally until the floor is met. With 4 assets (caps 35/35/20/15) a
+ *      proposal can stack past the 70% deployable headroom, so THIS pass is the
+ *      collective guard that actually enforces the sacred 30% cash floor.
  */
 export function clampAllocation(
   target: Record<string, number>,
@@ -32,15 +33,16 @@ export function clampAllocation(
   const reasons: string[] = [];
   const applied: Record<string, number> = {};
 
-  // Pass 1 — per-coin caps; surplus → cash.
+  // Pass 1 — per-asset caps; surplus → cash. An asset without an explicit cap
+  // falls back to the tightest leash (defaultPerAsset), never looser.
   let surplus = 0;
   for (const [asset, pct] of Object.entries(target)) {
     if (asset === reserveAsset) continue;
-    const cap = caps.byClass[coinClassOf(asset, cfg)];
+    const cap = caps.perAsset[asset] ?? caps.defaultPerAsset;
     if (pct > cap + EPS) {
       surplus += pct - cap;
       applied[asset] = cap;
-      reasons.push(`${asset} ${round(pct)}→${cap}% (${coinClassOf(asset, cfg)}-cap)`);
+      reasons.push(`${asset} ${round(pct)}→${cap}% (cap)`);
     } else {
       applied[asset] = pct;
     }
