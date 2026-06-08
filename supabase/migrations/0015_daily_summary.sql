@@ -46,10 +46,32 @@ begin
 end;
 $$;
 
+-- Release a PROVISIONAL claim when the send did not confirm, so the next beat retries.
+-- A daily message must not lose the WHOLE day on a transient Telegram hiccup, so the
+-- claim is provisional: the beat claims FIRST (the atomic double-send guard) but only
+-- COMMITS the day on a confirmed send; on non-delivery it calls this to reset the mark.
+-- Conditional + atomic like the claim — reset to NULL ONLY if the mark is still
+-- p_local_date (WE still own today's claim), so it can NEVER clobber another beat's
+-- claim. NULL re-opens the day → the next beat's claim wins and retries.
+create or replace function public.release_daily_summary(p_local_date date)
+returns void
+language plpgsql
+as $$
+begin
+  update public.bot_state
+     set last_daily_summary_date = null,
+         updated_at = now()
+   where id = 1
+     and last_daily_summary_date = p_local_date;
+end;
+$$;
+
 -- Same lockdown as the other state functions: EXECUTE revoked from public, granted to
--- service_role only (the backend's key). anon/authenticated can't call it.
+-- service_role only (the backend's key). anon/authenticated can't call them.
 revoke execute on function public.claim_daily_summary(date) from public;
 grant execute on function public.claim_daily_summary(date) to service_role;
+revoke execute on function public.release_daily_summary(date) from public;
+grant execute on function public.release_daily_summary(date) to service_role;
 
 comment on column public.bot_state.last_daily_summary_date is
-  'Local date (in Julien''s configured timezone) of the last daily Telegram summary sent. The once-per-day idempotence mark; set atomically by claim_daily_summary so the summary goes out exactly once per local day even though the beat runs every 5 min.';
+  'Local date (configured timezone) of the COMMITTED daily summary — the once-per-day idempotence mark. claim_daily_summary sets it PROVISIONALLY (atomic, once per distinct local date); a confirmed Telegram send commits it, a failed send clears it (release_daily_summary -> NULL) so the next beat retries. NULL = no committed summary for the current/last date (fresh bot, or the last attempt failed).';

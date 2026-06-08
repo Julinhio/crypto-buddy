@@ -17,7 +17,7 @@ import type { OrderResult } from '../execution/testnetOrder.js';
 import { clampAllocation } from '../risk/clamp.js';
 import { buildSystemPrompt } from '../decision/prompt.js';
 import { prepareActivityNotification, formatActivity } from '../alerting/activity.js';
-import { localNow, variation, formatDailySummary } from '../alerting/dailySummary.js';
+import { localNow, variation, formatDailySummary, runDailySummary, type DailySummary } from '../alerting/dailySummary.js';
 import type { DecideResult } from '../decision/decide.js';
 import { buildEquitySnapshot, prepareEquitySnapshot } from '../persistence/equitySnapshots.js';
 import { loadStartingCapital } from '../persistence/startingCapital.js';
@@ -653,6 +653,44 @@ console.log('\nDaily summary — local-time trigger, variation fallbacks, French
   assert.ok(wouldClaim('2026-06-08', '2026-06-09'), 'next local day → claims');
   assert.ok(wouldClaim('2026-06-09', '2026-06-08'), 'EARLIER local date (westward TZ travel) → STILL claims (not monotone)');
   console.log('  ok: claim once per DISTINCT local date — westward travel still sends, never monotone');
+  passed += 1;
+}
+{
+  // Provisional claim: the day is consumed ONLY on a CONFIRMED send. The claim is first
+  // (atomic double-send guard), but a non-delivery (send=false, or no data) RELEASES the
+  // mark so the next beat retries — a daily message must not lose the day on a hiccup.
+  const sample = {
+    dateLabel: '8 juin', currentUsd: 503, change24h: null, changeSinceStart: null,
+    allocation: [{ label: 'cash', weight: 100 }], wakeups: 1, trades: 0,
+  } as DailySummary;
+  const harness = (over: { won?: boolean; summary?: DailySummary | null; delivered?: boolean }) => {
+    const c = { sent: 0, released: [] as string[] };
+    const deps = {
+      claim: async (_d: string) => ('won' in over ? over.won! : true),
+      gather: async () => ('summary' in over ? over.summary! : sample),
+      send: async (_t: string) => { c.sent += 1; return 'delivered' in over ? over.delivered! : true; },
+      release: async (d: string) => { c.released.push(d); },
+    };
+    return { c, deps };
+  };
+  // Confirmed send → committed, NO release.
+  let h = harness({ delivered: true });
+  assert.equal(await runDailySummary(h.deps, '2026-06-08'), 'sent', 'a confirmed send → sent');
+  assert.equal(h.c.released.length, 0, 'a confirmed send consumes the day — never released');
+  // Send returns false (creds/timeout/network/non-2xx) → released → retry.
+  h = harness({ delivered: false });
+  assert.equal(await runDailySummary(h.deps, '2026-06-08'), 'retry', 'a failed send → retry');
+  assert.deepEqual(h.c.released, ['2026-06-08'], 'a failed send releases the day (next beat retries)');
+  // No data (no snapshot yet) → no send, released → retry.
+  h = harness({ summary: null });
+  assert.equal(await runDailySummary(h.deps, '2026-06-08'), 'retry', 'no data → retry');
+  assert.equal(h.c.sent, 0, 'no data → nothing sent');
+  assert.deepEqual(h.c.released, ['2026-06-08'], 'no data → released (retry when a snapshot exists)');
+  // Lost the claim (a concurrent beat owns it) → do nothing.
+  h = harness({ won: false });
+  assert.equal(await runDailySummary(h.deps, '2026-06-08'), 'skip', 'lost claim → skip');
+  assert.equal(h.c.sent + h.c.released.length, 0, 'lost claim → no send, no release (another beat owns it)');
+  console.log('  ok: provisional claim — day consumed only on a confirmed send, else released → retry');
   passed += 1;
 }
 

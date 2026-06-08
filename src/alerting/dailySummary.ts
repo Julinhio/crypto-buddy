@@ -208,13 +208,9 @@ async function gather(sb: SupabaseClient, now: Date, dateLabel: string): Promise
   };
 }
 
+// BOUNDED like every other I/O on this path (reads, Telegram send): a hung PostgREST
+// must not leave this await unsettled and block the beat before its Healthchecks ping.
 async function claimDailySummary(sb: SupabaseClient, localDate: string): Promise<boolean> {
-  // BOUNDED like every other I/O on this path (the reads, the Telegram send): a hung
-  // PostgREST that never responds nor errors must not leave this await unsettled and
-  // block the beat before its Healthchecks ping. On timeout the abort throws, gets
-  // caught upstream (no summary this beat), and the next beat retries — unless the
-  // UPDATE had already committed server-side, in which case the day's summary is simply
-  // skipped (same best-effort posture as a failed send). Never a block.
   const { data, error } = await sb
     .rpc('claim_daily_summary', { p_local_date: localDate })
     .abortSignal(AbortSignal.timeout(READ_TIMEOUT_MS));
@@ -222,26 +218,73 @@ async function claimDailySummary(sb: SupabaseClient, localDate: string): Promise
   return data === true;
 }
 
+// Releases a PROVISIONAL claim whose send did not confirm, so the next beat retries.
+// Conditional + atomic SQL-side (resets the mark to NULL only if WE still own it). Bounded.
+async function releaseDailySummary(sb: SupabaseClient, localDate: string): Promise<void> {
+  const { error } = await sb
+    .rpc('release_daily_summary', { p_local_date: localDate })
+    .abortSignal(AbortSignal.timeout(READ_TIMEOUT_MS));
+  if (error) throw new Error(`release_daily_summary RPC failed: ${error.message}`);
+}
+
+/** The injectable I/O the orchestration drives — real wiring in maybeSendDailySummary. */
+export interface DailySummaryDeps {
+  /** Atomic once-per-day claim; true = WE own today's send. */
+  claim: (localDate: string) => Promise<boolean>;
+  /** Build the summary from existing sources; null = nothing to report (e.g. no snapshot). */
+  gather: () => Promise<DailySummary | null>;
+  /** Deliver the message; the BOOLEAN is the truth (false = not delivered). */
+  send: (text: string) => Promise<boolean>;
+  /** Reset a provisional claim so the next beat retries. */
+  release: (localDate: string) => Promise<void>;
+}
+
+/**
+ * The once-per-day orchestration, with the claim PROVISIONAL: the day is consumed ONLY
+ * on a confirmed send. Claim is first (the atomic double-send guard — concurrent beats
+ * see today's mark and skip); but if the send doesn't confirm (no data, or sendTelegram
+ * returns false), we RELEASE the mark so the next beat retries — a daily message must
+ * not lose the whole day on a transient Telegram hiccup. Returns the truthful outcome.
+ * Pure of config/clock (deps injected) so the release-iff-not-delivered logic is tested.
+ */
+export async function runDailySummary(
+  deps: DailySummaryDeps,
+  localDate: string,
+): Promise<'sent' | 'retry' | 'skip'> {
+  if (!(await deps.claim(localDate))) return 'skip'; // already done today, or a concurrent beat owns it
+  const summary = await deps.gather();
+  const delivered = summary != null && (await deps.send(formatDailySummary(summary)));
+  if (delivered) return 'sent'; // confirmed → the day is COMMITTED (mark kept)
+  await deps.release(localDate); // not delivered → roll the claim back → retry next beat
+  return 'retry';
+}
+
 /**
  * Sends the daily summary AT MOST once per local day, on the first beat at/after the
  * configured local hour. Best-effort and total: wrapped so it NEVER throws into the
- * beat. Claims BEFORE gathering, so the common post-9h beat does one cheap RPC (which
- * returns false) and stops — only the winning beat reads + sends.
+ * beat. Wires the real I/O into runDailySummary; the log reflects the TRUTH (sent only
+ * on a confirmed delivery, retry otherwise).
  */
 export async function maybeSendDailySummary(sb: SupabaseClient | null, now: Date): Promise<void> {
   if (!sb) return;
   try {
     const { dateKey, hour, label } = localNow(now, config.dailySummary.timezone);
     if (hour < config.dailySummary.sendAtHourLocal) return; // before the send hour, local
-    if (!(await claimDailySummary(sb, dateKey))) return; // already sent today (or lost the race)
-
-    const summary = await gather(sb, now, label);
-    if (!summary) {
-      console.warn('[warn] daily summary claimed but no current equity snapshot — skipped today (best-effort).');
-      return;
+    const outcome = await runDailySummary(
+      {
+        claim: (d) => claimDailySummary(sb, d),
+        gather: () => gather(sb, now, label),
+        send: sendTelegram,
+        release: (d) => releaseDailySummary(sb, d),
+      },
+      dateKey,
+    );
+    if (outcome === 'sent') {
+      console.log(`[daily] summary sent for ${dateKey} (${config.dailySummary.timezone}).`);
+    } else if (outcome === 'retry') {
+      console.warn(`[daily] summary not delivered for ${dateKey} — claim released, next beat will retry.`);
     }
-    await sendTelegram(formatDailySummary(summary));
-    console.log(`[daily] summary sent for ${dateKey} (${config.dailySummary.timezone}).`);
+    // 'skip' → silent: already committed today, or another beat owns the send.
   } catch (err) {
     console.warn(
       `[warn] daily summary failed (best-effort, ignored): ${err instanceof Error ? err.message : String(err)}`,
