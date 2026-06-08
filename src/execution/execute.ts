@@ -7,10 +7,11 @@ import { placeMarketableIoc, type OrderResult } from './testnetOrder.js';
 import {
   bookedIntent,
   executionTrace,
+  movementKey,
   rejectedIntent,
   type Movement,
 } from './movements.js';
-import { insertExecution } from '../persistence/executions.js';
+import { bookIntent, insertExecution } from '../persistence/executions.js';
 
 /** Per-movement record of how the four states resolved this cycle. */
 export interface ExecutionLine {
@@ -19,7 +20,7 @@ export interface ExecutionLine {
   wantedQty: Decimal; // state 1 (sovereign, pre-snap)
   snappedQty: Decimal;
   booked: boolean; // did the sovereign ledger book it?
-  verdict: 'ok' | 'crumb' | 'block' | 'rules_error' | 'not_booked';
+  verdict: 'ok' | 'crumb' | 'block' | 'rules_error' | 'not_booked' | 'already_booked';
   reason: string | null;
   order: OrderResult | null; // the testnet attempt (null when no order was sent)
 }
@@ -28,6 +29,8 @@ export interface ExecutionSummary {
   lines: ExecutionLine[];
   booked: number;
   skipped: number;
+  /** Movements that were already booked by a prior attempt (idempotent replay no-op). */
+  deduped: number;
   ordersPlaced: number;
   filled: number;
   partial: number;
@@ -128,14 +131,32 @@ export async function executeMovements(
       continue;
     }
 
-    // Book the intention DURABLY before any exchange call. If we can't persist it
-    // (Supabase down/insert failed), we must NOT place the order — there'd be no
-    // durable record to reconcile against. Skip and warn (book unchanged).
-    const { id: intentId } = await insertExecution(
+    // Book the intention DURABLY before any exchange call, IDEMPOTENTLY. The unique
+    // idempotency_key makes a replay of THIS decision's movement (a resend after a
+    // timeout, a re-entered cycle) a clean no-op: it can neither double-book nor reach
+    // a second order. Three outcomes:
+    const key = movementKey(decisionId, m.symbol, m.side);
+    const outcome = await bookIntent(
       supabase,
-      bookedIntent(m, snappedQty, decisionId, priceSource, feePercent),
+      bookedIntent(m, snappedQty, decisionId, priceSource, feePercent, key),
     );
-    if (intentId == null) {
+
+    // Already booked by a prior attempt → idempotent no-op. Do NOT re-book, do NOT
+    // place an order; journal a line, never throw (a replay won't restart backoff).
+    if (outcome.kind === 'duplicate') {
+      console.log(
+        `[idempotent] ${m.side} ${m.symbol}: already booked (key ${key}) — clean no-op, no order placed.`,
+      );
+      lines.push({
+        symbol: m.symbol, side: m.side, wantedQty: m.qty, snappedQty,
+        booked: false, verdict: 'already_booked', reason: 'already booked (idempotent replay)', order: null,
+      });
+      continue;
+    }
+
+    // Couldn't persist (Supabase down / insert failed) → must NOT place the order:
+    // there'd be no durable record to reconcile against. Skip and warn (book unchanged).
+    if (outcome.kind === 'unpersisted') {
       console.warn(
         `[warn] ${m.side} ${m.symbol}: intent NOT durably journaled — skipping the testnet order (no order without a durable booking).`,
       );
@@ -146,8 +167,11 @@ export async function executeMovements(
       continue;
     }
 
-    // Place the marketable LIMIT IOC, then trace the result (never touches the book).
-    const order = await placeMarketableIoc(testnetClient, m.symbol, m.side, snappedQty);
+    // We WON the booking → this attempt owns the order. Place the marketable LIMIT
+    // IOC carrying the SAME key as clientOrderId (the order face), then trace the
+    // result (never touches the book).
+    const intentId = outcome.id;
+    const order = await placeMarketableIoc(testnetClient, m.symbol, m.side, snappedQty, key);
     await insertExecution(supabase, executionTrace(m, snappedQty, intentId, decisionId, order));
     console.log(
       `[order] ${m.side} ${m.symbol}: booked; testnet ${order.outcome}` +
@@ -171,12 +195,13 @@ export function emptyExecutionSummary(): ExecutionSummary {
 function summarize(lines: ExecutionLine[]): ExecutionSummary {
   const s: ExecutionSummary = {
     lines,
-    booked: 0, skipped: 0, ordersPlaced: 0,
+    booked: 0, skipped: 0, deduped: 0, ordersPlaced: 0,
     filled: 0, partial: 0, unfilled: 0, rejected: 0, errored: 0,
   };
   for (const l of lines) {
     if (l.booked) s.booked += 1;
     else s.skipped += 1;
+    if (l.verdict === 'already_booked') s.deduped += 1; // a subset of skipped, surfaced
     if (l.order) {
       s.ordersPlaced += 1;
       switch (l.order.outcome) {

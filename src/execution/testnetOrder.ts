@@ -96,6 +96,7 @@ export async function placeMarketableIoc(
   symbol: string,
   side: 'buy' | 'sell',
   snappedQty: Decimal,
+  clientOrderId: string,
 ): Promise<OrderResult> {
   const base: Omit<OrderResult, 'outcome' | 'raw'> = {
     orderId: null,
@@ -144,6 +145,12 @@ export async function placeMarketableIoc(
 
     const order = await testnet.createOrder(symbol, 'limit', side, submittedQty.toNumber(), submittedPrice.toNumber(), {
       timeInForce: TIF,
+      // The exchange-side half of the idempotency: ccxt maps `clientOrderId` to
+      // Binance's `newClientOrderId`, so a RESEND of the same movement's order is
+      // deduped at Binance too. Best-effort (Binance's dedup window doesn't cover an
+      // already-closed IOC) — the reliable guarantee is the booking gate upstream,
+      // which never even attempts a second order for an already-booked movement.
+      clientOrderId,
     });
 
     const filled =

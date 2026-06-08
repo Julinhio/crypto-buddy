@@ -342,11 +342,20 @@ guard against ever deciding twice in parallel.
   after the cycle is safe: the lock was already written, so a later beat reclaims it
   once it expires — visible outage, no lost recovery.
 
-Replay safety (why we're fine on testnet without `clientOrderId`): PR B books the
-intent *before* placing the order and derives the portfolio from the append-only
-journal, so a reclaimed run re-sizes from the already-booked state and never
-repeats a movement. The only residue is a duplicate testnet order without a trace
-— harmless on fake money. Fine idempotency keys stay a guard for real money.
+Replay safety: PR B books the intent *before* placing the order and derives the
+portfolio from the append-only journal, so a reclaimed run re-sizes from the
+already-booked state and never repeats a movement (the **ledger** side of a
+*cross-decision* reclaim). On top of that, a deterministic per-`(decision,
+movement)` idempotency key — `cb_<decision_id>_<symbol>_<side>` (migration 0013) —
+makes the **same** decision's execution replay-safe to the letter: a unique index
+dedupes the booking (`ON CONFLICT DO NOTHING` → exactly one book) and the *same*
+string is the order's `clientOrderId` (one real order). What this key does **not**
+close on its own is the *cross-decision* duplicate **order** in the orphan/reclaimer
+race (two different `decision_id`s → two different keys): that residue is closed by
+the **beat watchdog** (a follow-up PR). So before real capital: this key **and**
+that watchdog, together. Only **booked** intents claim the key — rejected intents
+and execution traces leave it `NULL` (exempt from the unique index), so a transient
+rejection can never poison a movement's key and block its later real booking.
 
 ### Applying the migration
 
@@ -606,7 +615,9 @@ supabase/
   ping that's already greffé on the beat).
 - **Real money.** Mutate the ledger from the *real* fills (the step PR B
   deliberately stops short of: here the accounting stays driven by our own
-  calculation at real prices, and the testnet only proves executability). This is
-  also when fine idempotency (a `clientOrderId` per order) graduates from
-  nice-to-have to required.
+  calculation at real prices, and the testnet only proves executability). The fine
+  idempotency this needs — a unique ledger key + a `clientOrderId` per order — has
+  **landed** (migration 0013); the remaining hard guard is the **beat watchdog**
+  that closes the cross-decision duplicate-order race (forces a frozen/timed-out
+  process to die before a reclaimer can act), generalizing PR #11's manual-run fix.
 - The false-`hold` prompt fix (a small standalone PR), and a dashboard.
