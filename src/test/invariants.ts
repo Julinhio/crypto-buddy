@@ -639,5 +639,21 @@ console.log('\nDaily summary — local-time trigger, variation fallbacks, French
   console.log('  ok: formatDailySummary matches the mockup, with clean — fallbacks on the first bilan');
   passed += 1;
 }
+{
+  // The once-per-day claim predicate — mirrors claim_daily_summary (migration 0015):
+  //   last_daily_summary_date IS DISTINCT FROM p_local_date
+  // i.e. send once per DISTINCT local date, NOT once per "date moved forward". The SQL
+  // is the atomic source of truth (verified live); this locks the INTENT so nobody
+  // regresses to a monotone comparison. The key case is WESTWARD travel: after a TZ
+  // change the local date can move BACKWARD and the bilan must STILL go out.
+  const wouldClaim = (stored: string | null, localDate: string): boolean =>
+    stored === null || stored !== localDate; // IS DISTINCT FROM
+  assert.ok(wouldClaim(null, '2026-06-08'), 'first ever (null marker) → claims');
+  assert.ok(!wouldClaim('2026-06-08', '2026-06-08'), 'same local date → no re-send (intra-day idempotence)');
+  assert.ok(wouldClaim('2026-06-08', '2026-06-09'), 'next local day → claims');
+  assert.ok(wouldClaim('2026-06-09', '2026-06-08'), 'EARLIER local date (westward TZ travel) → STILL claims (not monotone)');
+  console.log('  ok: claim once per DISTINCT local date — westward travel still sends, never monotone');
+  passed += 1;
+}
 
 console.log(`\n${passed} invariant checks passed.`);

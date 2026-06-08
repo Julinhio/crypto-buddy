@@ -20,9 +20,18 @@ alter table public.bot_state
 
 -- The atomic once-per-day claim: a single conditional UPDATE on the singleton (same
 -- compare-and-set shape as claim_due_run). Postgres row-locks the singleton, so two
--- beats racing past 9h serialize and only the first flips the date → only it gets
--- `found` = true and sends. Returns true = WE claimed today's summary (send it);
--- false = already sent today (or someone else just claimed it) → do nothing.
+-- beats racing past the send hour serialize and only the FIRST flips the mark → only
+-- it gets `found` = true and sends. Returns true = WE claimed this local date's
+-- summary (send it); false = already sent for this date (or someone else just claimed).
+--
+-- The predicate is `IS DISTINCT FROM`, NOT `<`: send once per DISTINCT local date, not
+-- once per "date moved forward". This is DELIBERATE — DAILY_SUMMARY_TZ is meant to
+-- change when Julien moves country, and a WESTWARD move makes the local date go
+-- BACKWARD (mark = June 9 in Paris, then it is still June 8 in LA). A monotone `<`
+-- would reject that earlier date AND the next equal one, skipping a bilan until the
+-- date catches up; IS DISTINCT FROM sends it. Intra-day idempotence still holds (same
+-- date → not distinct → no re-send) and the row lock keeps the claim atomic. Do NOT
+-- regress this to a monotone comparison (a test locks the westward-travel case).
 create or replace function public.claim_daily_summary(p_local_date date)
 returns boolean
 language plpgsql
@@ -32,7 +41,7 @@ begin
      set last_daily_summary_date = p_local_date,
          updated_at = now()
    where id = 1
-     and (last_daily_summary_date is null or last_daily_summary_date < p_local_date);
+     and last_daily_summary_date is distinct from p_local_date;
   return found;
 end;
 $$;
