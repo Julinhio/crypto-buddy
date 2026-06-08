@@ -15,8 +15,21 @@ import { getSupabaseClient } from './persistence/supabase.js';
 // never throws, so none can fail the beat. Crucially the equity snapshot is WRITTEN
 // here — OUTSIDE the timed decision cycle — so a slow/hung write can never lose the
 // cycle's timeout race nor flip an already-committed cycle to an error.
-async function main(): Promise<void> {
+async function main(): Promise<number> {
   const result = await runHeartbeat();
+
+  // A TIMED-OUT beat froze: the run-lock is deliberately KEPT (not released) and the
+  // cycle's orphan may still be writing. Exit NON-ZERO immediately, WITHOUT any of the
+  // best-effort side-effects — crucially without pinging Healthchecks: a frozen beat is
+  // NOT healthy, so let the dead-man's-switch see the silence (recovery is via the
+  // expired lease, exactly like a crash). The return is synchronous (no await to stall);
+  // the watchdog armed in runHeartbeat is the backstop if anything on the way out hangs.
+  if (result.action === 'timed-out') {
+    console.error(
+      '[beat] cycle timed out — exiting non-zero without pinging (lock kept; recovery via the expired lease).',
+    );
+    return 1;
+  }
 
   // Internal alerts that crossed their threshold this beat (debounced upstream).
   for (const alert of result.alerts ?? []) {
@@ -31,19 +44,21 @@ async function main(): Promise<void> {
   await writeEquitySnapshot(getSupabaseClient(), result.equitySnapshot ?? null);
 
   // Dead-man's-switch — LAST, and only on a clean beat. A thrown infra fault never
-  // reaches here (it lands in .catch → non-zero exit), so the missing ping is
-  // exactly the silence Healthchecks is configured to detect.
+  // reaches here (it lands in .catch → non-zero exit), nor does a timed-out beat
+  // (it returned 1 above without pinging), so the missing ping is exactly the
+  // silence Healthchecks is configured to detect.
   await pingHealthchecks();
+  return 0;
 }
 
 main()
-  .then(() => {
+  .then((code) => {
     // Force a clean exit. A cycle that hit the hard timeout keeps running in the
-    // background (a promise race can't cancel it); since this is a one-shot cron
-    // process whose lock is already released, exit now so no orphaned work lingers
-    // or acts after the beat. All DB writes — including the best-effort snapshot
-    // above — are awaited before we get here, so nothing important is in flight.
-    process.exit(0);
+    // background (a promise race can't cancel it); exiting now kills that orphan
+    // BEFORE the lock's TTL. On a clean beat the lock was already released; on a
+    // TIMED-OUT beat (code 1) it is deliberately KEPT and expires on its own, with
+    // recovery via the expired lease. All awaited DB writes are done before here.
+    process.exit(code);
   })
   .catch((err: unknown) => {
     // An infra/config fault (thrown by the state wrappers / unconfigured Supabase)

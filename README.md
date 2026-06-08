@@ -352,8 +352,14 @@ dedupes the booking (`ON CONFLICT DO NOTHING` → exactly one book) and the *sam
 string is the order's `clientOrderId` (one real order). What this key does **not**
 close on its own is the *cross-decision* duplicate **order** in the orphan/reclaimer
 race (two different `decision_id`s → two different keys): that residue is closed by
-the **beat watchdog** (a follow-up PR). So before real capital: this key **and**
-that watchdog, together. Only **booked** intents claim the key — rejected intents
+the **beat watchdog** (now landed). On a cycle that overruns its budget (a freeze),
+an absolute watchdog — armed before the claim, independent of any await — force-exits
+the process before the lock's TTL, and the timeout path **keeps** the lock instead of
+releasing it: it expires on its own and a later beat reclaims via the expired lease,
+exactly like a crash (no premature release, no reschedule). So the orphan dies before
+any reclaimer can act. The same guard backs the scheduled beat and the manual run
+(shared `scheduler/cycleGuard.ts`). Together with the idempotency key, this clears the
+last hard guard before real capital. Only **booked** intents claim the key — rejected intents
 and execution traces leave it `NULL` (exempt from the unique index), so a transient
 rejection can never poison a movement's key and block its later real booking.
 
@@ -615,9 +621,11 @@ supabase/
   ping that's already greffé on the beat).
 - **Real money.** Mutate the ledger from the *real* fills (the step PR B
   deliberately stops short of: here the accounting stays driven by our own
-  calculation at real prices, and the testnet only proves executability). The fine
-  idempotency this needs — a unique ledger key + a `clientOrderId` per order — has
-  **landed** (migration 0013); the remaining hard guard is the **beat watchdog**
-  that closes the cross-decision duplicate-order race (forces a frozen/timed-out
-  process to die before a reclaimer can act), generalizing PR #11's manual-run fix.
+  calculation at real prices, and the testnet only proves executability). The two
+  hard guards this needs have both **landed**: the per-movement idempotency key
+  (unique ledger key + `clientOrderId`, migration 0013) and the **beat watchdog**
+  that closes the cross-decision duplicate-order race (a frozen/timed-out process is
+  force-exited before its lock TTL and the timeout path keeps the lock — recovery via
+  the expired lease, like a crash — so a reclaimer can't act in parallel), now shared
+  with the manual run via `scheduler/cycleGuard.ts`.
 - The false-`hold` prompt fix (a small standalone PR), and a dashboard.

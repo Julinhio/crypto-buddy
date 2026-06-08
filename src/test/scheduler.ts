@@ -22,7 +22,9 @@ import {
   releaseManualRun,
   type FinishRunParams,
 } from '../persistence/schedulerState.js';
-import { runHeartbeat, runCycleWithTimeout } from '../scheduler/heartbeat.js';
+import { runHeartbeat } from '../scheduler/heartbeat.js';
+import { runCycleWithTimeout, runGuardedCycle } from '../scheduler/cycleGuard.js';
+import { schedulerSecondsEnv, validateSchedulerConfig, WATCHDOG_GRACE_SECONDS } from '../config/index.js';
 import type { DecideResult } from '../decision/decide.js';
 
 /**
@@ -196,5 +198,109 @@ ok(
 
 const threw = await runCycleWithTimeout(() => Promise.reject(new Error('kaboom')), 1000);
 ok('a thrown cycle is a technical error with the stack captured', threw.status === 'error' && threw.detail.includes('kaboom'));
+
+// ── Guarded cycle: SETTLED detection — the bit that drives keep-vs-release the lock ──
+console.log('\nGuarded cycle — settled detection (returned/threw = no orphan; timeout = orphan):');
+const gReturned = await runGuardedCycle(() => Promise.resolve(fakeResult('decided', 60)), 1000);
+ok('a returned cycle is SETTLED (safe to finalize)', gReturned.settled === true && gReturned.outcome.status === 'decided' && gReturned.result !== null);
+const gThrew = await runGuardedCycle(() => Promise.reject(new Error('boom')), 1000);
+ok('a thrown cycle is SETTLED — no orphan → release, don\'t block a full TTL', gThrew.settled === true && gThrew.outcome.status === 'error' && gThrew.result === null);
+const gTimedOut = await runGuardedCycle(
+  () => new Promise<DecideResult>((r) => setTimeout(() => r(fakeResult('decided', 60)), 40)),
+  5,
+);
+ok('a TIMED-OUT cycle is NOT settled (orphan still running) → must KEEP the lock', gTimedOut.settled === false && gTimedOut.outcome.status === 'error' && gTimedOut.result === null);
+
+// ── runHeartbeat watchdog branch: a TIMED-OUT cycle keeps the lock (no finish_run);
+//    a SETTLED one finalizes (finish_run). A dispatching fake client records the RPCs
+//    so we can assert finish_run is/ isn't called — the load-bearing behavior change. ──
+console.log('\nrunHeartbeat watchdog branch (timeout keeps the lock; settled finalizes):');
+
+function dispatchClient(calls: string[]): SupabaseClient {
+  return {
+    rpc: async (fn: string) => {
+      calls.push(fn);
+      if (fn === 'record_heartbeat') {
+        // due (next_check in the past) + unlocked → claimable
+        return {
+          data: [{
+            next_check_at: new Date(NOW - MIN).toISOString(), run_token: null, locked_until: null,
+            last_heartbeat_at: new Date(NOW).toISOString(), last_success_at: null,
+            consecutive_failures: 0, floor_delay_streak: 0, floor_alert_sent: false, failure_alert_sent: false,
+          }],
+          error: null,
+        };
+      }
+      if (fn === 'claim_due_run') {
+        return { data: [{ run_id: 1, prev_next_check_at: null, db_now: new Date(NOW).toISOString(), consecutive_failures: 0, floor_delay_streak: 0 }], error: null };
+      }
+      if (fn === 'finish_run') return { data: true, error: null };
+      return { data: null, error: null };
+    },
+  } as unknown as SupabaseClient;
+}
+
+const timedOutCycle = async () => ({
+  outcome: { status: 'error' as const, appliedDelayMinutes: null, decisionId: null, detail: 'frozen', equitySnapshot: null },
+  settled: false, result: null,
+});
+const settledThrow = async () => ({
+  outcome: { status: 'error' as const, appliedDelayMinutes: null, decisionId: null, detail: 'threw', equitySnapshot: null },
+  settled: true, result: null,
+});
+
+{
+  const calls: string[] = [];
+  const res = await runHeartbeat({ supabase: dispatchClient(calls), runCycle: timedOutCycle });
+  ok('timeout → action=timed-out', res.action === 'timed-out');
+  ok('timeout → finish_run is NEVER called (lock KEPT, no reschedule)', !calls.includes('finish_run'));
+}
+{
+  const calls: string[] = [];
+  const res = await runHeartbeat({ supabase: dispatchClient(calls), runCycle: settledThrow });
+  ok('settled (throw) → action=ran', res.action === 'ran');
+  ok('settled → finish_run IS called (release + reschedule + close)', calls.includes('finish_run'));
+}
+
+// ── Config invariant: the lease must outlive the watchdog deadline, not just the
+//    budget — else (with the env overrides) the lease can expire and be reclaimed in
+//    the grace-wide window while the timed-out orphan is still alive. ──
+console.log('\nScheduler config invariant (lockTtl > maxCycle + watchdog grace):');
+const baseSched = { beatIntervalMinutes: 5, softSkipDelayMinutes: 30 };
+const throwsCfg = (label: string, lockTtlSeconds: number, maxCycleSeconds = 300) => {
+  assert.throws(() => validateSchedulerConfig({ ...baseSched, maxCycleSeconds, lockTtlSeconds }));
+  console.log(`  ok: ${label}`);
+  passed += 1;
+};
+const acceptsCfg = (label: string, lockTtlSeconds: number, maxCycleSeconds = 300) => {
+  assert.doesNotThrow(() => validateSchedulerConfig({ ...baseSched, maxCycleSeconds, lockTtlSeconds }));
+  console.log(`  ok: ${label}`);
+  passed += 1;
+};
+throwsCfg('rejects lockTtl above the budget but below budget+grace (the Codex case 300/301)', 301);
+throwsCfg('rejects a budget+grace TIE (the watchdog would fire exactly as the lease expires — racy)', 300 + WATCHDOG_GRACE_SECONDS);
+acceptsCfg('accepts lockTtl just over budget+grace (300/316)', 300 + WATCHDOG_GRACE_SECONDS + 1);
+acceptsCfg('accepts the prod defaults (300/600)', 600);
+
+// ── Scheduler env override reader: ONLY a positive integer of seconds passes; every
+//    other shape (fractional, zero, negative, NaN/garbage, out-of-range) fails loud at
+//    STARTUP — before the SQL integer claim could break at runtime. The whole class. ──
+console.log('\nScheduler env override (positive integer seconds, else fail-loud):');
+const ENV = 'SCHED_ENV_TEST';
+const withEnv = (val: string | undefined, fn: () => void) => {
+  const prev = process.env[ENV];
+  if (val === undefined) delete process.env[ENV];
+  else process.env[ENV] = val;
+  try { fn(); } finally { if (prev === undefined) delete process.env[ENV]; else process.env[ENV] = prev; }
+};
+withEnv(undefined, () => ok('unset → the default', schedulerSecondsEnv(ENV, 300) === 300));
+withEnv('   ', () => ok('blank → the default (an absent override, not an error)', schedulerSecondsEnv(ENV, 300) === 300));
+withEnv('120', () => ok('a valid integer of seconds → its value', schedulerSecondsEnv(ENV, 300) === 120));
+withEnv('86400', () => ok('the sane max (86400) → accepted', schedulerSecondsEnv(ENV, 300) === 86_400));
+for (const v of ['315.5', '0', '-5', 'abc', '120abc', 'NaN', 'Infinity', '99999999']) {
+  withEnv(v, () => assert.throws(() => schedulerSecondsEnv(ENV, 300)));
+  console.log(`  ok: rejects ${JSON.stringify(v)} (fractional / zero / negative / garbage / out-of-range → fail-loud)`);
+  passed += 1;
+}
 
 console.log(`\n${passed} scheduler checks passed.`);

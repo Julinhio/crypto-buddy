@@ -90,19 +90,22 @@ export interface ExecutionConfig {
  * Scheduler (heartbeat) tuning. A fixed external cron beats the entry point every
  * `beatIntervalMinutes`; the state machine turns that into a variable cadence.
  *
- * The load-bearing safety relation is `lockTtlSeconds > maxCycleSeconds`: the lock
- * must outlive the WORST-case cycle (slow LLM call included), otherwise a
- * slow-but-alive run could see its lock expire and a parallel beat reclaim it,
- * running a SECOND concurrent cycle. The fencing token stops state corruption, not
- * two concurrent executions — so we bound the external calls (see binance.ts /
- * llm.ts timeouts) AND keep the lock longer than the declared cycle budget.
+ * The load-bearing safety relation is `lockTtlSeconds > maxCycleSeconds +
+ * WATCHDOG_GRACE_SECONDS`: the lease must outlive not just the cycle budget but the
+ * WATCHDOG's force-exit deadline (budget + grace). Otherwise a slow-but-alive run's
+ * lease could expire — and be reclaimed by a parallel beat — in the window before
+ * the watchdog kills the orphan, running a SECOND concurrent cycle (and a second
+ * order). The fencing token stops state corruption, not two concurrent executions —
+ * so we bound the external calls (see binance.ts / llm.ts timeouts), keep the lease
+ * longer than budget + grace, AND force-exit before the lease expires.
  */
 export interface SchedulerConfig {
   /** The external cron cadence, in minutes (used for missed-beat accounting). */
   beatIntervalMinutes: number;
   /** Declared worst-case cycle budget. MUST stay above the sum of external timeouts. */
   maxCycleSeconds: number;
-  /** Run-lock TTL. MUST exceed maxCycleSeconds so a live run never loses its lock. */
+  /** Run-lock TTL. MUST exceed maxCycleSeconds + WATCHDOG_GRACE_SECONDS so the
+   *  watchdog force-exits the orphan before the lease can expire and be reclaimed. */
   lockTtlSeconds: number;
   /** Reschedule delay after a soft skip (no usable data / nothing actionable). */
   softSkipDelayMinutes: number;
@@ -145,6 +148,39 @@ function envNumber(name: string, fallback: number): number {
   if (raw == null || raw.trim() === '') return fallback;
   const n = Number(raw);
   return Number.isFinite(n) ? n : fallback;
+}
+
+// Sane bounds (seconds) for an env-overridable scheduler DURATION: a positive
+// integer up to a day. Generous for ops, far within PostgreSQL's int4, and enough
+// to reject typos/garbage. The cross-relation lockTtl > maxCycle + grace is a
+// SEPARATE check in validateSchedulerConfig.
+const SCHED_SECONDS_MIN = 1;
+const SCHED_SECONDS_MAX = 86_400;
+
+/**
+ * Reads a SCHEDULER duration override (seconds) from the environment, FAIL-LOUD on
+ * anything the SQL layer or the watchdog can't honor. Unset/blank → the default (an
+ * absent override, not an error). A SET value MUST be an integer in
+ * [SCHED_SECONDS_MIN, SCHED_SECONDS_MAX]: the scheduler RPCs (claim_due_run /
+ * claim_manual_run) declare these params as SQL `integer` seconds, so a fractional,
+ * non-numeric (NaN), zero, negative, or out-of-range override would be rejected by
+ * PostgREST at claim time (or overflow int4) and silently break every cycle at
+ * RUNTIME. We close the whole class at STARTUP instead — like the capital reader,
+ * the condition is exhaustive, not patched case by case. Exported for the offline test.
+ */
+export function schedulerSecondsEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < SCHED_SECONDS_MIN || n > SCHED_SECONDS_MAX) {
+    throw new Error(
+      `Invalid scheduler override ${name}="${raw}": must be a positive INTEGER number of seconds ` +
+        `in [${SCHED_SECONDS_MIN}, ${SCHED_SECONDS_MAX}]. The scheduler RPCs take SQL integer seconds, ` +
+        `so a fractional / non-numeric / zero / negative / out-of-range value would break every claim ` +
+        `at runtime — failing loud at startup instead. Unset ${name} to use the default (${fallback}).`,
+    );
+  }
+  return n;
 }
 
 export const config: AppConfig = {
@@ -203,10 +239,16 @@ export const config: AppConfig = {
   scheduler: {
     // Railway's native cron beats every 5 min (wired in the deploy PR).
     beatIntervalMinutes: 5,
-    // Worst-case cycle budget. The external timeouts (binance.ts ~15s/req,
-    // llm.ts 60s × 1 retry) keep a real cycle well under this; lockTtl exceeds it.
-    maxCycleSeconds: 300,
-    lockTtlSeconds: 600,
+    // Worst-case cycle budget + run-lock TTL. The external timeouts (binance.ts
+    // ~15s/req, llm.ts 60s × 1 retry) keep a real cycle well under the budget; the
+    // lock TTL exceeds it (invariant validated below). Both are env-overridable so
+    // the watchdog/lock timing can be shrunk for a live proof (and tuned in ops)
+    // without a code change — the prod defaults (300 / 600) are unchanged. Each
+    // override is validated as a positive INTEGER of seconds in a sane range
+    // (schedulerSecondsEnv): the SQL RPCs take integer seconds, so a fractional /
+    // garbage value fails loud at startup instead of breaking a claim at runtime.
+    maxCycleSeconds: schedulerSecondsEnv('MAX_CYCLE_SECONDS', 300),
+    lockTtlSeconds: schedulerSecondsEnv('LOCK_TTL_SECONDS', 600),
     // Soft skip → a modest fixed retry; backoff (hard errors) reuses the decision
     // delay bounds (min 15 / max 240).
     softSkipDelayMinutes: 30,
@@ -258,12 +300,24 @@ function validateExecutionConfig(cfg: ExecutionConfig): void {
 validateExecutionConfig(config.execution);
 
 /**
- * Fails fast on an unsafe scheduler config. The critical invariant is
- * `lockTtlSeconds > maxCycleSeconds`: if the lock could expire before the worst
- * cycle finishes, a parallel beat would reclaim it and run a second concurrent
- * cycle (the fencing token prevents state corruption, not double execution).
+ * Grace added to the cycle budget for the watchdog's force-exit deadline (see
+ * armCycleWatchdog in scheduler/cycleGuard.ts, which imports this). It is the SINGLE
+ * source of the grace so the timer and the invariant below can never drift: the
+ * watchdog fires at maxCycleSeconds + this, and the lease TTL must exceed that.
  */
-function validateSchedulerConfig(cfg: SchedulerConfig): void {
+export const WATCHDOG_GRACE_SECONDS = 15;
+
+/**
+ * Fails fast on an unsafe scheduler config. The critical invariant is
+ * `lockTtlSeconds > maxCycleSeconds + WATCHDOG_GRACE_SECONDS`: the watchdog only
+ * force-exits the process (killing the timed-out orphan) at budget + grace, so if
+ * the lease expired any earlier a parallel beat could reclaim it and run a second
+ * concurrent cycle — and place a second order — while the orphan is still alive.
+ * Checking merely `> maxCycleSeconds` would leave that grace-wide window open (now
+ * reachable via the MAX_CYCLE_SECONDS / LOCK_TTL_SECONDS env overrides). Exported
+ * for the offline test.
+ */
+export function validateSchedulerConfig(cfg: SchedulerConfig): void {
   const problems: string[] = [];
   if (!(cfg.beatIntervalMinutes > 0)) {
     problems.push(`beatIntervalMinutes must be > 0 (got ${cfg.beatIntervalMinutes})`);
@@ -271,10 +325,11 @@ function validateSchedulerConfig(cfg: SchedulerConfig): void {
   if (!(cfg.maxCycleSeconds > 0)) {
     problems.push(`maxCycleSeconds must be > 0 (got ${cfg.maxCycleSeconds})`);
   }
-  if (!(cfg.lockTtlSeconds > cfg.maxCycleSeconds)) {
+  if (!(cfg.lockTtlSeconds > cfg.maxCycleSeconds + WATCHDOG_GRACE_SECONDS)) {
     problems.push(
-      `lockTtlSeconds (${cfg.lockTtlSeconds}) must exceed maxCycleSeconds (${cfg.maxCycleSeconds}) ` +
-        `so a slow-but-alive run never loses its lock to a parallel beat`,
+      `lockTtlSeconds (${cfg.lockTtlSeconds}) must exceed maxCycleSeconds + the watchdog grace ` +
+        `(${cfg.maxCycleSeconds} + ${WATCHDOG_GRACE_SECONDS} = ${cfg.maxCycleSeconds + WATCHDOG_GRACE_SECONDS}) ` +
+        `so the watchdog force-exits the orphan BEFORE the lease can expire and be reclaimed`,
     );
   }
   if (!(cfg.softSkipDelayMinutes > 0)) {
