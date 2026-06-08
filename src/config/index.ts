@@ -126,6 +126,19 @@ export interface AlertingConfig {
   consecutiveFailuresThreshold: number;
 }
 
+/**
+ * Daily Telegram summary (the once-a-day overview). The bot runs in UTC, but "9h"
+ * and the header date are in JULIEN's local time, so the timezone is configurable
+ * via DAILY_SUMMARY_TZ (he may change country). Validated at startup (a bad IANA
+ * zone fails loud, not silently at 9h).
+ */
+export interface DailySummaryConfig {
+  /** IANA timezone for "9h" and the header date, e.g. 'Europe/Paris' (env DAILY_SUMMARY_TZ). */
+  timezone: string;
+  /** Send once per local day at/after this local hour [0, 23]. */
+  sendAtHourLocal: number;
+}
+
 export interface AppConfig {
   tradablePairs: string[];
   referencePairs: string[];
@@ -139,6 +152,7 @@ export interface AppConfig {
   execution: ExecutionConfig;
   scheduler: SchedulerConfig;
   alerting: AlertingConfig;
+  dailySummary: DailySummaryConfig;
 }
 
 /** Reads a numeric env var, falling back to `fallback` when unset/blank/non-finite. */
@@ -269,6 +283,13 @@ export const config: AppConfig = {
     floorStreakThreshold: 10,
     consecutiveFailuresThreshold: 3,
   },
+
+  dailySummary: {
+    // Julien's local timezone for "9h" + the header date. Defaults to Europe/Paris
+    // (his apparent zone); override with DAILY_SUMMARY_TZ if he moves country.
+    timezone: process.env.DAILY_SUMMARY_TZ?.trim() || 'Europe/Paris',
+    sendAtHourLocal: 9,
+  },
 };
 
 /**
@@ -367,6 +388,33 @@ function validateAlertingConfig(cfg: AlertingConfig): void {
 }
 
 validateAlertingConfig(config.alerting);
+
+/**
+ * Fails fast on a bad daily-summary config. The timezone is validated by trying to
+ * build an Intl formatter in it — an unknown IANA zone throws RangeError, which we
+ * catch at STARTUP instead of letting it throw silently inside the 9h best-effort
+ * send (where the summary would just never appear). Same exhaustive-at-startup
+ * posture as the scheduler env overrides.
+ */
+function validateDailySummaryConfig(cfg: DailySummaryConfig): void {
+  const problems: string[] = [];
+  try {
+    // Throws RangeError on an unknown zone; a valid zone (incl. 'UTC') is accepted.
+    new Intl.DateTimeFormat('en-US', { timeZone: cfg.timezone });
+  } catch {
+    problems.push(
+      `timezone "${cfg.timezone}" is not a valid IANA zone — set DAILY_SUMMARY_TZ (e.g. "Europe/Paris", "UTC")`,
+    );
+  }
+  if (!(Number.isInteger(cfg.sendAtHourLocal) && cfg.sendAtHourLocal >= 0 && cfg.sendAtHourLocal <= 23)) {
+    problems.push(`sendAtHourLocal must be an integer in [0, 23] (got ${cfg.sendAtHourLocal})`);
+  }
+  if (problems.length > 0) {
+    throw new Error(`Invalid daily-summary config: ${problems.join('; ')}`);
+  }
+}
+
+validateDailySummaryConfig(config.dailySummary);
 
 /**
  * Assets worth tracking in balances: every side of every tradable pair,

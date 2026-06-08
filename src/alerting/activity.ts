@@ -14,19 +14,13 @@
  * resulting allocation + total come from the POST-trade book (portfolioAfter).
  */
 import type { DecideResult } from '../decision/decide.js';
+import { formatAllocation, orderedAllocation, type AllocationSlice } from './allocation.js';
 
 export interface ActivityMovement {
   asset: string;
   side: 'buy' | 'sell';
   /** Dollars moved (|quoteDelta|, fee-inclusive cash impact), rounded for display. */
   usd: number;
-}
-
-export interface ActivityAllocationSlice {
-  /** Asset ticker, or 'cash' for the reserve stable. */
-  label: string;
-  /** Percent of equity. */
-  weight: number;
 }
 
 export interface ActivityNotification {
@@ -36,13 +30,8 @@ export interface ActivityNotification {
   movements: ActivityMovement[];
   /** The model's concise notification_summary (the "why"). */
   why: string;
-  /**
-   * Resulting allocation: open positions by DECREASING size, then cash ALWAYS last.
-   * Cash is the reserve, not a position — and with the ≥30% floor it is usually the
-   * biggest slice, so it is deliberately KEPT IN THE TAIL (never sorted in with the
-   * positions) so the positions read first. This ordering is intentional, not a bug.
-   */
-  allocation: ActivityAllocationSlice[];
+  /** Resulting allocation — positions biggest-first, cash last (see allocation.ts). */
+  allocation: AllocationSlice[];
   /** Resulting total equity (USD). */
   totalUsd: number;
 }
@@ -75,26 +64,20 @@ export function prepareActivityNotification(
   }
   const movements = [...byAsset.values()].sort((a, b) => b.usd - a.usd);
 
-  // Resulting allocation: positions biggest-first (after.positions is already sorted
-  // by value desc), then cash ALWAYS appended last — NOT sorted in with the positions.
-  // The cash floor (≥30%, often more) usually makes cash the largest slice, but it
-  // stays in the tail so the positions read first. Intentional (see the field doc).
-  const allocation: ActivityAllocationSlice[] = [];
+  // Resulting allocation via the shared helper: positions biggest-first, cash last.
   const equityPositive = after.equity.gt(0);
+  const positionSlices: AllocationSlice[] = [];
   for (const p of after.positions) {
     const weight = equityPositive ? p.value.div(after.equity).times(100).toNumber() : 0;
-    if (weight > 0) allocation.push({ label: p.asset, weight });
+    if (weight > 0) positionSlices.push({ label: p.asset, weight });
   }
-  allocation.push({
-    label: 'cash',
-    weight: equityPositive ? after.cash.div(after.equity).times(100).toNumber() : 0,
-  });
+  const cashWeight = equityPositive ? after.cash.div(after.equity).times(100).toNumber() : 0;
 
   return {
     timestamp,
     movements,
     why: (result.row.notification_summary ?? '').trim(),
-    allocation,
+    allocation: orderedAllocation(positionSlices, cashWeight),
     totalUsd: after.equity.toNumber(),
   };
 }
@@ -119,7 +102,6 @@ function truncate(text: string, max: number): string {
   return t.length <= max ? t : `${t.slice(0, max)}…`;
 }
 
-const fmtPct = (n: number): string => `${Math.round(n)}%`;
 const fmtUsd = (n: number): string => `~${Math.round(n)}$`;
 
 /** Composes the activity Telegram text — PURE, matching the validated mockup. */
@@ -130,7 +112,7 @@ export function formatActivity(n: ActivityNotification): string {
   }
   lines.push('');
   if (n.why) lines.push(`Pourquoi : ${truncate(n.why, 300)}`, '');
-  lines.push(`Alloc : ${n.allocation.map((a) => `${fmtPct(a.weight)} ${a.label}`).join(' · ')}`);
+  lines.push(`Alloc : ${formatAllocation(n.allocation)}`);
   lines.push(`Total : ${fmtUsd(n.totalUsd)}`);
   return lines.join('\n');
 }

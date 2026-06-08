@@ -17,6 +17,7 @@ import type { OrderResult } from '../execution/testnetOrder.js';
 import { clampAllocation } from '../risk/clamp.js';
 import { buildSystemPrompt } from '../decision/prompt.js';
 import { prepareActivityNotification, formatActivity } from '../alerting/activity.js';
+import { localNow, variation, formatDailySummary } from '../alerting/dailySummary.js';
 import type { DecideResult } from '../decision/decide.js';
 import { buildEquitySnapshot, prepareEquitySnapshot } from '../persistence/equitySnapshots.js';
 import { loadStartingCapital } from '../persistence/startingCapital.js';
@@ -580,6 +581,62 @@ console.log('\nActivity notification — ledger-fact movements, $ amounts, résu
   assert.ok(p.includes('WRITE IT IN FRENCH'), 'the mandate requires notification_summary in French');
   assert.ok(p.includes("j'accumule vers le bas"), 'the notification_summary example is in French');
   console.log('  ok: notification_summary is instructed in French (no franglais in the notif)');
+  passed += 1;
+}
+
+// --- Daily summary: local-time trigger basis, variation fallbacks, French mockup ---
+console.log('\nDaily summary — local-time trigger, variation fallbacks, French mockup:');
+{
+  // localNow projects a UTC instant to the configured zone (date key for the claim,
+  // hour for the ≥9h gate, French label for the header). Paris is UTC+2 in June (CEST).
+  const paris = (iso: string) => localNow(new Date(iso), 'Europe/Paris');
+  assert.equal(paris('2026-06-08T07:30:00Z').hour, 9, '07:30 UTC → 09h Paris (past the send hour)');
+  assert.equal(paris('2026-06-08T06:45:00Z').hour, 8, '06:45 UTC → 08h Paris (before the send hour)');
+  assert.equal(paris('2026-06-08T07:30:00Z').dateKey, '2026-06-08', 'local date key drives the once-per-day claim');
+  assert.equal(paris('2026-06-08T07:30:00Z').label, '8 juin', 'French header label');
+  // The zone shifts the LOCAL DATE: 22:30 UTC is already the next day in Paris.
+  assert.equal(paris('2026-06-08T22:30:00Z').dateKey, '2026-06-09', 'late-UTC instant rolls to the next local day');
+  assert.equal(localNow(new Date('2026-06-08T07:30:00Z'), 'UTC').hour, 7, 'UTC zone → no offset');
+  console.log('  ok: localNow projects a UTC instant to the configured zone (date/hour/label) — the trigger basis');
+  passed += 1;
+}
+{
+  // Variation vs a base, with the clean fallbacks the brief asks for.
+  const v = variation(503, 500);
+  assert.ok(v && v.usd === 3 && Math.abs((v.pct ?? 0) - 0.6) < 1e-9, 'variation vs base = Δ$ + Δ%');
+  assert.equal(variation(503, null), null, 'no reference (first bilan after start/reset) → null → "—"');
+  const v0 = variation(503, 0);
+  assert.ok(v0 && v0.usd === 503 && v0.pct === null, 'zero base → Δ$ but no % (avoid /0)');
+  console.log('  ok: variation computes Δ$/Δ% at the PORTFOLIO level, degrades cleanly with no reference');
+  passed += 1;
+}
+{
+  // formatDailySummary matches the validated mockup, incl. the "—" fallbacks.
+  const full = formatDailySummary({
+    dateLabel: '8 juin', currentUsd: 503,
+    change24h: { usd: 2.1, pct: 0.42 }, changeSinceStart: { usd: 3, pct: 0.6 },
+    allocation: [
+      { label: 'BTC', weight: 22 }, { label: 'ETH', weight: 12 },
+      { label: 'BNB', weight: 8 }, { label: 'cash', weight: 58 },
+    ],
+    wakeups: 3, trades: 2,
+  });
+  assert.ok(full.includes('📊 Bilan du jour · 8 juin'), 'header with the local date');
+  assert.ok(full.includes('Capital : 503$'), 'current capital');
+  assert.ok(full.includes('Sur 24h : +2.10$ (+0.42%)'), '24h variation — signed, 2dp');
+  assert.ok(full.includes('Depuis le début : +3.00$ (+0.60%)'), 'since-start variation');
+  assert.ok(full.includes('Alloc : 22% BTC · 12% ETH · 8% BNB · 58% cash'), 'allocation, cash last (shared helper)');
+  assert.ok(full.includes('Activité : 3 réveils, 2 trades'), 'activity counts, pluralized');
+
+  // First bilan (no references) → clean dashes, singular forms, no crash.
+  const firstDay = formatDailySummary({
+    dateLabel: '8 juin', currentUsd: 500, change24h: null, changeSinceStart: null,
+    allocation: [{ label: 'cash', weight: 100 }], wakeups: 1, trades: 0,
+  });
+  assert.ok(firstDay.includes('Sur 24h : —'), 'no 24h reference → dash');
+  assert.ok(firstDay.includes('Depuis le début : —'), 'no starting capital → dash');
+  assert.ok(firstDay.includes('Activité : 1 réveil, 0 trade'), 'singular réveil / trade (1 and 0)');
+  console.log('  ok: formatDailySummary matches the mockup, with clean — fallbacks on the first bilan');
   passed += 1;
 }
 
