@@ -16,7 +16,7 @@ import {
   type DecisionContext,
 } from './context.js';
 import { clampAllocation, type ClampResult } from '../risk/clamp.js';
-import { computeMovements, type Movement } from '../execution/movements.js';
+import { computeMovements, movementFloor, type Movement } from '../execution/movements.js';
 import {
   executeMovements,
   emptyExecutionSummary,
@@ -188,6 +188,7 @@ export async function decide(): Promise<DecideResult> {
     clamp.applied,
     priceOf,
     config.execution.feePercent,
+    config.execution.minMovementPercent,
   );
 
   // Real execution. Each booking needs the decision id as FK and a durable home,
@@ -214,6 +215,9 @@ export async function decide(): Promise<DecideResult> {
       feePercent: config.execution.feePercent,
       cash: portfolio.cash,
       targetReserve,
+      // Derived from the SAME equity the movements were sized against, so the sizing
+      // pass and the executor cannot disagree on where the floor sits this cycle.
+      floor: movementFloor(portfolio.equity, config.execution.minMovementPercent),
     });
   }
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { dec } from '../money.js';
+import { dec, ZERO } from '../money.js';
 import { derivePortfolio, type PriceLookup } from '../portfolio/derive.js';
 import type { LedgerEntry } from '../persistence/executions.js';
 import {
@@ -10,6 +10,7 @@ import {
   rejectedIntent,
   executionTrace,
   type Movement,
+  movementFloor,
 } from '../execution/movements.js';
 import { snapQty, validateMovement, type SymbolRules } from '../execution/symbolRules.js';
 import { planMovements } from '../execution/plan.js';
@@ -76,6 +77,15 @@ const makeRules = (over: Partial<SymbolRules> = {}): SymbolRules => ({
   ...over,
 });
 
+/**
+ * The MOVEMENT floor is a separate invariant from the CASH floor these scenarios
+ * exercise, so they run with it disabled: mixing the two would let a dropped small
+ * movement mask a genuine cash-floor breach. The movement floor has its own block
+ * below.
+ */
+const NO_FLOOR_PERCENT = 0;
+const NO_FLOOR = ZERO;
+
 let passed = 0;
 
 function cashFloorHolds(
@@ -90,7 +100,7 @@ function cashFloorHolds(
 
   const before = derivePortfolio(initial, { startingCapital: CAPITAL, reserveAsset: 'USDT', priceOf: prices });
   const clamp = clampAllocation(target, 'USDT', cfg);
-  const movements = computeMovements(before, clamp.applied, prices, cfg.execution.feePercent);
+  const movements = computeMovements(before, clamp.applied, prices, cfg.execution.feePercent, NO_FLOOR_PERCENT);
 
   // PR B books the SNAPPED qty; with identity rules (no exchange step) the booked
   // intent is numerically identical to PR A's modeled fill, so the load-bearing
@@ -137,7 +147,7 @@ function cashFloorHoldsSnapped(
 
   const before = derivePortfolio(initial, { startingCapital: CAPITAL, reserveAsset: 'USDT', priceOf: prices });
   const clamp = clampAllocation(target, 'USDT', cfg);
-  const movements = computeMovements(before, clamp.applied, prices, cfg.execution.feePercent);
+  const movements = computeMovements(before, clamp.applied, prices, cfg.execution.feePercent, NO_FLOOR_PERCENT);
   const targetReserve = before.equity.times(clamp.applied['USDT'] ?? 0).div(100);
 
   const plan = planMovements(movements, {
@@ -145,6 +155,7 @@ function cashFloorHoldsSnapped(
     cash: before.cash,
     targetReserve,
     feePercent: cfg.execution.feePercent,
+    floor: NO_FLOOR,
   });
 
   // The scenario must actually truncate a quantity, else it proves nothing.
@@ -320,13 +331,14 @@ passed += 1;
 // failed (non-booked) intent, places no order, and the book is left intact.
 const bigBuy: Movement = {
   symbol: 'BTC/USDT', asset: 'BTC', side: 'buy',
-  qty: dec('0.01'), price: dec(50000), notional: dec(500), fee: dec('0.5'),
+  qty: dec('0.01'), price: dec(50000), notional: dec(500), fee: dec('0.5'), fullExit: false,
 };
 const blockPlan = planMovements([bigBuy], {
   rulesOf: () => makeRules({ minQty: dec(0), maxNotional: dec(100) }),
   cash: dec(1000),
   targetReserve: dec(0),
   feePercent: 0.1,
+  floor: NO_FLOOR,
 });
 assert.equal(blockPlan[0]?.verdict.kind, 'block', 'maxNotional movement is blocked in the plan (no booking, no order)');
 console.log('  ok: a maxNotional breach is a clean block in the plan — never booked, never sent');
@@ -337,7 +349,7 @@ passed += 1;
 // filter (validation_status != 'executed' / event_type = 'execution').
 const buy: Movement = {
   symbol: 'BTC/USDT', asset: 'BTC', side: 'buy',
-  qty: dec('0.001'), price: dec(50000), notional: dec(50), fee: dec('0.05'),
+  qty: dec('0.001'), price: dec(50000), notional: dec(50), fee: dec('0.05'), fullExit: false,
 };
 const buyKey = movementKey(1, buy.symbol, buy.side);
 const booked = bookedIntent(buy, dec('0.001'), 1, 'mainnet', 0.1, buyKey);
@@ -705,6 +717,93 @@ console.log('\nDaily summary — local-time trigger, variation fallbacks, French
   assert.equal(await runDailySummary(h.deps, '2026-06-08'), 'skip', 'lost claim → skip');
   assert.equal(h.c.sent + h.c.released.length, 0, 'lost claim → no send, no release (another beat owns it)');
   console.log('  ok: provisional claim — day consumed only on a confirmed send, else released → retry');
+  passed += 1;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * THE PLUMBING FLOOR (mandate V2 §5). 3128 of 3143 intents over 47 days were
+ * rejected for being too small. The floor exists so those movements are never born,
+ * and the load-bearing property is not "they get rejected more cleanly" — it is that
+ * they produce NOTHING: no intent, no row, no order.
+ * ──────────────────────────────────────────────────────────────────────────── */
+{
+  const prices: PriceLookup = (a) => (a === 'BTC' ? dec(50000) : a === 'ETH' ? dec(3000) : a === 'USDT' ? dec(1) : null);
+  // A $1000 book, 25% BTC — the observed shape. Floor at 2% = $20.
+  const ledger: LedgerEntry[] = [entry('BTC/USDT', 0.005, -250, 50000)];
+  const book = derivePortfolio(ledger, { startingCapital: dec(1000), reserveAsset: 'USDT', priceOf: prices });
+  const floorPct = config.execution.minMovementPercent;
+  const floor = movementFloor(book.equity, floorPct);
+  assert.ok(floor.gte(19) && floor.lte(21), `the floor on a ~$1000 book is ~$20 (got ${floor.toFixed(2)})`);
+
+  // A 1-point allocation nudge — EXACTLY what produced the 47 days of crumbs.
+  const nudge = computeMovements(book, { BTC: 26, ETH: 0, USDT: 74 }, prices, 0.1, floorPct);
+  assert.deepEqual(nudge, [], 'a 1-point nudge (~$10) is not a movement at all — nothing to journal');
+
+  // Whereas a real move clears the floor and survives.
+  const real = computeMovements(book, { BTC: 40, ETH: 0, USDT: 60 }, prices, 0.1, floorPct);
+  assert.equal(real.length, 1, 'a 15-point move is a real movement');
+  assert.ok(real[0]!.notional.gte(floor), 'and it is at or above the floor');
+  console.log('  ok: a movement under 2% of equity is never born — no intent, no row, no order');
+  passed += 1;
+}
+
+{
+  // A FULL EXIT is always permitted, whatever the floor. Otherwise a line that drifts
+  // small enough would become permanently unsellable — stuck by our own guard-rail.
+  const prices: PriceLookup = (a) => (a === 'XRP' ? dec(1) : a === 'USDT' ? dec(1) : null);
+  const ledger: LedgerEntry[] = [entry('XRP/USDT', 8, -8, 1)];
+  const book = derivePortfolio(ledger, { startingCapital: dec(1000), reserveAsset: 'USDT', priceOf: prices });
+  const floorPct = config.execution.minMovementPercent;
+
+  // The whole line is $8, far under the ~$20 floor. Going to zero must still be a movement.
+  const exit = computeMovements(book, { XRP: 0, USDT: 100 }, prices, 0.1, floorPct);
+  assert.equal(exit.length, 1, 'a full exit is produced even though it is under the floor');
+  assert.equal(exit[0]!.side, 'sell');
+  assert.equal(exit[0]!.fullExit, true, 'and it is marked as a full exit');
+
+  // But a PARTIAL trim of the same small line is not — the two conditions cross, which
+  // the mandate calls out explicitly as intended behavior, not a bug to fix later.
+  const trim = computeMovements(book, { XRP: 0.4, USDT: 99.6 }, prices, 0.1, floorPct);
+  assert.deepEqual(trim, [], 'a partial trim of a sub-floor line is impossible — only the full exit remains');
+  console.log('  ok: a full exit is always allowed; a partial trim of a tiny line is not (by design)');
+  passed += 1;
+}
+
+{
+  // The floor is checked AGAIN on what we would actually send. `computeMovements`
+  // sizes against the pre-snap gap, but planMovements can still scale a buy down when
+  // a sell it counted on is not bookable — and a scaled-down buy must not slip
+  // through to the venue and come back as a min-notional crumb.
+  const rules = makeRules({ stepSize: dec('0.00001'), minQty: dec(0), minNotional: dec(5) });
+  const buy: Movement = {
+    symbol: 'BTC/USDT', asset: 'BTC', side: 'buy',
+    qty: dec('0.0006'), price: dec(50000), notional: dec(30), fee: dec('0.03'), fullExit: false,
+  };
+  // Only $12 of cash is really available → the $30 buy scales to ~$12, under the $20 floor.
+  const scaled = planMovements([buy], {
+    rulesOf: () => rules, cash: dec(12), targetReserve: ZERO, feePercent: 0.1, floor: dec(20),
+  });
+  assert.equal(scaled[0]?.verdict.kind, 'below_floor', 'a buy scaled under the floor is caught before the venue');
+
+  // And OUR floor is judged before the venue's filters, so a movement that is both
+  // under the floor and above min-notional is reported as ours to reject — the
+  // distinction that decides whether a row gets written at all.
+  const small: Movement = {
+    symbol: 'BTC/USDT', asset: 'BTC', side: 'buy',
+    qty: dec('0.0002'), price: dec(50000), notional: dec(10), fee: dec('0.01'), fullExit: false,
+  };
+  const judged = planMovements([small], {
+    rulesOf: () => rules, cash: dec(1000), targetReserve: ZERO, feePercent: 0.1, floor: dec(20),
+  });
+  assert.equal(judged[0]?.verdict.kind, 'below_floor', '$10 > $5 min-notional but under our $20 floor → ours');
+
+  // A full exit under the floor still reaches the venue's own verdict.
+  const exit: Movement = { ...small, side: 'sell', fullExit: true };
+  const exitPlan = planMovements([exit], {
+    rulesOf: () => rules, cash: dec(1000), targetReserve: ZERO, feePercent: 0.1, floor: dec(20),
+  });
+  assert.equal(exitPlan[0]?.verdict.kind, 'ok', 'a full exit is never below_floor');
+  console.log('  ok: the floor is re-checked on the quantity actually sent, and judged before the venue filters');
   passed += 1;
 }
 

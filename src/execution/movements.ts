@@ -11,16 +11,40 @@ export interface Movement {
   price: Decimal;
   notional: Decimal; // |target − current| in quote (USDT)
   fee: Decimal;
+  /**
+   * This movement takes the position to ZERO. Exempt from the plumbing floor: the
+   * mandate makes a full exit always permitted, whatever the thresholds — a line small
+   * enough to sit under the floor must still be closable, otherwise it becomes
+   * permanently stuck.
+   */
+  fullExit: boolean;
 }
 
 // Below this notional there's effectively nothing to do — skip the movement.
 // This is just float/dust noise, NOT the exchange's min-notional filter (PR B).
 const DUST_NOTIONAL = new Decimal('0.01');
 
+/**
+ * The PLUMBING FLOOR in quote currency for a given book (mandate V2 §5). A single
+ * exported definition because it is applied in two places — when movements are sized,
+ * and again after the plan may have scaled a buy down — and two copies of a threshold
+ * is how the two silently diverge.
+ */
+export function movementFloor(equity: Decimal, minMovementPercent: number): Decimal {
+  return equity.times(minMovementPercent).div(100);
+}
+
+/** Whether a movement is too small to be worth sending. Full exits are never too small. */
+export function isBelowFloor(notional: Decimal, floor: Decimal, fullExit: boolean): boolean {
+  return !fullExit && notional.lt(floor);
+}
+
 interface Leg {
   asset: string;
   price: Decimal;
   grossDelta: Decimal; // |target − current| in quote (USDT)
+  /** Sell legs only: the target is zero, so this closes the line. */
+  fullExit: boolean;
 }
 
 /**
@@ -46,10 +70,12 @@ export function computeMovements(
   appliedAllocation: Record<string, number>,
   priceOf: PriceLookup,
   feePercent: number,
+  minMovementPercent: number,
 ): Movement[] {
   const equity = portfolio.equity;
   const reserve = portfolio.reserveAsset;
   const feeRate = new Decimal(feePercent).div(100);
+  const floor = movementFloor(equity, minMovementPercent);
 
   const currentValue = new Map<string, Decimal>();
   for (const p of portfolio.positions) currentValue.set(p.asset, p.value);
@@ -70,7 +96,25 @@ export function computeMovements(
       console.warn(`[warn] no live price for ${asset} — cannot size its movement this cycle, skipping.`);
       continue;
     }
-    (deltaValue.gt(0) ? buys : sells).push({ asset, price, grossDelta: deltaValue.abs() });
+
+    // A sell whose target is zero closes the line — always allowed past the floor.
+    const fullExit = deltaValue.lt(0) && targetValue.lt(DUST_NOTIONAL);
+
+    // THE PLUMBING FLOOR, applied where the movement is BORN. A leg under it is not a
+    // movement at all: it is never sized, never journaled, never sent — which is the
+    // whole point. The previous behavior produced the intent anyway and let the
+    // exchange filters reject it, and that is what filled the ledger with 3128 crumbs
+    // in 47 days. Dropping it here also keeps the arithmetic honest: the buy budget
+    // below is computed from the sells that will REALLY happen.
+    if (isBelowFloor(deltaValue.abs(), floor, fullExit)) {
+      console.log(
+        `[skip] ${asset}: ${deltaValue.gt(0) ? 'buy' : 'sell'} of ${deltaValue.abs().toFixed(2)} ` +
+          `is under the ${minMovementPercent}% floor (${floor.toFixed(2)}) — not a movement, nothing journaled.`,
+      );
+      continue;
+    }
+
+    (deltaValue.gt(0) ? buys : sells).push({ asset, price, grossDelta: deltaValue.abs(), fullExit });
   }
 
   const movements: Movement[] = [];
@@ -89,6 +133,7 @@ export function computeMovements(
       price: s.price,
       notional,
       fee,
+      fullExit: s.fullExit,
     });
   }
 
@@ -102,6 +147,19 @@ export function computeMovements(
       const cashOutlay = buyBudget.times(b.grossDelta).div(totalBuyGross); // share incl. fee
       if (cashOutlay.lt(DUST_NOTIONAL)) continue;
       const notional = cashOutlay.div(ONE.plus(feeRate)); // coin value bought
+      // The pro-rata split can land a buy under the floor even though its raw gap was
+      // above it (a short cash budget shared across several buys). Checked again on the
+      // ACTUAL size — the floor is about what we send, not about what we wanted. The
+      // freed budget is deliberately NOT redistributed to the other buys: the bounded
+      // allocation is the contract with the executor, and over-filling one asset because
+      // another was dropped would quietly break it.
+      if (isBelowFloor(notional, floor, false)) {
+        console.log(
+          `[skip] ${b.asset}: buy sized at ${notional.toFixed(2)} after the pro-rata split is under ` +
+            `the ${minMovementPercent}% floor (${floor.toFixed(2)}) — not a movement, nothing journaled.`,
+        );
+        continue;
+      }
       const fee = notional.times(feeRate);
       movements.push({
         symbol: `${b.asset}/${reserve}`,
@@ -111,6 +169,7 @@ export function computeMovements(
         price: b.price,
         notional,
         fee,
+        fullExit: false,
       });
     }
   }

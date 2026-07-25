@@ -1,5 +1,5 @@
 import { Decimal, ONE, ZERO } from '../money.js';
-import type { Movement } from './movements.js';
+import { isBelowFloor, type Movement } from './movements.js';
 import {
   snapQty,
   validateMovement,
@@ -7,12 +7,23 @@ import {
   type SymbolRules,
 } from './symbolRules.js';
 
+/**
+ * A plan verdict is an exchange-filter verdict PLUS our own plumbing floor.
+ *
+ * The two are kept as distinct kinds on purpose. `crumb` and `block` are the
+ * EXCHANGE saying no, and they are journaled as rejected intents because "we wanted
+ * this and the venue would not take it" is audit trail. `below_floor` is US saying
+ * no, before anything reaches the venue — so it is journaled nowhere, which is the
+ * entire point of the floor (3128 rejected crumbs in 47 days).
+ */
+export type PlanVerdict = MovementVerdict | { kind: 'below_floor'; reason: string };
+
 /** A movement resolved to its final exchange-admissible quantity + verdict. */
 export interface PlannedMovement {
   movement: Movement;
   /** The lot-snapped quantity we will book/submit (already reconciled for buys). */
   snappedQty: Decimal;
-  verdict: MovementVerdict;
+  verdict: PlanVerdict;
 }
 
 export interface PlanParams {
@@ -23,6 +34,14 @@ export interface PlanParams {
   /** Target reserve value the risk wrapper wants kept in cash (equity × reserve%). */
   targetReserve: Decimal;
   feePercent: number;
+  /**
+   * The plumbing floor in quote currency (see `movementFloor`). Applied a SECOND time
+   * here, on the exact quantity we would send: `computeMovements` sized against the
+   * pre-snap gap, but a buy can still be scaled down in this function when a sell it
+   * counted on turns out not to be bookable. The floor is about what leaves the
+   * building, not about what we intended.
+   */
+  floor: Decimal;
 }
 
 /**
@@ -48,8 +67,20 @@ export interface PlanParams {
  *      the risk wrapper untouched.
  */
 export function planMovements(movements: Movement[], params: PlanParams): PlannedMovement[] {
-  const { rulesOf, cash, targetReserve, feePercent } = params;
+  const { rulesOf, cash, targetReserve, feePercent, floor } = params;
   const feeRate = new Decimal(feePercent).div(100);
+
+  /** Our floor first, then the venue's filters — ours is the stricter of the two. */
+  const judge = (m: Movement, snappedQty: Decimal, rules: SymbolRules): PlanVerdict => {
+    const notional = snappedQty.times(m.price);
+    if (isBelowFloor(notional, floor, m.fullExit)) {
+      return {
+        kind: 'below_floor',
+        reason: `notional ${notional.toFixed(2)} < the ${floor.toFixed(2)} plumbing floor`,
+      };
+    }
+    return validateMovement(snappedQty, m.price, rules);
+  };
 
   // Pass 1 — snap sells; tally the cash only the BOOKABLE (ok) sells will raise.
   const planned = new Map<Movement, PlannedMovement>();
@@ -58,7 +89,7 @@ export function planMovements(movements: Movement[], params: PlanParams): Planne
     if (m.side !== 'sell') continue;
     const rules = rulesOf(m.symbol);
     const snappedQty = snapQty(m.qty, rules);
-    const verdict = validateMovement(snappedQty, m.price, rules);
+    const verdict = judge(m, snappedQty, rules);
     if (verdict.kind === 'ok') {
       realizedSellProceeds = realizedSellProceeds.plus(
         snappedQty.times(m.price).times(ONE.minus(feeRate)),
@@ -84,7 +115,7 @@ export function planMovements(movements: Movement[], params: PlanParams): Planne
   for (const m of buys) {
     const rules = rulesOf(m.symbol);
     const snappedQty = snapQty(m.qty.times(scale), rules);
-    planned.set(m, { movement: m, snappedQty, verdict: validateMovement(snappedQty, m.price, rules) });
+    planned.set(m, { movement: m, snappedQty, verdict: judge(m, snappedQty, rules) });
   }
 
   // Preserve the original order (sells first, then buys — cash is raised before
