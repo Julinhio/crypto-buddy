@@ -65,25 +65,37 @@ function toRow(state: PositionState, now: string): PositionStateRow & { updated_
 }
 
 /**
- * Every stored state, keyed by asset. Returns an EMPTY map when persistence is not
- * configured or unreachable — same posture as the rest of the persistence layer:
- * Supabase is never a single point of failure. The cost of an empty read is that a
- * held position looks like a fresh entry for one cycle, which the caller logs.
+ * The stored state plus whether it was READ SUCCESSFULLY.
+ *
+ * `ok` is not decoration. An empty map is what a failed read and a genuinely empty
+ * table both look like, and the two must never be confused: writing from a failed
+ * read would treat every held position as a brand-new entry, resetting its entry
+ * date, its peak and its thesis. A transient blip would then irreversibly erase the
+ * history the whole table exists to keep.
  */
-export async function loadPositionStates(
-  supabase: SupabaseClient | null,
-): Promise<Map<string, PositionState>> {
+export interface PositionStateRead {
+  ok: boolean;
+  states: Map<string, PositionState>;
+}
+
+export async function loadPositionStates(supabase: SupabaseClient | null): Promise<PositionStateRead> {
   const states = new Map<string, PositionState>();
-  if (!supabase) return states;
+  // No Supabase is a deliberate local-dev affordance, not a failure — but nothing can
+  // be written back either, so the distinction never gets exercised.
+  if (!supabase) return { ok: true, states };
   try {
     const { data, error } = await supabase.from(TABLE).select('*');
     if (error) throw new Error(error.message);
     for (const row of (data ?? []) as PositionStateRow[]) states.set(row.asset, toState(row));
+    return { ok: true, states };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[warn] could not load position state (${msg}) — this cycle proceeds without it.`);
+    console.error(
+      `[error] could not load position state (${msg}) — this cycle will NOT write it back. ` +
+        'Persisting from an unread state would reset every entry date, peak and thesis.',
+    );
+    return { ok: false, states };
   }
-  return states;
 }
 
 /**

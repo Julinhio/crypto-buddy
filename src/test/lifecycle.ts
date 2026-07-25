@@ -3,7 +3,9 @@ import { dec, ZERO } from '../money.js';
 import { nextPositionState, nextPositionStates, type PositionState } from '../portfolio/lifecycle.js';
 import { backfillOne } from '../portfolio/backfill.js';
 import { derivePortfolio, type PriceLookup } from '../portfolio/derive.js';
-import type { LedgerEntry } from '../persistence/executions.js';
+import { loadLedger, type LedgerEntry } from '../persistence/executions.js';
+import { loadPositionStates } from '../persistence/positionState.js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 /**
  * Position lifecycle invariants — run with `npm test` (tsx). No framework, just asserts.
@@ -219,6 +221,82 @@ const seen = (at: string, price: string) => ({ at, price: dec(price) });
     "a fill's valuation price counts toward the peak, not only the context snapshots",
   );
   console.log('  ok: the peak is sampled from every price the bot actually saw');
+  passed += 1;
+}
+
+/* ── Read failures must never become writes ────────────────────────────────── */
+
+/**
+ * A minimal chainable Supabase stub. Every query builder method returns itself, and
+ * awaiting it yields the configured `{ data, error }` — enough to exercise the two
+ * read paths without a network or a database.
+ */
+function stubClient(result: { data?: unknown; error?: { message: string } }): SupabaseClient {
+  const builder: Record<string, unknown> = {};
+  const chain = (): unknown => builder;
+  for (const method of ['from', 'select', 'eq', 'not', 'order', 'range', 'upsert', 'limit']) {
+    builder[method] = chain;
+  }
+  builder.then = (resolve: (v: unknown) => unknown): unknown =>
+    resolve({ data: result.data ?? null, error: result.error ?? null });
+  return builder as unknown as SupabaseClient;
+}
+
+{
+  // A FAILED read must be reported as failed, not as an empty result. This is the
+  // whole guard: `[]` and `new Map()` are what a transient blip and a genuinely empty
+  // table both produce, and writing lifecycle state from the first would reset every
+  // entry date, peak and thesis — irreversibly.
+  const brokenState = await loadPositionStates(stubClient({ error: { message: 'connection reset' } }));
+  assert.equal(brokenState.ok, false, 'a failed position-state read reports ok=false');
+  assert.equal(brokenState.states.size, 0, 'and still degrades to an empty map for the read path');
+
+  const brokenLedger = await loadLedger(stubClient({ error: { message: 'connection reset' } }));
+  assert.equal(brokenLedger.ok, false, 'a failed journal read reports ok=false');
+  assert.deepEqual(brokenLedger.entries, [], 'and still degrades to an empty journal');
+
+  // A genuinely EMPTY table is a success, and must stay distinguishable from the above.
+  const emptyState = await loadPositionStates(stubClient({ data: [] }));
+  assert.equal(emptyState.ok, true, 'an empty table is a successful read, not a failure');
+  assert.equal(emptyState.states.size, 0);
+
+  const emptyLedger = await loadLedger(stubClient({ data: [] }));
+  assert.equal(emptyLedger.ok, true, 'an empty journal is a successful read too');
+
+  // No Supabase at all is a local-dev affordance, not a failure.
+  assert.equal((await loadPositionStates(null)).ok, true, 'no client configured is not a read failure');
+  assert.equal((await loadLedger(null)).ok, true);
+  console.log('  ok: a failed read is reported as failed, never as an empty result');
+  passed += 1;
+}
+
+{
+  // And a successful read decodes faithfully — in particular a NULL peak stays null
+  // rather than becoming zero, which would be a different (and impossible) claim.
+  const read = await loadPositionStates(
+    stubClient({
+      data: [
+        {
+          asset: 'ETH', entry_date: T0, peak_price_since_entry: '1948.37',
+          last_significant_move_at: T1, last_significant_move_side: 'sell',
+          last_significant_move_notional: '5.06', qty: '0.118',
+          thesis: 'holding the trend', invalidation: 'close under 1600', thesis_updated_at: T1,
+        },
+        {
+          asset: 'XRP', entry_date: null, peak_price_since_entry: null,
+          last_significant_move_at: null, last_significant_move_side: null,
+          last_significant_move_notional: null, qty: '0',
+          thesis: null, invalidation: null, thesis_updated_at: null,
+        },
+      ],
+    }),
+  );
+  assert.equal(read.ok, true);
+  assert.equal(read.states.get('ETH')?.peakPriceSinceEntry?.toString(), '1948.37');
+  assert.equal(read.states.get('ETH')?.thesis, 'holding the trend');
+  assert.equal(read.states.get('XRP')?.peakPriceSinceEntry, null, 'a null peak decodes to null, never to zero');
+  assert.equal(read.states.get('XRP')?.qty.toString(), '0');
+  console.log('  ok: a stored state decodes faithfully, and a null peak stays null');
   passed += 1;
 }
 

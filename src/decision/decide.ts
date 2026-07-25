@@ -77,7 +77,8 @@ export async function decide(): Promise<DecideResult> {
   // prices, so any held position falls back to avgCost (priceStale) — no crash.
   const reserveStable = reserveStables(config)[0] ?? 'USDT';
   const priceOf = buildPriceLookup(context, reserveStable);
-  const ledger = await loadLedger(supabase);
+  const ledgerRead = await loadLedger(supabase);
+  const ledger = ledgerRead.entries;
   // The sovereign starting capital now lives in the DB (bot_state) so the upcoming
   // reset utility can redefine it from the dashboard. Fall back to the env bootstrap
   // when the DB has no value yet (pre-migration / vierge base / unreachable): the
@@ -92,7 +93,7 @@ export async function decide(): Promise<DecideResult> {
   // Read the stored lifecycle state UP FRONT — it is an input to this cycle, not an
   // output of it. Loading it here also means the early-return paths below can still
   // ratchet the peak: the price moved whether or not the cycle reached a decision.
-  const positionStates = await loadPositionStates(supabase);
+  const stateRead = await loadPositionStates(supabase);
 
   /**
    * Writes the lifecycle state for this cycle. Called on EVERY path that got as far as
@@ -100,13 +101,28 @@ export async function decide(): Promise<DecideResult> {
    * property of the MARKET, not of whether the model answered: letting a failed wake-up
    * skip the ratchet would quietly lose highs, and the trailing logic built on top of
    * it would then be reading a peak that never happened.
+   *
+   * UNLESS one of its two inputs could not be read. Both the journal and the stored
+   * state fall back to "empty" on a transient failure, and empty is indistinguishable
+   * from "holds nothing": writing from either fallback would mark every position flat
+   * — or brand new — and wipe the entry dates, peaks and theses the table exists to
+   * keep. Skipping a cycle's ratchet costs one sample and the next cycle recovers it;
+   * writing a fabricated state destroys history for good. The asymmetry decides it.
    */
   const persistLifecycle = async (book: VirtualPortfolio, bookedLedger: LedgerEntry[]): Promise<void> => {
+    if (!ledgerRead.ok || !stateRead.ok) {
+      console.error(
+        '[error] skipping the position-state write this cycle — ' +
+          `${!ledgerRead.ok ? 'the execution journal' : 'the stored position state'} could not be read, ` +
+          'and persisting from that fallback would erase every entry date, peak and thesis.',
+      );
+      return;
+    }
     await savePositionStates(
       supabase,
       nextPositionStates({
         assets: tradableBaseAssets(config),
-        previous: positionStates,
+        previous: stateRead.states,
         portfolio: book,
         priceOf,
         bookedLedger,
