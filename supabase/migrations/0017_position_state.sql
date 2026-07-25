@@ -74,3 +74,12 @@ comment on column public.position_state.peak_price_since_entry is
 
 comment on column public.position_state.thesis is
   'The model''s thesis in force. Persists across a hold; rewritten only on a significant decision or an explicit replacement.';
+
+-- Row Level Security: ENABLED with NO policies (deny-all), same posture as every
+-- other table. The backend uses the service role key, which bypasses RLS; any
+-- anon/public key is denied all access.
+--
+-- It matters more here than almost anywhere else: this table is not observability,
+-- it is an INPUT to future decisions. A writable peak or thesis would let anyone
+-- holding the anon key steer a trailing stop or rewrite the strategy's own memory.
+alter table public.position_state enable row level security;
