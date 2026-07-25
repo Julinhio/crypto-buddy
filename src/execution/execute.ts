@@ -20,7 +20,7 @@ export interface ExecutionLine {
   wantedQty: Decimal; // state 1 (sovereign, pre-snap)
   snappedQty: Decimal;
   booked: boolean; // did the sovereign ledger book it?
-  verdict: 'ok' | 'crumb' | 'block' | 'rules_error' | 'not_booked' | 'already_booked';
+  verdict: 'ok' | 'below_floor' | 'crumb' | 'block' | 'rules_error' | 'not_booked' | 'already_booked';
   reason: string | null;
   order: OrderResult | null; // the testnet attempt (null when no order was sent)
 }
@@ -60,6 +60,12 @@ export interface ExecuteDeps {
   cash: Decimal;
   /** Reserve value the risk wrapper wants kept in cash (equity × reserve%). */
   targetReserve: Decimal;
+  /**
+   * The plumbing floor in quote currency (equity × minMovementPercent). Passed in
+   * rather than recomputed here so the executor and the sizing pass provably use the
+   * same number for the same cycle.
+   */
+  floor: Decimal;
 }
 
 /**
@@ -81,7 +87,7 @@ export async function executeMovements(
   movements: Movement[],
   deps: ExecuteDeps,
 ): Promise<ExecutionSummary> {
-  const { decisionId, supabase, publicClient, testnetClient, priceSource, feePercent, cash, targetReserve } = deps;
+  const { decisionId, supabase, publicClient, testnetClient, priceSource, feePercent, cash, targetReserve, floor } = deps;
 
   // Load the authoritative (mainnet) rules for each distinct symbol up front —
   // the plan needs every symbol's rules to snap, validate and reconcile.
@@ -102,6 +108,7 @@ export async function executeMovements(
     cash,
     targetReserve,
     feePercent,
+    floor,
   });
   const planned = new Map(plan.map((p) => [p.movement, p]));
 
@@ -121,6 +128,25 @@ export async function executeMovements(
     }
 
     const { snappedQty, verdict } = planned.get(m)!;
+
+    // Below OUR plumbing floor → dropped entirely: not booked, not sent, and NOT
+    // journaled. That last part is the point of the floor. A rejected intent row is
+    // the record of the venue refusing us; a movement we decided was too small to be
+    // worth making never became an intent at all, and writing one would just recreate
+    // the 3128 crumbs the floor exists to delete. The decision's target_allocation
+    // still records what was wanted, so nothing about intent is lost.
+    if (verdict.kind === 'below_floor') {
+      console.log(`[skip] ${m.side} ${m.symbol}: ${verdict.reason} — dropped before the executor, nothing journaled.`);
+      // A line IS still emitted. Nothing is written to the DATABASE — that is the
+      // point of the floor — but `lines` is positionally paired with `movements` by
+      // the printer, so silently omitting one would shift every later line onto the
+      // wrong movement and report its notional and fee against the wrong price.
+      lines.push({
+        symbol: m.symbol, side: m.side, wantedQty: m.qty, snappedQty,
+        booked: false, verdict: 'below_floor', reason: verdict.reason, order: null,
+      });
+      continue;
+    }
 
     // Crumb / block → clean no-op (journaled, not booked, no order; quiet for a
     // crumb, a louder warn for an unexpected block).

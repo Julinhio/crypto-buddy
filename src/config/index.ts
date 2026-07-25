@@ -68,6 +68,22 @@ export interface ExecutionConfig {
   startingCapitalUsd: number;
   /** Modeled fee per movement, in percent of notional (env FEE_PERCENT). */
   feePercent: number;
+  /**
+   * PLUMBING FLOOR (mandate V2 §5): the minimum size of a movement, as a percent of
+   * EQUITY. Anything smaller is discarded before it can reach the executor.
+   *
+   * This is a hard code-side rule, not a strategic norm — the strategic one ("at least
+   * 2% of capital AND at least 25% of the position touched") is stated to the model and
+   * arrives with the v5 prompt. They cannot contradict each other: the strategic norm
+   * is strictly the more demanding of the two.
+   *
+   * Sized against the observed damage: 3128 of 3143 intents over 47 days were rejected
+   * for being too small — 2324 under Binance's $5 min-notional and 804 with a quantity
+   * snapped to zero at the lot step. At ~$1000 of equity this floor is ~$20: four times
+   * the min-notional, and far above the coarsest lot step of the four assets (< $1), so
+   * it structurally closes BOTH families rather than the larger one only.
+   */
+  minMovementPercent: number;
   /** Allocation caps the risk wrapper enforces (percent of equity). */
   caps: {
     /**
@@ -313,6 +329,9 @@ export const config: AppConfig = {
   execution: {
     startingCapitalUsd: envNumber('STARTING_CAPITAL_USD', 500),
     feePercent: envNumber('FEE_PERCENT', 0.1),
+    // 2% of equity — the mandate's plumbing floor. NOT env-overridable: it is a
+    // strategy guard-rail like the caps, not an ops knob.
+    minMovementPercent: 2,
     caps: {
       // Per-asset caps (Julien's explicit guard-rail — do not change without asking).
       // INDEPENDENT limits, deliberately NOT summing to 100: BTC/ETH are the core
@@ -378,6 +397,11 @@ function validateExecutionConfig(cfg: ExecutionConfig): void {
   }
   if (!(feePercent >= 0 && feePercent < 100)) {
     problems.push(`feePercent must be in [0, 100) (got ${feePercent})`);
+  }
+  // A floor at 0 would silently restore the 3128-crumb behavior; at 100 nothing but a
+  // full exit could ever move. Both ends are configuration mistakes, not usable modes.
+  if (!(cfg.minMovementPercent > 0 && cfg.minMovementPercent < 100)) {
+    problems.push(`minMovementPercent must be in (0, 100) (got ${cfg.minMovementPercent})`);
   }
   if (!(caps.minCashPercent > 0 && caps.minCashPercent < 100)) {
     problems.push(`caps.minCashPercent must be in (0, 100) (got ${caps.minCashPercent})`);
