@@ -1,4 +1,4 @@
-import { config } from '../config/index.js';
+import { config, tradableBaseAssets } from '../config/index.js';
 import { dec } from '../money.js';
 import { buildMarketContext, type MarketContext } from '../context/build.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
@@ -7,7 +7,7 @@ import {
   loadRecentDecisions,
   type DecisionRow,
 } from '../persistence/decisions.js';
-import { loadLedger } from '../persistence/executions.js';
+import { loadLedger, type LedgerEntry } from '../persistence/executions.js';
 import { loadStartingCapital } from '../persistence/startingCapital.js';
 import { derivePortfolio, type VirtualPortfolio } from '../portfolio/derive.js';
 import {
@@ -17,6 +17,8 @@ import {
 } from './context.js';
 import { clampAllocation, type ClampResult } from '../risk/clamp.js';
 import { computeMovements, movementFloor, type Movement } from '../execution/movements.js';
+import { nextPositionStates } from '../portfolio/lifecycle.js';
+import { loadPositionStates, savePositionStates } from '../persistence/positionState.js';
 import {
   executeMovements,
   emptyExecutionSummary,
@@ -87,6 +89,32 @@ export async function decide(): Promise<DecideResult> {
     reserveAsset: reserveStable,
     priceOf,
   });
+  // Read the stored lifecycle state UP FRONT — it is an input to this cycle, not an
+  // output of it. Loading it here also means the early-return paths below can still
+  // ratchet the peak: the price moved whether or not the cycle reached a decision.
+  const positionStates = await loadPositionStates(supabase);
+
+  /**
+   * Writes the lifecycle state for this cycle. Called on EVERY path that got as far as
+   * a valued book — including a skipped, errored or unparseable cycle. The peak is a
+   * property of the MARKET, not of whether the model answered: letting a failed wake-up
+   * skip the ratchet would quietly lose highs, and the trailing logic built on top of
+   * it would then be reading a peak that never happened.
+   */
+  const persistLifecycle = async (book: VirtualPortfolio, bookedLedger: LedgerEntry[]): Promise<void> => {
+    await savePositionStates(
+      supabase,
+      nextPositionStates({
+        assets: tradableBaseAssets(config),
+        previous: positionStates,
+        portfolio: book,
+        priceOf,
+        bookedLedger,
+        now: context.generatedAt,
+      }),
+      context.generatedAt,
+    );
+  };
   // The AI sees the virtual book, not the testnet balances.
   const decisionContext = toDecisionContext(context, portfolio);
 
@@ -98,6 +126,7 @@ export async function decide(): Promise<DecideResult> {
     console.error(`[CRITICAL] Wake-up skipped: ${skipReason}. The LLM was not called.`);
     const row = makeRow(decisionContext, context.regime, gitSha, { status: 'skipped', skip_reason: skipReason });
     const { persisted, id } = await insertDecision(supabase, row);
+    await persistLifecycle(portfolio, []);
     return emptyResult('skipped', persisted, id, row, portfolio);
   }
 
@@ -131,6 +160,7 @@ export async function decide(): Promise<DecideResult> {
       latency_ms: latencyMs,
     });
     const { persisted, id } = await insertDecision(supabase, row);
+    await persistLifecycle(portfolio, []);
     return emptyResult('error', persisted, id, row, portfolio);
   }
 
@@ -153,6 +183,7 @@ export async function decide(): Promise<DecideResult> {
       output_tokens: llm.outputTokens,
     });
     const { persisted, id } = await insertDecision(supabase, row);
+    await persistLifecycle(portfolio, []);
     return emptyResult('parse_failed', persisted, id, row, portfolio);
   }
 
@@ -230,6 +261,10 @@ export async function decide(): Promise<DecideResult> {
     bookedLedger.length > 0
       ? derivePortfolio([...ledger, ...bookedLedger], { startingCapital, reserveAsset: reserveStable, priceOf })
       : portfolio;
+
+  // Written from the POST-trade book, so an entry, a reinforcement and a full exit all
+  // land in the cycle that caused them.
+  await persistLifecycle(portfolioAfter, bookedLedger);
 
   return {
     status: 'decided',

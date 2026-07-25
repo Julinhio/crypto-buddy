@@ -12,8 +12,9 @@
     "alerting:debounce-check": "tsx src/alerting/debounceProof.ts",
     "replay:regime": "tsx src/replay/regime.ts",
     "replay:sizing": "tsx src/replay/sizing.ts",
+    "backfill:position-state": "tsx src/migrations/backfillPositionState.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/test/invariants.ts && tsx src/test/scheduler.ts && tsx src/test/regime.ts"
+    "test": "tsx src/test/invariants.ts && tsx src/test/scheduler.ts && tsx src/test/regime.ts && tsx src/test/lifecycle.ts"
   },
   "engines": {
     "node": ">=22"
