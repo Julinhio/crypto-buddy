@@ -4,6 +4,7 @@ import { buildMarketContext, type MarketContext } from '../context/build.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
 import {
   insertDecision,
+  loadLastSignificantDecision,
   loadRecentDecisions,
   type DecisionRow,
 } from '../persistence/decisions.js';
@@ -124,6 +125,7 @@ export async function decide(): Promise<DecideResult> {
         portfolio: book,
         priceOf,
         bookedLedger,
+        notes,
         now: context.generatedAt,
       }),
       context.generatedAt,
@@ -178,10 +180,15 @@ export async function decide(): Promise<DecideResult> {
 
   const presentSymbols = context.market.tradable.map((pair) => pair.symbol);
   const assets = allocatableUniverse(presentSymbols, config);
-  const recentDecisions = await loadRecentDecisions(
-    supabase,
-    config.decision.recentDecisionsToLoad,
-  );
+  // v4 replays the last five wake-ups; v5 wants the last decision that ACTUALLY DID
+  // something. Fetched by its own query, not filtered out of the five: five holds are
+  // enough to bury it, and the bot averaged 785 holds in 47 days — so "more than five
+  // holds in a row" is the normal condition here, not an edge case. Filtering would
+  // have made the v5 memory vanish in exactly the steady state it exists for.
+  const [recentDecisions, lastSignificant] = await Promise.all([
+    loadRecentDecisions(supabase, config.decision.recentDecisionsToLoad),
+    STRATEGY_VERSION === 'v5' ? loadLastSignificantDecision(supabase) : Promise.resolve(null),
+  ]);
   // THE STRATEGY SWITCH. v4 is the mandate that produced 785 holds out of 787; v5 is
   // Strategy V2. The absence of STRATEGY_VERSION resolves to v4, so the new behaviour
   // can only be reached by an explicit, correctly-spelled opt-in — never by omission,
@@ -196,7 +203,7 @@ export async function decide(): Promise<DecideResult> {
         // The last SIGNIFICANT decision, not the last five wake-ups. v4 fed back five
         // identical holds to a mandate demanding consistency with the past — an anchor
         // that showed the bot its own immobility as if it were evidence.
-        lastSignificant: recentDecisions.find((d) => d.action_type !== 'hold') ?? null,
+        lastSignificant,
       })
     : buildUserPrompt({
         allocationAssets: assets,

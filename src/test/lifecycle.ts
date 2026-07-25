@@ -159,6 +159,46 @@ const open = (over: Partial<PositionState> = {}): PositionState => ({
   passed += 1;
 }
 
+{
+  // REGRESSION GUARD: the model's theses must actually REACH the stored state. The
+  // parameter existed and was threaded through the signature while being silently
+  // dropped before the call — the whole v5 thesis feature was dead code that
+  // typechecked. A shape being right is not the same as a value arriving.
+  const prices: PriceLookup = (a) => (a === 'BTC' ? dec(64000) : a === 'USDT' ? dec(1) : null);
+  const ledger: LedgerEntry[] = [
+    { symbol: 'BTC/USDT', side: 'buy', valuationPrice: dec(63000), baseDelta: dec('0.004'), quoteDelta: dec(-252) },
+  ];
+  const book = derivePortfolio(ledger, { startingCapital: dec(1000), reserveAsset: 'USDT', priceOf: prices });
+
+  const opened = nextPositionStates({
+    assets: ['BTC'],
+    previous: new Map(),
+    portfolio: book,
+    priceOf: prices,
+    bookedLedger: ledger,
+    notes: [{ asset: 'BTC', thesis: 'reclaim of the 50d', invalidation: 'daily close under 60k', replace: false }],
+    now: T2,
+  });
+  assert.equal(opened[0]?.thesis, 'reclaim of the 50d', 'a thesis on a newly opened line is stored');
+  assert.equal(opened[0]?.invalidation, 'daily close under 60k');
+  assert.equal(opened[0]?.thesisUpdatedAt, T2, 'and stamped');
+
+  // And on a HOLD it is refused: same call, nothing booked, a thesis already stored.
+  const held = nextPositionStates({
+    assets: ['BTC'],
+    previous: new Map([['BTC', { ...opened[0]!, qty: dec('0.004') }]]),
+    portfolio: book,
+    priceOf: prices,
+    bookedLedger: [],
+    notes: [{ asset: 'BTC', thesis: 'REWRITTEN ON A HOLD', invalidation: 'x', replace: false }],
+    now: T3,
+  });
+  assert.equal(held[0]?.thesis, 'reclaim of the 50d', 'a hold does NOT let the model restate its thesis');
+  assert.equal(held[0]?.thesisUpdatedAt, T2, 'and the stamp does not move either');
+  console.log('  ok: a thesis reaches the stored state on a real move, and is refused on a hold');
+  passed += 1;
+}
+
 /* ── The one-time backfill ─────────────────────────────────────────────────── */
 
 const fill = (at: string, asset: string, baseDelta: string, price: string) => ({

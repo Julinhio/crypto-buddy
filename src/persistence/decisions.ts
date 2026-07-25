@@ -96,6 +96,44 @@ export async function loadRecentDecisions(
 }
 
 /**
+ * The most recent decision that ACTUALLY DID something — the newest `decided` row whose
+ * action_type is not `hold`.
+ *
+ * A dedicated query rather than a filter over `loadRecentDecisions`, and the difference
+ * is the whole point of the v5 memory. That loader returns the last N rows (5) and only
+ * then would a caller filter them; five ordinary holds are enough to push the real
+ * decision out of the window, and the model would be told "no significant decision on
+ * record" precisely in the steady state the V2 is meant to fix. The bot averaged 785
+ * holds in 47 days, so "more than five holds in a row" is not an edge case here — it is
+ * the normal condition.
+ *
+ * Returns null when persistence is unreachable or nothing significant has happened yet;
+ * both mean "no memory to offer", which the prompt states plainly.
+ */
+export async function loadLastSignificantDecision(
+  supabase: SupabaseClient | null,
+): Promise<DecisionSummary | null> {
+  if (!supabase) return null;
+  try {
+    const { data, error } = await supabase
+      .from(TABLE)
+      .select(
+        'created_at, action_type, target_allocation, applied_allocation, clamped, clamp_reason, confidence, market_state, what_changed, reasoning',
+      )
+      .eq('status', 'decided')
+      .neq('action_type', 'hold')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (error) throw new Error(error.message);
+    return ((data ?? [])[0] as DecisionSummary | undefined) ?? null;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[warn] could not load the last significant decision (${msg}) — proceeding without it.`);
+    return null;
+  }
+}
+
+/**
  * Persists one wake-up and returns its new id (the FK this cycle's executions
  * reference). A missing or failing Supabase does NOT crash the run — the
  * decision is still produced and printed; we warn that it wasn't journaled, and
