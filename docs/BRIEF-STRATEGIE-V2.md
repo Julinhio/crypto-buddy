@@ -199,18 +199,52 @@ Un goal qui se bloque en plein milieu pour réclamer une clé, c'est un goal per
 
 ---
 
-## Process de review
+## Process de review Codex
 
-Règles du projet, rappelées parce qu'elles se perdent.
+C'est le point qui déraille le plus souvent sur ce projet. À lire en entier avant la première PR.
+
+### Déclenchement
+
+- **L'auto-review est désactivée globalement.** Le seul mode est un commentaire manuel `@codex review` sur la PR.
+- **Un seul trigger par round, JAMAIS de repost.** Reposter empile des jobs en double et fait poller des verdicts ancrés sur d'anciens commits. Vécu le 23/07, ça a fait dérailler tout un run.
+- **L'icône 👀 ne prouve RIEN.** Elle apparaît en moins de 10 secondes si le trigger est passé, mais elle est retirée quand le job se termine. Son absence ne distingue pas "trigger raté" de "job déjà fini". On juge sur les verdicts, jamais sur la réaction.
+- Temps de review : 2 à 10 minutes selon la taille de la PR. Ne pas confondre avec le temps de déclenchement.
+
+### Récupérer le verdict, la partie qui casse à chaque fois
+
+**L'auteur du verdict est `chatgpt-codex-connector[bot]`, avec le suffixe `[bot]`.** Un filtre d'auteur sans le `[bot]` ne remonte rien, systématiquement. C'est la cause numéro un des rounds ratés.
+
+**Le comportement de Codex est ASYMÉTRIQUE**, et c'est pour ça qu'il faut surveiller trois canaux et pas un :
+
+| Situation | Où le verdict apparaît |
+|---|---|
+| Il a des findings | une REVIEW, state `COMMENTED`, sur l'endpoint **reviews** |
+| La PR est propre | un simple **issue comment** ("Didn't find any major issues") |
+| La PR est propre, variante | juste une **réaction 👍** sur le commentaire déclencheur |
+
+Conséquence si on ne surveille que l'endpoint reviews : on attrape chaque round rouge en moins d'une minute et on rate chaque round vert. C'est exactement ce qui s'est produit sur trois PR en juillet, et c'est Julien qui a dû annoncer les verts pendant que l'agent attendait pour rien.
+
+**Donc : surveiller les TROIS canaux à chaque round.** Endpoint reviews, issue comments du bot, réaction 👍 sur le commentaire déclencheur.
+
+### Autres pièges vérifiés en vrai
+
+- **Vérifier le commit relu dans chaque verdict.** Il indique "Reviewed commit: `abc1234`". Un verdict ancré sur un SHA qui n'est plus le HEAD est une réponse tardive à un déclenchement précédent : on l'ignore et on continue d'attendre, **sans redéclencher**. Ne jamais valider une PR sur un verdict qui ne pointe pas le HEAD.
+- **Poll INLINE dans le tour.** Pas de watcher en arrière-plan, il ne réveille pas l'agent de façon fiable. Vérifier, attendre un peu, revérifier.
+- **Le bot peut planter et se rattraper tout seul.** Un message "Codex Review: Something went wrong / Unknown error" n'est PAS un échec définitif, il a déjà relancé de lui-même et posté un verdict propre 2 minutes plus tard. Ne pas redéclencher dans la minute.
+- **Sortie de secours obligatoire.** Si aucun verdict sur le HEAD courant après environ 10 minutes de polling, on ARRÊTE. Pas de repost, pas de bricolage. On rend la main à Julien avec l'état : quel commit est en tête, ce qui a été déclenché et à quelle heure, ce qui a été reçu.
+
+### Rounds et triage
+
+- **4 rounds de review maximum par PR.** Au 5e demandé par Codex, arrêt et question à Julien, sans relancer de tour.
+- Une PR propre se merge sans attendre de validation : squash and merge, suppression de la branche distante, cleanup local.
+- Triage des findings : fix trivial dans notre code **pris**, pré-existant non lié à la PR **différé**, quasi-impossible à impact nul **décliné** avec un accepted residual tracé en commentaire. Ne pas dérouler un correctif par réflexe.
+- **Codex n'est pas une source de vérité sur les faits de plateforme.** Il est fort sur le raisonnement autour du code, mais sa connaissance des API vieillit. Sur ce repo précisément, en juin, un reviewer a affirmé que les structured outputs et les modèles Claude 4.x n'existaient pas. Le suivre aurait jeté du code correct. Toute affirmation factuelle sur une plateforme (existence d'un modèle, d'une méthode SDK, d'une feature) se vérifie contre la doc officielle **avant** d'agir sur le retour. Vaut particulièrement pour la PR 4, qui touche l'API Anthropic.
+
+### Discipline git
 
 - Une PR = une brique. Quatre PR séquentielles, mergées une par une, jamais en parallèle.
-- Branches `feat/...`, conventional commits, squash and merge, cleanup local après merge.
-- **Un seul `@codex review` par round, jamais de repost.** L'absence de 👀 ne prouve rien, il est retiré quand le job se termine.
-- Vérifier le commit relu dans chaque verdict. Un verdict ancré sur un SHA qui n'est plus le HEAD est ignoré, sans redéclencher.
-- Poll inline, pas de watcher en arrière-plan. Surveiller les trois canaux : endpoint reviews, issue comments du bot, réaction 👍.
-- Si rien sur le HEAD courant après environ 10 minutes, on s'arrête et on rend la main.
-- **4 rounds de review maximum par PR.** Au 5e, arrêt et question à Julien.
-- Esprit critique sur les findings : fix trivial dans notre code pris, pré-existant différé, quasi-impossible à impact nul décliné avec un accepted residual tracé.
+- Branches `feat/...`, conventional commits, squash and merge.
+- Cleanup local après merge : `git checkout main; git pull; git branch -D <branche>; git fetch --prune`. Le `-D` majuscule est normal après un squash.
 
 ---
 
