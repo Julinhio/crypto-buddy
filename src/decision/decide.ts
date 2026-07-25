@@ -102,22 +102,14 @@ export async function decide(): Promise<DecideResult> {
    * skip the ratchet would quietly lose highs, and the trailing logic built on top of
    * it would then be reading a peak that never happened.
    *
-   * UNLESS one of its two inputs could not be read. Both the journal and the stored
-   * state fall back to "empty" on a transient failure, and empty is indistinguishable
-   * from "holds nothing": writing from either fallback would mark every position flat
-   * — or brand new — and wipe the entry dates, peaks and theses the table exists to
-   * keep. Skipping a cycle's ratchet costs one sample and the next cycle recovers it;
-   * writing a fabricated state destroys history for good. The asymmetry decides it.
+   * Reaching it at all implies both inputs loaded: a cycle whose journal or stored
+   * state could not be read is skipped outright above, before the model is called and
+   * before anything can book. Both fall back to "empty" on a transient failure, and
+   * empty is indistinguishable from "holds nothing" — writing from either would mark
+   * every position flat, or brand new, and wipe the entry dates, peaks and theses the
+   * table exists to keep.
    */
   const persistLifecycle = async (book: VirtualPortfolio, bookedLedger: LedgerEntry[]): Promise<void> => {
-    if (!ledgerRead.ok || !stateRead.ok) {
-      console.error(
-        '[error] skipping the position-state write this cycle — ' +
-          `${!ledgerRead.ok ? 'the execution journal' : 'the stored position state'} could not be read, ` +
-          'and persisting from that fallback would erase every entry date, peak and thesis.',
-      );
-      return;
-    }
     const written = await savePositionStates(
       supabase,
       nextPositionStates({
@@ -139,6 +131,32 @@ export async function decide(): Promise<DecideResult> {
   };
   // The AI sees the virtual book, not the testnet balances.
   const decisionContext = toDecisionContext(context, portfolio);
+
+  // Edge case 0 — a lifecycle input could not be read. Skip the WHOLE cycle, not just
+  // the state write.
+  //
+  // Skipping only the write is not enough, and the hole is narrow but real: a cycle
+  // that fully exits a line leaves the stored row open, and a re-entry before any
+  // later cycle writes the flat state would look continuous — inheriting the previous
+  // life's entry date, peak and thesis. Trading while unable to record what the trade
+  // did to the position is the same mistake as placing an order without a durable
+  // booking, which this codebase already refuses to do.
+  //
+  // It also closes a pre-existing hazard: a failed journal read makes `derivePortfolio`
+  // return a 100%-cash book that does not exist, and deciding on it could redeploy
+  // capital the bot already holds.
+  if (!ledgerRead.ok || !stateRead.ok) {
+    const which = !ledgerRead.ok ? 'the execution journal' : 'the stored position state';
+    const skipReason =
+      `${which} could not be read — refusing to trade on a book and a lifecycle we cannot ` +
+      'record the outcome of. Nothing is booked and no state is written; the next cycle retries.';
+    console.error(`[CRITICAL] Wake-up skipped: ${skipReason} The LLM was not called.`);
+    const row = makeRow(decisionContext, context.regime, gitSha, { status: 'skipped', skip_reason: skipReason });
+    const { persisted, id } = await insertDecision(supabase, row);
+    // Deliberately NO persistLifecycle here: writing from the fallback is the very
+    // thing being avoided.
+    return emptyResult('skipped', persisted, id, row, portfolio);
+  }
 
   // Edge case 1 — empty context: no tradable pair returned usable data. Never
   // let the AI decide on zero data.

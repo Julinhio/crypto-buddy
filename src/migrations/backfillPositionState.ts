@@ -135,10 +135,44 @@ async function loadObservedPrices(
   return { prices: observed, equity };
 }
 
+/**
+ * Does this process STILL own the run-lock it claimed?
+ *
+ * Holding the lease at the start is not the same as holding it at the write. The
+ * history reads are paginated and could, on a bad day, outlast `lockTtlSeconds`; a
+ * scheduled cycle would then reclaim the lease, book a fill, and this stale rebuild
+ * would overwrite the result with a snapshot of a ledger that no longer exists —
+ * discovering the loss only from the release warning, after the damage.
+ *
+ * Same fencing idea the scheduler uses on `finishRun`: verify ownership immediately
+ * before the write. It cannot close the window to zero, but it shrinks it from
+ * minutes to milliseconds, and the deadline check below refuses to even try once the
+ * lease is near expiry.
+ */
+async function stillOwnsRun(
+  supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  runToken: string,
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('bot_state')
+    .select('run_token, locked_until')
+    .eq('id', 1)
+    .single();
+  if (error) throw new Error(`backfill: could not verify the run-lock (${error.message}).`);
+  const row = data as { run_token: string | null; locked_until: string | null };
+  if (row.run_token !== runToken) return false;
+  return row.locked_until != null && Date.parse(row.locked_until) > Date.now();
+}
+
+/** Margin before the lease expires within which we refuse to start the write at all. */
+const LEASE_MARGIN_MS = 30_000;
+
 /** The whole rebuild, run while the run-lock is HELD. */
 async function rebuild(
   supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
   force: boolean,
+  runToken: string,
+  claimedAt: number,
 ): Promise<number> {
   const { count, error: countError } = await supabase
     .from('position_state')
@@ -197,6 +231,28 @@ async function rebuild(
     );
   }
 
+  // FENCE the write. A deterministic deadline first (no round trip, cannot itself
+  // stall), then an ownership check on the lease. Either failing means the snapshot
+  // above may already describe a ledger someone else has moved on from — the only safe
+  // move is to write nothing and let the operator re-run.
+  const elapsedMs = Date.now() - claimedAt;
+  const leaseMs = config.scheduler.lockTtlSeconds * 1000;
+  if (elapsedMs > leaseMs - LEASE_MARGIN_MS) {
+    console.error(
+      `[backfill] the history reads took ${Math.round(elapsedMs / 1000)}s of a ` +
+        `${config.scheduler.lockTtlSeconds}s lease — too close to expiry to write safely. ` +
+        'Nothing was written; re-run when the base is quieter.',
+    );
+    return 1;
+  }
+  if (!(await stillOwnsRun(supabase, runToken))) {
+    console.error(
+      '[backfill] the run-lock was reclaimed while the history was being read — a cycle may have ' +
+        'booked since. Writing now would overwrite it with a stale snapshot. Nothing was written; re-run.',
+    );
+    return 1;
+  }
+
   const written = await savePositionStates(supabase, states, now);
   if (!written) {
     console.error('[backfill] the write did NOT succeed — nothing was initialized.');
@@ -234,6 +290,7 @@ async function main(): Promise<number> {
   if (!supabase) throw new Error('backfill: Supabase is not configured.');
 
   const runToken = randomUUID();
+  const claimedAt = Date.now();
   const claimed = await claimManualRun(supabase, runToken, config.scheduler.lockTtlSeconds);
   if (!claimed) {
     console.error(
@@ -244,7 +301,7 @@ async function main(): Promise<number> {
   }
 
   try {
-    return await rebuild(supabase, force);
+    return await rebuild(supabase, force, runToken, claimedAt);
   } finally {
     if (!(await releaseManualRun(supabase, runToken))) {
       console.warn('[backfill] the run-lock was already reclaimed (the rebuild overran its TTL) before release.');
