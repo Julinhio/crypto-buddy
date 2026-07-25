@@ -98,13 +98,30 @@ export async function loadPositionStates(supabase: SupabaseClient | null): Promi
   }
 }
 
+/** Attempts before a failed lifecycle write is declared lost. */
+const WRITE_ATTEMPTS = 3;
+/** Backoff between attempts, in ms. Short: the cycle still has a budget to respect. */
+const WRITE_RETRY_MS = 400;
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
- * Writes the states for this cycle, one upsert keyed by asset.
+ * Writes the states for this cycle, one upsert keyed by asset, RETRIED.
  *
- * A failure here is LOUD but not fatal. Losing a write costs at most one cycle of
- * peak sampling (the next cycle re-ratchets from the stored value), which is a
- * degradation, not a corruption. Failing the whole cycle over it would be worse: the
- * bot would stop trading because a bookkeeping write blipped.
+ * A lost write here is NOT the harmless staleness it first looks like, and the retry
+ * is there because of two cases that do not repair themselves:
+ *
+ *  - a PEAK observed only during this cycle is gone for good if the price then falls.
+ *    The next cycle re-ratchets from the stored value, which never saw the high;
+ *  - a lost ENTRY or FULL EXIT loses the zero-crossing itself. The stored quantity
+ *    then disagrees with the book, and a position closed and re-opened before the
+ *    next successful write would look continuous — inheriting the previous life's
+ *    entry date and peak, the exact failure this table exists to prevent.
+ *
+ * So: retry, then fail LOUD with the payload, so a human can repair rather than
+ * discover it later through a trailing stop that fired on a peak that never happened.
+ * It still never throws — the trade already happened, and failing the cycle here would
+ * not undo it while it would restart the scheduler's backoff for a bookkeeping fault.
  */
 export async function savePositionStates(
   supabase: SupabaseClient | null,
@@ -112,18 +129,34 @@ export async function savePositionStates(
   now: string,
 ): Promise<boolean> {
   if (!supabase || states.length === 0) return false;
-  try {
-    const { error } = await supabase
-      .from(TABLE)
-      .upsert(states.map((s) => toRow(s, now)), { onConflict: 'asset' });
-    if (error) throw new Error(error.message);
-    return true;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(
-      `[error] could not write position state (${msg}) — entry dates and peaks are one cycle stale; ` +
-        'the next cycle re-ratchets from the stored values.',
-    );
-    return false;
+
+  const rows = states.map((s) => toRow(s, now));
+  let lastError = 'unknown';
+  for (let attempt = 1; attempt <= WRITE_ATTEMPTS; attempt += 1) {
+    try {
+      const { error } = await supabase.from(TABLE).upsert(rows, { onConflict: 'asset' });
+      if (error) throw new Error(error.message);
+      if (attempt > 1) console.warn(`[warn] position state written on attempt ${attempt}.`);
+      return true;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      if (attempt < WRITE_ATTEMPTS) await sleep(WRITE_RETRY_MS);
+    }
   }
+
+  // Name what is actually at risk, and dump the payload: this is the only trace left
+  // of a sample that no later cycle can reconstruct.
+  const transitions = states.filter((s) => s.lastSignificantMoveAt === now);
+  console.error(
+    `[CRITICAL] position state NOT written after ${WRITE_ATTEMPTS} attempts (${lastError}). ` +
+      `A peak first seen this cycle is LOST if the price falls back` +
+      (transitions.length > 0
+        ? `, and ${transitions.length} zero-crossing(s) booked this cycle (${transitions
+            .map((s) => s.asset)
+            .join(', ')}) are NOT recorded — a close-then-reopen before the next successful ` +
+          'write would look continuous and inherit the previous life. Investigate and repair by hand.'
+        : '. Investigate.'),
+  );
+  console.error(`[CRITICAL] the state that failed to persist: ${JSON.stringify(rows)}`);
+  return false;
 }

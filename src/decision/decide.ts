@@ -118,7 +118,7 @@ export async function decide(): Promise<DecideResult> {
       );
       return;
     }
-    await savePositionStates(
+    const written = await savePositionStates(
       supabase,
       nextPositionStates({
         assets: tradableBaseAssets(config),
@@ -130,6 +130,12 @@ export async function decide(): Promise<DecideResult> {
       }),
       context.generatedAt,
     );
+    // Not swallowed. savePositionStates already retried and dumped the payload; the
+    // cycle carries on because the trade has happened and failing here would not undo
+    // it — but a lost lifecycle write is a real, non-self-healing loss, not staleness.
+    if (!written && supabase) {
+      console.error('[CRITICAL] this cycle produced no position-state write — see the payload above.');
+    }
   };
   // The AI sees the virtual book, not the testnet balances.
   const decisionContext = toDecisionContext(context, portfolio);
