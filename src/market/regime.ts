@@ -86,6 +86,23 @@ export interface AssetSignals {
    * récent"), alongside `rsi14H4` and `ema21H4`.
    */
   h4RangePosition: number | null;
+  /**
+   * Has the DOWN move already been paid? True when price sits at or below
+   * `pullbackConsumedPosition` of its tactical range.
+   *
+   * Neither of these two is a new regime label, and neither changes one: they are
+   * FACTS added alongside the existing signals, so `REGIME_VERSION` and every replay
+   * baseline are untouched. Their purpose is to let the playbook distinguish a
+   * reversal whose move is still ahead of it from one that has already happened —
+   * the difference between taking a profit and selling the bottom of a dip.
+   *
+   * Computed rather than left to the model for the same reason as
+   * `drawdownFromPeakPercent`: it decides whether the bot buys or sells, and a model
+   * comparing two numbers in its head will occasionally get it wrong.
+   */
+  pullbackConsumed: boolean | null;
+  /** The mirror: has the UP move already been paid? (at or above `bounceConsumedPosition`). */
+  bounceConsumed: boolean | null;
 }
 
 export interface AssetRegimePoint {
@@ -345,10 +362,14 @@ function signalsAt(
       ? Math.min(1, Math.max(0, (close - low) / (high - low)))
       : null;
 
+  const h4RangePosition = positionIn(h4RangeLow, h4RangeHigh);
+
   return {
     h4RangeHigh,
     h4RangeLow,
-    h4RangePosition: positionIn(h4RangeLow, h4RangeHigh),
+    h4RangePosition,
+    pullbackConsumed: h4RangePosition == null ? null : h4RangePosition <= th.pullbackConsumedPosition,
+    bounceConsumed: h4RangePosition == null ? null : h4RangePosition >= th.bounceConsumedPosition,
     close,
     sma50: dailyCursor >= 0 ? dailyInd.sma50[dailyCursor] ?? null : null,
     sma200: dailyCursor >= 0 ? dailyInd.sma200[dailyCursor] ?? null : null,
