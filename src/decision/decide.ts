@@ -18,7 +18,7 @@ import {
 } from './context.js';
 import { clampAllocation, type ClampResult } from '../risk/clamp.js';
 import { computeMovements, movementFloor, type Movement } from '../execution/movements.js';
-import { nextPositionStates } from '../portfolio/lifecycle.js';
+import { mayWriteThesis, nextPositionStates } from '../portfolio/lifecycle.js';
 import type { PositionNote } from './schema.js';
 import { loadPositionStates, savePositionStates } from '../persistence/positionState.js';
 import {
@@ -132,10 +132,24 @@ export async function decide(): Promise<DecideResult> {
     // would hide how often the model tries to restate a thesis it was not asked for.
     // That frequency is the evidence for ever loosening the rule, so it is logged
     // rather than swallowed.
-    const applied = new Map(states.map((s) => [s.asset, s.thesisUpdatedAt]));
+    //
+    // Derived from the RULE, not from the written timestamp. A full exit clears the
+    // thesis and its stamp by design, so a timestamp comparison would report a note on
+    // a line that just sold out as "refused on an unmoved line" — inflating the very
+    // metric this exists to measure. Reusing `mayWriteThesis` means the log and the
+    // rule cannot drift apart.
+    const bookedAssets = new Set(
+      bookedLedger.map((e) => e.symbol.split('/')[0]).filter((a): a is string => a != null),
+    );
     const refused = notes
-      .map((n) => n.asset)
-      .filter((asset) => applied.get(asset) !== context.generatedAt);
+      .filter(
+        (n) =>
+          !mayWriteThesis({
+            booked: bookedAssets.has(n.asset),
+            hasStoredThesis: (stateRead.states.get(n.asset)?.thesis ?? '').trim() !== '',
+          }),
+      )
+      .map((n) => n.asset);
     if (refused.length > 0) {
       console.log(
         `[thesis] ignored ${refused.length} proposed thesis/theses on unmoved lines (${refused.join(', ')}) — ` +
