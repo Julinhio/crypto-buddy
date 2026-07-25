@@ -1,6 +1,6 @@
 import type { Exchange } from 'ccxt';
 import type { Timeframe } from '../config/index.js';
-import { fetchCandles, type Candle } from '../market/klines.js';
+import { timeframeMs, type Candle } from '../market/klines.js';
 
 /**
  * Historical candle loading for the REPLAY harness only.
@@ -17,12 +17,6 @@ import { fetchCandles, type Candle } from '../market/klines.js';
 
 const PAGE_LIMIT = 1000;
 
-export const TIMEFRAME_MS: Record<string, number> = {
-  '4h': 4 * 60 * 60 * 1000,
-  '1d': 24 * 60 * 60 * 1000,
-  '1w': 7 * 24 * 60 * 60 * 1000,
-};
-
 /**
  * Fetches every candle from `since` (inclusive) onwards, paging until the exchange
  * stops advancing. Guards against the two classic paging bugs: a page that repeats
@@ -34,9 +28,7 @@ export async function fetchCandlesSince(
   timeframe: Timeframe,
   since: number,
 ): Promise<Candle[]> {
-  const stepMs = TIMEFRAME_MS[timeframe];
-  if (stepMs == null) throw new Error(`replay: unsupported timeframe "${timeframe}"`);
-
+  const stepMs = timeframeMs(timeframe);
   const byTimestamp = new Map<number, Candle>();
   let cursor = since;
 
@@ -80,5 +72,3 @@ export function sliceEndingAt(candles: Candle[], at: number, limit: number): Can
   const upTo = candles.filter((c) => c.timestamp <= at);
   return upTo.slice(Math.max(0, upTo.length - limit));
 }
-
-export { fetchCandles };

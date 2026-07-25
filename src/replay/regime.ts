@@ -10,7 +10,7 @@ import {
   type RegimePoint,
 } from '../market/regime.js';
 import { sliceEndingAt } from './klines.js';
-import { fmtBar, loadObservationWindow, loadUniverseSeries, pct } from './window.js';
+import { fmtBar, loadObservationWindow, loadUniverseSeries, pct, replayRegimeOptions } from './window.js';
 
 /**
  * REGIME REPLAY — the acceptance criteria of Strategy V2 PR 1.
@@ -229,7 +229,7 @@ function criterionRiskOffPriority(
     riskOffBreadthPercent: 40,
     riskOffMedianH4Rsi: 55,
   };
-  const forced = regimeTimeline(universe, permissive).filter(
+  const forced = regimeTimeline(universe, permissive, replayRegimeOptions()).filter(
     (p) => p.timestamp >= windowFrom && p.timestamp <= windowTo,
   );
   const armed = forced.filter((p) => p.global.riskOff);
@@ -347,7 +347,7 @@ function criterionProductionEquivalence(
       h4: sliceEndingAt(series.h4, last.timestamp, config.regime.limit),
     };
   }
-  const asProduction = resolveRegimes(productionSized, config.regime.thresholds);
+  const asProduction = resolveRegimes(productionSized, config.regime.thresholds, replayRegimeOptions());
 
   const detail: string[] = [
     `bar compared: ${fmtBar(last.timestamp)}  ·  production window = ` +
@@ -399,7 +399,7 @@ async function main(): Promise<number> {
   console.log('='.repeat(96));
 
   const universe = await loadUniverseSeries(window);
-  const full = regimeTimeline(universe, config.regime.thresholds);
+  const full = regimeTimeline(universe, config.regime.thresholds, replayRegimeOptions());
   const points = full.filter((p) => p.timestamp >= window.fromMs && p.timestamp <= window.toMs);
   if (points.length === 0) throw new Error('replay: no 4h bar inside the observation window.');
 

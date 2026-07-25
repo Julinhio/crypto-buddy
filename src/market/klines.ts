@@ -14,6 +14,29 @@ function isFiniteNumber(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);
 }
 
+const MINUTE_MS = 60 * 1000;
+
+const TIMEFRAME_MINUTES: Record<Timeframe, number> = {
+  '1m': 1,
+  '5m': 5,
+  '15m': 15,
+  '1h': 60,
+  '4h': 4 * 60,
+  '1d': 24 * 60,
+  '1w': 7 * 24 * 60,
+  '1M': 30 * 24 * 60, // nominal — only ever used for spacing, never for calendar math
+};
+
+/**
+ * How long one candle of `timeframe` lasts, in milliseconds. Single source of the
+ * mapping: the regime layer needs it to tell a CLOSED candle from the one still
+ * forming, and the replay needs it to page. Two copies of this table would be one
+ * copy too many.
+ */
+export function timeframeMs(timeframe: Timeframe): number {
+  return TIMEFRAME_MINUTES[timeframe] * MINUTE_MS;
+}
+
 export async function fetchCandles(
   exchange: Exchange,
   symbol: string,

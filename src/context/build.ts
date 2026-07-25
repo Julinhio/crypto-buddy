@@ -5,7 +5,7 @@ import {
   type PairKind,
 } from '../config/index.js';
 import { publicMainnetClient, testnetAccountClient } from '../exchanges/binance.js';
-import { fetchCandles, fetchSpotPrice } from '../market/klines.js';
+import { fetchCandles, fetchSpotPrice, timeframeMs, type Candle } from '../market/klines.js';
 import { computeIndicators, type IndicatorSnapshot } from '../market/indicators.js';
 import { monthLevels, yearLevels, type RangeLevels } from '../market/levels.js';
 import {
@@ -72,6 +72,34 @@ export interface MarketContext {
   };
 }
 
+/**
+ * Runs the SHADOW tactical fetch with its failure contained: any rejection becomes an
+ * empty series, never a thrown error.
+ *
+ * This containment is load-bearing, not defensive habit. If the 4h fetch rejected
+ * inside the pair's `Promise.all`, the whole pair build would reject, `safeBuildPair`
+ * would drop the pair, and the pair would vanish from the LLM's context AND from
+ * `allocatableUniverse` — a shadow-only feature silently changing what the model may
+ * allocate to. Shadow mode has to mean the live path cannot notice the regime layer,
+ * including when the regime layer breaks. Exported so that guarantee is testable
+ * without a network.
+ */
+export async function fetchTacticalSeries(
+  fetch: () => Promise<Candle[]>,
+  label: string,
+): Promise<Candle[]> {
+  try {
+    return await fetch();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[warn] ${label}: tactical series fetch failed (${msg}) — the pair keeps its place in ` +
+        'the context and only sits out of the regime read.',
+    );
+    return [];
+  }
+}
+
 /** A built pair: what the context exposes, plus the raw series the regime needs. */
 interface BuiltPair {
   context: PairContext;
@@ -96,10 +124,9 @@ async function buildPairContext(
   // normal cached run touches only the spot price and the daily series.
   //
   // The 4h series is the TACTICAL horizon (mandate §2): the daily read barely moves
-  // between two wake-ups, so it alone can only produce repetition. It is fetched
-  // alongside the daily one, and an empty 4h series costs the pair its regime — never
-  // the whole cycle.
-  const [price, primaryCandles, h4Candles] = await Promise.all([
+  // between two wake-ups, so it alone can only produce repetition. Its failure is
+  // contained by fetchTacticalSeries — see the guarantee documented there.
+  const [price, primaryCandles, h4Result] = await Promise.all([
     fetchSpotPrice(publicClient, symbol),
     fetchCandles(
       publicClient,
@@ -107,7 +134,10 @@ async function buildPairContext(
       config.primaryTimeframe,
       config.primaryLimit,
     ),
-    fetchCandles(publicClient, symbol, config.regime.timeframe, config.regime.limit),
+    fetchTacticalSeries(
+      () => fetchCandles(publicClient, symbol, config.regime.timeframe, config.regime.limit),
+      `${symbol} (${kind}) ${config.regime.timeframe}`,
+    ),
   ]);
 
   if (primaryCandles.length === 0) {
@@ -117,9 +147,9 @@ async function buildPairContext(
     return null;
   }
 
-  if (h4Candles.length === 0) {
+  if (h4Result.length === 0) {
     console.warn(
-      `[warn] ${symbol} (${kind}): ${config.regime.timeframe} series is empty — the pair is excluded from the regime read.`,
+      `[warn] ${symbol} (${kind}): no ${config.regime.timeframe} candles — the pair is excluded from the regime read.`,
     );
   }
 
@@ -155,7 +185,7 @@ async function buildPairContext(
         allTime,
       },
     },
-    series: h4Candles.length > 0 ? { daily: primaryCandles, h4: h4Candles } : null,
+    series: h4Result.length > 0 ? { daily: primaryCandles, h4: h4Result } : null,
   };
 }
 
@@ -202,9 +232,17 @@ function readRegime(pairs: BuiltPair[]): RegimeJournal | null {
     return null;
   }
   try {
-    const point = resolveRegimes(universe, config.regime.thresholds);
+    const point = resolveRegimes(universe, config.regime.thresholds, {
+      nowMs: Date.now(),
+      barMs: timeframeMs(config.regime.timeframe),
+      // The CONFIGURED universe, not what loaded — a pair whose series failed must not
+      // shrink the risk_off breadth denominator (see RegimeOptions.universeSize).
+      universeSize: config.tradablePairs.length + config.referencePairs.length,
+    });
     if (!point) {
-      console.warn('[warn] the pairs share no common 4h bar — no regime computed this cycle.');
+      console.warn(
+        '[warn] the pairs share no CLOSED 4h bar in common — no regime computed this cycle.',
+      );
       return null;
     }
     return toRegimeJournal(point);

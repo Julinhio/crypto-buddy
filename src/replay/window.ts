@@ -2,8 +2,9 @@ import 'dotenv/config';
 import { config } from '../config/index.js';
 import { publicMainnetClient } from '../exchanges/binance.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
-import type { AssetSeries } from '../market/regime.js';
-import { fetchCandlesSince, TIMEFRAME_MS } from './klines.js';
+import { timeframeMs } from '../market/klines.js';
+import type { AssetSeries, RegimeOptions } from '../market/regime.js';
+import { fetchCandlesSince } from './klines.js';
 
 /**
  * Shared plumbing of the REPLAY harness: what window to replay, and the candles to
@@ -20,7 +21,20 @@ import { fetchCandlesSince, TIMEFRAME_MS } from './klines.js';
  *    no Healthchecks ping.
  */
 
-const DAY_MS = TIMEFRAME_MS['1d']!;
+const DAY_MS = timeframeMs('1d');
+
+/**
+ * The non-market inputs of the regime, resolved the SAME way production resolves
+ * them. Shared by every replay so a harness can never accidentally hand the
+ * calculator a looser universe or a different clock than the live bot does.
+ */
+export function replayRegimeOptions(nowMs: number = Date.now()): RegimeOptions {
+  return {
+    nowMs,
+    barMs: timeframeMs(config.regime.timeframe),
+    universeSize: config.tradablePairs.length + config.referencePairs.length,
+  };
+}
 
 export interface ReplayWindow {
   fromMs: number;

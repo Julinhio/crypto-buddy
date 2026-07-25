@@ -40,15 +40,26 @@ export type AssetRegime = 'range' | 'trend_up' | 'trend_down' | 'reversal_up' | 
 /** What the rest of the system acts on: the per-asset regime, unless risk_off overrides it. */
 export type EffectiveRegime = AssetRegime | 'risk_off';
 
-export const ASSET_REGIMES: readonly AssetRegime[] = [
-  'range',
-  'trend_up',
-  'trend_down',
-  'reversal_up',
-  'reversal_down',
-] as const;
-
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The inputs that are NOT market data but still decide the outcome, passed in rather
+ * than read from the ambient world — that is what keeps `regimeTimeline` a pure
+ * function and lets the replay reproduce production instead of approximating it.
+ */
+export interface RegimeOptions {
+  /** Wall clock. A 4h bar enters the grid only once its interval has CLOSED by then. */
+  nowMs: number;
+  /** Duration of one tactical bar, in ms (see `timeframeMs`). */
+  barMs: number;
+  /**
+   * Denominator of the risk_off breadth: the size of the CONFIGURED universe, not the
+   * number of assets that happened to load. Otherwise a cycle where two series failed
+   * would compute 3 bearish out of 3 = 100% breadth and arm a portfolio-wide de-risk
+   * on a third of the evidence. Missing assets simply cannot be bearish.
+   */
+  universeSize: number;
+}
 
 /** The raw inputs the classifier reads, kept explicit so a journaled regime is auditable. */
 export interface AssetSignals {
@@ -87,10 +98,15 @@ export interface GlobalPosture {
   riskOff: boolean;
   /** The unsmoothed override at this bar. */
   raw: boolean;
-  /** Share of the universe that is bearish, in percent. */
+  /** Bearish assets as a percent of the CONFIGURED universe (`assetsExpected`). */
   breadthPercent: number;
-  /** Median 4h RSI across the universe — the momentum half of the override. */
+  /** Median 4h RSI across the assets that loaded — the momentum half of the override. */
   medianH4Rsi: number | null;
+  /** Assets that actually produced signals this bar. */
+  assetsPresent: number;
+  /** Assets the configuration expects — the breadth denominator, journaled so a
+   *  partial universe is visible in the audit instead of silently rescaling. */
+  assetsExpected: number;
   pendingBars: number;
 }
 
@@ -317,14 +333,22 @@ function signalsAt(
 export function regimeTimeline(
   universe: Record<string, AssetSeries>,
   th: RegimeThresholds,
+  opts: RegimeOptions,
 ): RegimePoint[] {
   const assets = Object.keys(universe);
   if (assets.length === 0) return [];
 
-  // Bars every asset has, in ascending order.
+  // Bars every asset has, in ascending order — and ONLY bars whose interval has
+  // closed. ccxt hands back the still-forming candle as the last element: its close,
+  // RSI and EMA mutate between two wake-ups inside the same bar, so including it
+  // would (a) make the regime depend on WHEN in the bar we look, breaking the purity
+  // this module is built on, and (b) let that mutating bar spend one of the three
+  // confirmations, flipping a stabilized regime up to four hours early.
   let common: number[] | null = null;
   for (const asset of assets) {
-    const stamps = new Set(universe[asset]!.h4.map((c) => c.timestamp));
+    const stamps = new Set(
+      universe[asset]!.h4.filter((c) => c.timestamp + opts.barMs <= opts.nowMs).map((c) => c.timestamp),
+    );
     common = common == null ? [...stamps] : common.filter((t) => stamps.has(t));
   }
   const grid = (common ?? []).sort((a, b) => a - b);
@@ -377,7 +401,12 @@ export function regimeTimeline(
       };
     }
 
-    const breadthPercent = (bearishCount / prepared.length) * 100;
+    // Denominator = the CONFIGURED universe, never `prepared.length`. An asset whose
+    // series failed to load is not evidence of anything; letting it shrink the
+    // denominator would turn "3 bearish of 3 loaded" into 100% breadth and arm a
+    // portfolio-wide de-risk on a partial read of the market.
+    const assetsExpected = Math.max(opts.universeSize, prepared.length);
+    const breadthPercent = (bearishCount / assetsExpected) * 100;
     const medianH4Rsi = median(h4Rsis);
     // Both halves must agree: a broadly broken structure AND weak momentum. Either
     // one alone is a normal pullback, not a reason to de-risk the whole book.
@@ -395,6 +424,8 @@ export function regimeTimeline(
         raw: rawRiskOff,
         breadthPercent,
         medianH4Rsi,
+        assetsPresent: prepared.length,
+        assetsExpected,
         pendingBars: globalState.pendingBars,
       },
       assets: perAsset,
@@ -408,8 +439,9 @@ export function regimeTimeline(
 export function resolveRegimes(
   universe: Record<string, AssetSeries>,
   th: RegimeThresholds,
+  opts: RegimeOptions,
 ): RegimePoint | null {
-  const timeline = regimeTimeline(universe, th);
+  const timeline = regimeTimeline(universe, th, opts);
   return timeline.length > 0 ? timeline[timeline.length - 1] ?? null : null;
 }
 

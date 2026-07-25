@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { config, validateRegimeConfig, type RegimeConfig, type RegimeThresholds } from '../config/index.js';
+import { fetchTacticalSeries } from '../context/build.js';
 import type { Candle } from '../market/klines.js';
 import {
   Hysteresis,
@@ -10,6 +11,7 @@ import {
   type AssetRegime,
   type AssetSeries,
   type AssetSignals,
+  type RegimeOptions,
 } from '../market/regime.js';
 
 /**
@@ -168,7 +170,10 @@ const neutral = (over: Partial<AssetSignals> = {}): AssetSignals => ({
   const point = {
     timestamp: 0,
     at: '1970-01-01T00:00:00.000Z',
-    global: { riskOff: true, raw: true, breadthPercent: 100, medianH4Rsi: 20, pendingBars: 0 },
+    global: {
+      riskOff: true, raw: true, breadthPercent: 100, medianH4Rsi: 20,
+      assetsPresent: 2, assetsExpected: 2, pendingBars: 0,
+    },
     assets: {
       BTC: { regime: 'trend_up' as AssetRegime, raw: 'trend_up' as AssetRegime, pendingBars: 0, pendingRegime: null, bearish: false, signals: neutral() },
       ETH: { regime: 'range' as AssetRegime, raw: 'range' as AssetRegime, pendingBars: 0, pendingRegime: null, bearish: true, signals: neutral() },
@@ -188,6 +193,17 @@ const neutral = (over: Partial<AssetSignals> = {}): AssetSignals => ({
   console.log('  ok: risk_off overrides every per-asset regime without erasing it');
   passed += 1;
 }
+
+/**
+ * Regime options for a synthetic universe: a clock far past every bar (so nothing is
+ * treated as still forming, unless a case says otherwise) and a denominator equal to
+ * the universe under test.
+ */
+const opts = (universe: Record<string, AssetSeries>, nowMs = Number.MAX_SAFE_INTEGER): RegimeOptions => ({
+  nowMs,
+  barMs: H4_MS,
+  universeSize: Object.keys(universe).length,
+});
 
 /** Builds `count` daily candles of constant close, then `overrides` applied by index. */
 function dailySeries(count: number, close: number, overrides: Record<number, number> = {}): Candle[] {
@@ -220,7 +236,7 @@ function h4Series(days: number, close: number): Candle[] {
   const daily = dailySeries(days, 100, { [days - 1]: 1000 });
   const h4 = h4Series(days, 100);
   const universe: Record<string, AssetSeries> = { X: { daily, h4 } };
-  const timeline = regimeTimeline(universe, th);
+  const timeline = regimeTimeline(universe, th, opts(universe));
 
   const lastDayStart = (days - 1) * DAY_MS;
   const barsOfLastDay = timeline.filter((p) => p.timestamp >= lastDayStart);
@@ -241,13 +257,69 @@ function h4Series(days: number, close: number): Candle[] {
   // different instants would make the risk_off breadth meaningless.
   const long = { daily: dailySeries(60, 100), h4: h4Series(60, 100) };
   const short: AssetSeries = { daily: dailySeries(60, 100), h4: h4Series(60, 100).slice(0, 100) };
-  const timeline = regimeTimeline({ A: long, B: short }, th);
+  const pair = { A: long, B: short };
+  const timeline = regimeTimeline(pair, th, opts(pair));
   assert.equal(timeline.length, 100, 'the timeline is bounded by the shortest 4h series');
   for (const p of timeline) {
     assert.ok(p.assets.A && p.assets.B, 'every point carries every asset');
   }
-  assert.deepEqual(regimeTimeline({}, th), [], 'an empty universe yields an empty timeline');
+  assert.deepEqual(regimeTimeline({}, th, opts({})), [], 'an empty universe yields an empty timeline');
   console.log('  ok: the timeline is the intersection of the assets 4h bars');
+  passed += 1;
+}
+
+{
+  // The STILL-FORMING 4h candle must never enter the grid. ccxt returns it as the last
+  // element; its close, RSI and EMA mutate between two wake-ups inside the same bar, so
+  // including it would make the regime depend on WHEN in the bar we looked, and would
+  // let that mutating bar spend one of the three confirmations — flipping a stabilized
+  // regime up to four hours early.
+  const days = 40;
+  const universe: Record<string, AssetSeries> = { X: { daily: dailySeries(days, 100), h4: h4Series(days, 100) } };
+  const bars = universe.X!.h4;
+  const lastBar = bars[bars.length - 1]!;
+
+  // A clock one millisecond before the last bar closes → that bar is still forming.
+  const forming = regimeTimeline(universe, th, opts(universe, lastBar.timestamp + H4_MS - 1));
+  const closed = regimeTimeline(universe, th, opts(universe, lastBar.timestamp + H4_MS));
+  assert.equal(closed.length, forming.length + 1, 'the forming bar joins the grid exactly when it closes');
+  assert.equal(
+    forming[forming.length - 1]!.timestamp,
+    bars[bars.length - 2]!.timestamp,
+    'mid-bar, the regime is anchored on the last CLOSED bar',
+  );
+
+  // And the answer must not drift while the bar is forming: two different clocks
+  // inside the same open bar produce the same regime.
+  const early = regimeTimeline(universe, th, opts(universe, lastBar.timestamp + 1));
+  assert.equal(early.length, forming.length, 'the grid is identical anywhere inside the open bar');
+  console.log('  ok: the still-forming 4h candle never enters the grid');
+  passed += 1;
+}
+
+{
+  // The risk_off breadth denominator is the CONFIGURED universe, not the assets that
+  // happened to load. Otherwise a cycle where two of five series failed would read
+  // "3 bearish of 3" as 100% breadth and arm a portfolio-wide de-risk on a partial
+  // view of the market.
+  const bearish = { daily: dailySeries(60, 100, { 59: 100 }), h4: h4Series(60, 100) };
+  const loaded: Record<string, AssetSeries> = { A: bearish, B: bearish, C: bearish };
+  const full = regimeTimeline(loaded, th, { nowMs: Number.MAX_SAFE_INTEGER, barMs: H4_MS, universeSize: 5 });
+  const point = full[full.length - 1]!;
+  assert.equal(point.global.assetsExpected, 5, 'the denominator is the configured universe');
+  assert.equal(point.global.assetsPresent, 3, 'and the shortfall is journaled, not hidden');
+  assert.ok(
+    point.global.breadthPercent <= (3 / 5) * 100 + 1e-9,
+    'three assets can never express more than 3/5 of the breadth',
+  );
+  // A denominator SMALLER than what loaded would be nonsense; the code takes the max.
+  const understated = regimeTimeline(loaded, th, { nowMs: Number.MAX_SAFE_INTEGER, barMs: H4_MS, universeSize: 1 });
+  assert.equal(
+    understated[understated.length - 1]!.global.assetsExpected,
+    3,
+    'an understated universeSize cannot inflate the breadth above 100%',
+  );
+  console.log('  ok: the risk_off breadth is measured against the configured universe');
   passed += 1;
 }
 
@@ -281,6 +353,27 @@ function h4Series(days: number, close: number): Candle[] {
     'a 4h window too short for the warm-up is rejected',
   );
   console.log('  ok: the regime config validator rejects the whole class of incoherent thresholds');
+  passed += 1;
+}
+
+{
+  // SHADOW MODE is only real if the live path cannot notice the regime layer BREAKING.
+  // A rejected tactical fetch must degrade to "no regime for this pair", never bubble
+  // up — a thrown error would drop the whole pair, shrinking the LLM's allocatable
+  // universe and changing decision behavior from a shadow-only feature.
+  const ok = await fetchTacticalSeries(async () => h4Series(2, 100), 'X 4h');
+  assert.equal(ok.length, 12, 'a successful fetch is passed through untouched');
+
+  const failed = await fetchTacticalSeries(async () => {
+    throw new Error('binance 4h timeout');
+  }, 'X 4h');
+  assert.deepEqual(failed, [], 'a rejected tactical fetch degrades to an empty series');
+
+  // The pair then simply sits out of the regime: an empty 4h series yields no bars for
+  // it, so it cannot corrupt the timeline either.
+  const universe: Record<string, AssetSeries> = { X: { daily: dailySeries(40, 100), h4: failed } };
+  assert.deepEqual(regimeTimeline(universe, th, opts(universe)), [], 'no 4h series → no regime, no crash');
+  console.log('  ok: a broken tactical fetch cannot remove a pair from the live context');
   passed += 1;
 }
 
