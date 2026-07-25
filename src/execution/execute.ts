@@ -20,7 +20,7 @@ export interface ExecutionLine {
   wantedQty: Decimal; // state 1 (sovereign, pre-snap)
   snappedQty: Decimal;
   booked: boolean; // did the sovereign ledger book it?
-  verdict: 'ok' | 'crumb' | 'block' | 'rules_error' | 'not_booked' | 'already_booked';
+  verdict: 'ok' | 'below_floor' | 'crumb' | 'block' | 'rules_error' | 'not_booked' | 'already_booked';
   reason: string | null;
   order: OrderResult | null; // the testnet attempt (null when no order was sent)
 }
@@ -137,6 +137,14 @@ export async function executeMovements(
     // still records what was wanted, so nothing about intent is lost.
     if (verdict.kind === 'below_floor') {
       console.log(`[skip] ${m.side} ${m.symbol}: ${verdict.reason} — dropped before the executor, nothing journaled.`);
+      // A line IS still emitted. Nothing is written to the DATABASE — that is the
+      // point of the floor — but `lines` is positionally paired with `movements` by
+      // the printer, so silently omitting one would shift every later line onto the
+      // wrong movement and report its notional and fee against the wrong price.
+      lines.push({
+        symbol: m.symbol, side: m.side, wantedQty: m.qty, snappedQty,
+        booked: false, verdict: 'below_floor', reason: verdict.reason, order: null,
+      });
       continue;
     }
 

@@ -16,6 +16,7 @@ function fmtAllocation(alloc: Record<string, number> | null): string {
 }
 
 const SKIP_LABEL: Record<Exclude<ExecutionLine['verdict'], 'ok'>, string> = {
+  below_floor: 'skip·below-floor',
   crumb: 'skip·crumb',
   block: 'skip·block',
   rules_error: 'skip·rules',

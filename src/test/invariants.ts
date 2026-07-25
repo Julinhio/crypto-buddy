@@ -765,6 +765,12 @@ console.log('\nDaily summary — local-time trigger, variation fallbacks, French
   // the mandate calls out explicitly as intended behavior, not a bug to fix later.
   const trim = computeMovements(book, { XRP: 0.4, USDT: 99.6 }, prices, 0.1, floorPct);
   assert.deepEqual(trim, [], 'a partial trim of a sub-floor line is impossible — only the full exit remains');
+
+  // And the exemption is EXACTLY-zero, not "worth less than a cent". A target of
+  // 0.0005% is a deliberate decision to stay invested; treating it as an exit would
+  // hand the floor-bypass to a partial trim and let it reach the venue as a crumb.
+  const almostZero = computeMovements(book, { XRP: 0.0005, USDT: 99.9995 }, prices, 0.1, floorPct);
+  assert.deepEqual(almostZero, [], 'a near-zero but non-zero target is a trim, not an exit — floor applies');
   console.log('  ok: a full exit is always allowed; a partial trim of a tiny line is not (by design)');
   passed += 1;
 }

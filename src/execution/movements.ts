@@ -97,8 +97,12 @@ export function computeMovements(
       continue;
     }
 
-    // A sell whose target is zero closes the line — always allowed past the floor.
-    const fullExit = deltaValue.lt(0) && targetValue.lt(DUST_NOTIONAL);
+    // A sell whose target allocation is EXACTLY zero closes the line — the one case
+    // always allowed past the floor. Deliberately not "target worth less than a cent":
+    // a non-zero allocation, however small, is a deliberate decision to stay invested,
+    // and treating it as an exit would hand the floor-bypass to a partial trim — which
+    // could then reach the venue and recreate the very crumbs this change removes.
+    const fullExit = deltaValue.lt(0) && pct === 0;
 
     // THE PLUMBING FLOOR, applied where the movement is BORN. A leg under it is not a
     // movement at all: it is never sized, never journaled, never sent — which is the

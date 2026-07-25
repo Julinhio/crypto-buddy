@@ -273,14 +273,27 @@ async function main(): Promise<number> {
   const supabase = getSupabaseClient();
   if (!supabase) throw new Error('replay: Supabase is not configured.');
 
-  const { data, error } = await supabase
-    .from('decisions')
-    .select('created_at, applied_allocation, market_context')
-    .eq('status', 'decided')
-    .not('applied_allocation', 'is', null)
-    .order('created_at', { ascending: true });
-  if (error) throw new Error(`replay: could not read decisions (${error.message}).`);
-  const cycles = (data ?? []) as unknown as StoredCycle[];
+  // PAGED. PostgREST caps a response at 1000 rows by default; the bot adds ~17
+  // decisions a day, so an unpaged query would soon replay only the oldest page while
+  // the header still advertised the full window — S1/S2 passing without ever looking
+  // at a recent cycle, and S3 comparing that truncated model against an exact count
+  // over the whole executions table. A criterion that silently narrows its own scope
+  // is worse than no criterion.
+  const PAGE = 500;
+  const cycles: StoredCycle[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('decisions')
+      .select('created_at, applied_allocation, market_context')
+      .eq('status', 'decided')
+      .not('applied_allocation', 'is', null)
+      .order('created_at', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(`replay: could not read decisions (${error.message}).`);
+    const page = (data ?? []) as unknown as StoredCycle[];
+    cycles.push(...page);
+    if (page.length < PAGE) break;
+  }
 
   console.log('='.repeat(96));
   console.log('SIZING REPLAY — the 2% plumbing floor');
