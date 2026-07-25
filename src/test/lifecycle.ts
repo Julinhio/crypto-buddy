@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { dec, ZERO } from '../money.js';
+import { dec, ZERO, type Decimal } from '../money.js';
 import { nextPositionState, nextPositionStates, type PositionState } from '../portfolio/lifecycle.js';
 import { backfillOne } from '../portfolio/backfill.js';
 import { derivePortfolio, type PriceLookup } from '../portfolio/derive.js';
@@ -165,6 +165,14 @@ const fill = (at: string, asset: string, baseDelta: string, price: string) => ({
   at, asset, baseDelta: dec(baseDelta), price: dec(price),
 });
 const seen = (at: string, price: string) => ({ at, price: dec(price) });
+/** A flat $1000 book, so the 2% floor sits at $20 throughout these cases. */
+const flatEquity = (): Decimal => dec(1000);
+const backfill = (
+  asset: string,
+  fills: Parameters<typeof backfillOne>[0]['fills'],
+  observed: Parameters<typeof backfillOne>[0]['observed'],
+  equityAt: (at: string) => Decimal | null = flatEquity,
+) => backfillOne({ asset, fills, observed, equityAt, minMovementPercent: 2 });
 
 {
   // THE RULE THAT MATTERS: history starts at the LAST zero → positive transition. A
@@ -182,7 +190,7 @@ const seen = (at: string, price: string) => ({ at, price: dec(price) });
     seen(T2, '1.05'),
     seen(T3, '1.12'),   // the high of the CURRENT life
   ];
-  const state = backfillOne('XRP', fills, observed);
+  const state = backfill('XRP', fills, observed);
   assert.equal(state.entryDate, T2, 'the entry is the LAST transition, not the first');
   assert.equal(state.peakPriceSinceEntry?.toString(), '1.12', 'the peak ignores the previous life entirely');
   assert.equal(state.qty.toString(), '80');
@@ -194,14 +202,14 @@ const seen = (at: string, price: string) => ({ at, price: dec(price) });
 {
   // A line that is flat today gets no life and no peak, whatever it did before.
   const fills = [fill(T0, 'XRP', '100', '1.00'), fill(T1, 'XRP', '-100', '1.28')];
-  const state = backfillOne('XRP', fills, [seen(T0, '1.00'), seen(T1, '1.2856')]);
+  const state = backfill('XRP', fills, [seen(T0, '1.00'), seen(T1, '1.2856')]);
   assert.equal(state.entryDate, null, 'a closed line has no entry date');
   assert.equal(state.peakPriceSinceEntry, null, 'and no peak to inherit');
   assert.equal(state.qty.toString(), '0');
   assert.equal(state.lastSignificantMoveSide, 'sell', 'its last move is still history');
 
   // An asset the bot never touched is simply flat.
-  const untouched = backfillOne('SOL', fills, []);
+  const untouched = backfill('SOL', fills, []);
   assert.equal(untouched.entryDate, null);
   assert.equal(untouched.lastSignificantMoveAt, null, 'never traded means no move on record');
   console.log('  ok: a closed or never-held line backfills to flat, with nothing to inherit');
@@ -214,13 +222,49 @@ const seen = (at: string, price: string) => ({ at, price: dec(price) });
   // one and the live ratchet from the other would make the peak jump on switch day.
   const fills = [fill(T0, 'ETH', '1', '1665'), fill(T2, 'ETH', '-0.1', '1947.33')];
   const observed = [seen(T0, '1665'), seen(T1, '1800')];
-  const state = backfillOne('ETH', fills, observed);
+  const state = backfill('ETH', fills, observed);
   assert.equal(
     state.peakPriceSinceEntry?.toString(),
     '1947.33',
     "a fill's valuation price counts toward the peak, not only the context snapshots",
   );
   console.log('  ok: the peak is sampled from every price the bot actually saw');
+  passed += 1;
+}
+
+{
+  // `last_significant_move` must be filtered by the V2 SIGNIFICANCE rule, not simply
+  // taken as "the last fill". The history predates the 2% floor and is mostly $5-7
+  // dribbles; copying the latest of those in would hand the v5 model "sell of 5.06 on
+  // 22/07" as though it were a decision — re-injecting the noise PR 2 deleted.
+  const fills = [
+    fill(T0, 'ETH', '0.12', '1665'),   // $199.80 on a $1000 book — significant
+    fill(T1, 'ETH', '0.004', '1687'),  //   $6.75 — a dribble
+    fill(T2, 'ETH', '-0.003', '1794'), //   $5.38 — a dribble
+  ];
+  const state = backfill('ETH', fills, [seen(T0, '1665'), seen(T3, '1948')]);
+  assert.equal(state.lastSignificantMoveAt, T0, 'the last SIGNIFICANT move, not the last fill');
+  assert.equal(state.lastSignificantMoveSide, 'buy');
+  assert.equal(state.lastSignificantMoveNotional?.toFixed(2), '199.80');
+  // It coinciding with the entry is the honest answer, not a defect: nothing
+  // significant has happened to this line since it was opened.
+  assert.equal(state.entryDate, T0, 'which here coincides with the entry — 47 days of immobility, in data');
+  assert.equal(state.qty.toString(), '0.121', 'the quantity still reflects EVERY fill, dribbles included');
+
+  // A line whose only fills are dribbles has NO significant move on record.
+  const onlyDribbles = backfill('BNB', [fill(T0, 'BNB', '0.01', '543')], [seen(T0, '543')]);
+  assert.equal(onlyDribbles.lastSignificantMoveAt, null, 'no qualifying move means none is claimed');
+  assert.equal(onlyDribbles.lastSignificantMoveSide, null);
+
+  // The threshold follows the equity in force at the time, not a constant: the same
+  // $199.80 buy is NOT significant on a $20,000 book.
+  const rich = backfill('ETH', fills, [seen(T0, '1665')], () => dec(20000));
+  assert.equal(rich.lastSignificantMoveAt, null, 'significance is measured against the equity of the day');
+
+  // And an unverifiable move (no equity recorded yet) is not claimed as significant.
+  const unknown = backfill('ETH', fills, [seen(T0, '1665')], () => null);
+  assert.equal(unknown.lastSignificantMoveAt, null, 'no equity to judge against means no claim');
+  console.log('  ok: the backfill records the last SIGNIFICANT move, judged against the equity of the day');
   passed += 1;
 }
 
