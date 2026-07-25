@@ -1,6 +1,7 @@
 import { Decimal, ZERO } from '../money.js';
 import type { LedgerEntry } from '../persistence/executions.js';
 import type { PriceLookup, VirtualPortfolio } from './derive.js';
+import type { PositionNote } from '../decision/schema.js';
 
 /**
  * POSITION LIFECYCLE — the state each position carries between cycles.
@@ -48,8 +49,28 @@ export interface LifecycleInputs {
   price: Decimal | null;
   /** What booked on this asset this cycle, if anything. */
   booked: { side: 'buy' | 'sell'; notional: Decimal } | null;
+  /** A thesis the MODEL wants written for this asset this cycle (v5). */
+  note: { thesis: string; invalidation: string; replace: boolean } | null;
   /** This cycle's timestamp, ISO. */
   now: string;
+}
+
+/**
+ * May the model's thesis be written this cycle?
+ *
+ * The mandate allows exactly three cases: a significant decision on the line, a first
+ * thesis where there was none, or an explicit replacement. Everything else keeps what
+ * is stored — because the failure being corrected is 787 reformulations of the same
+ * paragraph, and a model asked every two hours to describe its thinking WILL describe
+ * it every two hours. The guarantee therefore lives in the code, not in the prompt:
+ * the mandate asks, this function enforces.
+ */
+export function mayWriteThesis(params: {
+  booked: boolean;
+  hasStoredThesis: boolean;
+  replace: boolean;
+}): boolean {
+  return params.booked || !params.hasStoredThesis || params.replace;
 }
 
 const flat = (qty: Decimal): boolean => qty.lte(DUST);
@@ -65,7 +86,7 @@ const flat = (qty: Decimal): boolean => qty.lte(DUST);
  *    later re-entry cannot inherit anything from the previous life.
  */
 export function nextPositionState(input: LifecycleInputs): PositionState {
-  const { asset, previous, qty, price, booked, now } = input;
+  const { asset, previous, qty, price, booked, note, now } = input;
 
   const move = booked
     ? { at: now, side: booked.side, notional: booked.notional }
@@ -96,7 +117,8 @@ export function nextPositionState(input: LifecycleInputs): PositionState {
   const wasFlat = previous == null || flat(previous.qty);
 
   // 2. Zero → positive: a NEW life. Entry is now, and the peak starts at today's
-  //    price rather than at anything the asset did before.
+  //    price rather than at anything the asset did before. A thesis offered for a
+  //    line being opened is always accepted — there is nothing to overwrite.
   if (wasFlat) {
     return {
       asset,
@@ -106,11 +128,20 @@ export function nextPositionState(input: LifecycleInputs): PositionState {
       lastSignificantMoveSide: move.side,
       lastSignificantMoveNotional: move.notional,
       qty,
-      thesis: null,
-      invalidation: null,
-      thesisUpdatedAt: null,
+      thesis: note?.thesis ?? null,
+      invalidation: note?.invalidation ?? null,
+      thesisUpdatedAt: note ? now : null,
     };
   }
+
+  // The thesis is the model's, but WHEN it may be rewritten is the code's call.
+  const writeThesis =
+    note != null &&
+    mayWriteThesis({
+      booked: booked != null,
+      hasStoredThesis: (previous.thesis ?? '').trim() !== '',
+      replace: note.replace,
+    });
 
   // 3. Still open — the peak only ever ratchets UP, and only on a real price. A stale
   //    price must not touch it: falling back to avgCost (as the valuation path does)
@@ -130,9 +161,9 @@ export function nextPositionState(input: LifecycleInputs): PositionState {
     lastSignificantMoveSide: move.side,
     lastSignificantMoveNotional: move.notional,
     qty,
-    thesis: previous.thesis,
-    invalidation: previous.invalidation,
-    thesisUpdatedAt: previous.thesisUpdatedAt,
+    thesis: writeThesis ? note!.thesis : previous.thesis,
+    invalidation: writeThesis ? note!.invalidation : previous.invalidation,
+    thesisUpdatedAt: writeThesis ? now : previous.thesisUpdatedAt,
   };
 }
 
@@ -155,9 +186,12 @@ export function nextPositionStates(params: {
   portfolio: VirtualPortfolio;
   priceOf: PriceLookup;
   bookedLedger: LedgerEntry[];
+  /** Theses the model wants written this cycle (v5). Empty under v4. */
+  notes?: PositionNote[];
   now: string;
 }): PositionState[] {
-  const { assets, previous, portfolio, priceOf, bookedLedger, now } = params;
+  const { assets, previous, portfolio, priceOf, bookedLedger, notes = [], now } = params;
+  const noteOf = new Map(notes.map((n) => [n.asset, n]));
 
   const heldQty = new Map<string, Decimal>();
   for (const p of portfolio.positions) heldQty.set(p.asset, p.qty);
@@ -184,6 +218,7 @@ export function nextPositionStates(params: {
       qty: heldQty.get(asset) ?? ZERO,
       price: priceOf(asset),
       booked: booked.get(asset) ?? null,
+      note: noteOf.get(asset) ?? null,
       now,
     }),
   );

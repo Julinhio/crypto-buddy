@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
-import { config } from '../config/index.js';
+import { config, type StrategyVersion } from '../config/index.js';
 import { buildDecisionSchema, type DecisionOutput } from './schema.js';
 
 // Memoized client.
@@ -79,10 +79,12 @@ export async function runDecision(params: {
   systemPrompt: string;
   userPrompt: string;
   assets: string[];
+  /** Which output contract to enforce — the two strategies do not share a shape. */
+  strategy?: StrategyVersion;
 }): Promise<LlmResult> {
   const anthropic = getClient();
   const model = resolveModel();
-  const schema = buildDecisionSchema(params.assets);
+  const schema = buildDecisionSchema(params.assets, params.strategy ?? 'v4');
 
   const start = Date.now();
   const message = await anthropic.messages.create({
