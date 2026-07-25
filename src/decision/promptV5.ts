@@ -179,6 +179,18 @@ export function buildUserPromptV5(params: {
           at: lastSignificant.created_at,
           action_type: lastSignificant.action_type,
           proposed_allocation: lastSignificant.target_allocation,
+          // If the risk wrapper trimmed that proposal, say so and show what it kept.
+          // Handing back only the raw proposal would let this cycle reason about a
+          // target the book never actually pursued — and quietly invite the model to
+          // propose past the cap again, since nothing would tell it the last attempt
+          // was cut.
+          ...(lastSignificant.clamped
+            ? {
+                risk_bounded_target: lastSignificant.applied_allocation ?? lastSignificant.target_allocation,
+                clamped: true,
+                clamp_reason: lastSignificant.clamp_reason ?? null,
+              }
+            : {}),
           what_changed: lastSignificant.what_changed,
           reasoning: (lastSignificant.reasoning ?? '').slice(0, 800),
         },

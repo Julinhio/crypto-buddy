@@ -112,6 +112,15 @@ let passed = 0;
   );
   assert.equal(empty.ok, false, 'an empty thesis is refused rather than stored as noise');
 
+  // Two entries for the same asset are collapsed downstream (the lifecycle keys them
+  // by asset, last one wins), so accepting them would persist an arbitrary choice
+  // between two contradictory theses. A contradiction is a reason to reject.
+  const dup = validateDecision(
+    { ...base, position_notes: [note('BTC'), { ...note('BTC'), thesis: 'the opposite' }] } as DecisionOutput,
+    assets, undefined, 'v5',
+  );
+  assert.equal(dup.ok, false, 'two theses for one asset are refused, not silently collapsed');
+
   const v4Notes = validateDecision(
     { ...base, market_state: 'range', position_notes: [note('BTC')] } as DecisionOutput,
     assets, undefined, 'v4',

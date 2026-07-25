@@ -233,6 +233,11 @@ export function validateDecision(
   // never for the reserve stable — cash has no thesis.
   const reserves = new Set(reserveStables(cfg));
   const positionNotes: PositionNote[] = [];
+  // One entry per position. Two entries for the same asset are silently collapsed
+  // downstream (the lifecycle keys them by asset, so the last one wins), which would
+  // persist an arbitrary choice between two conflicting theses. A contradiction is a
+  // reason to reject the whole decision, not to pick one at random.
+  const seenAssets = new Set<string>();
   for (const note of parsed.position_notes ?? []) {
     if (strategy !== 'v5') {
       return { ok: false, error: 'position_notes was returned but is v5-only' };
@@ -240,6 +245,10 @@ export function validateDecision(
     if (!allowed.has(note.asset) || reserves.has(note.asset)) {
       return { ok: false, error: `position_notes references "${note.asset}", which is not a tradable position` };
     }
+    if (seenAssets.has(note.asset)) {
+      return { ok: false, error: `position_notes contains "${note.asset}" twice — one thesis per position` };
+    }
+    seenAssets.add(note.asset);
     const thesis = (note.thesis ?? '').trim();
     const invalidation = (note.invalidation ?? '').trim();
     if (!thesis || !invalidation) {
