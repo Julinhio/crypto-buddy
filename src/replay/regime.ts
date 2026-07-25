@@ -10,7 +10,15 @@ import {
   type RegimePoint,
 } from '../market/regime.js';
 import { sliceEndingAt } from './klines.js';
-import { fmtBar, loadObservationWindow, loadUniverseSeries, pct, replayRegimeOptions } from './window.js';
+import {
+  fmtBar,
+  loadObservationWindow,
+  loadUniverseSeries,
+  pct,
+  replayRegimeOptions,
+  withinWindow,
+  type ReplayWindow,
+} from './window.js';
 
 /**
  * REGIME REPLAY — the acceptance criteria of Strategy V2 PR 1.
@@ -219,8 +227,7 @@ function criterionEthBnbDivergence(points: RegimePoint[]): void {
 function criterionRiskOffPriority(
   points: RegimePoint[],
   universe: Record<string, AssetSeries>,
-  windowFrom: number,
-  windowTo: number,
+  window: ReplayWindow,
 ): void {
   const detail: string[] = [];
   const liveRiskOff = points.filter((p) => p.global.riskOff).length;
@@ -236,8 +243,10 @@ function criterionRiskOffPriority(
     riskOffBreadthPercent: 40,
     riskOffMedianH4Rsi: 55,
   };
-  const forced = regimeTimeline(universe, permissive, replayRegimeOptions()).filter(
-    (p) => p.timestamp >= windowFrom && p.timestamp <= windowTo,
+  const forced = withinWindow(
+    regimeTimeline(universe, permissive, replayRegimeOptions()),
+    window,
+    replayRegimeOptions().barMs,
   );
   const armed = forced.filter((p) => p.global.riskOff);
   detail.push(
@@ -407,14 +416,16 @@ async function main(): Promise<number> {
 
   const universe = await loadUniverseSeries(window);
   const full = regimeTimeline(universe, config.regime.thresholds, replayRegimeOptions());
-  const points = full.filter((p) => p.timestamp >= window.fromMs && p.timestamp <= window.toMs);
+  // On CLOSE time — a bar that opened inside the window but closed after it was not
+  // observable by the bot, and must not feed a criterion (see withinWindow).
+  const points = withinWindow(full, window, replayRegimeOptions().barMs);
   if (points.length === 0) throw new Error('replay: no 4h bar inside the observation window.');
 
   printTimeline(points);
 
   criterionEthClimb(points);
   criterionEthBnbDivergence(points);
-  criterionRiskOffPriority(points, universe, window.fromMs, window.toMs);
+  criterionRiskOffPriority(points, universe, window);
   criterionHysteresis(points);
   criterionProductionEquivalence(points, universe);
 

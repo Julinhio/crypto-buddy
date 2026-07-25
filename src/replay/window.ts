@@ -109,6 +109,25 @@ export async function loadUniverseSeries(window: ReplayWindow): Promise<Record<s
   return universe;
 }
 
+/**
+ * Restricts a bar-indexed series to the observation window, on CLOSE time.
+ *
+ * Filtering on a bar's opening timestamp alone would admit the bar that opened before
+ * the last decision but closed after it: the historical fetch now holds that bar's
+ * completed OHLC, so the replay would consume candles the bot had not observed when
+ * the window ended — a small look-ahead, but the harness's whole credibility rests on
+ * there being none, and C5 would end up validating a bar production never saw.
+ *
+ * Single helper so every criterion shares one definition of "inside the window".
+ */
+export function withinWindow<T extends { timestamp: number }>(
+  points: T[],
+  window: ReplayWindow,
+  barMs: number,
+): T[] {
+  return points.filter((p) => p.timestamp >= window.fromMs && p.timestamp + barMs <= window.toMs);
+}
+
 /** `2026-07-25 04:00` — compact, unambiguous, sortable. Seconds add nothing on 4h bars. */
 export function fmtBar(ms: number): string {
   return new Date(ms).toISOString().replace('T', ' ').slice(0, 16);
