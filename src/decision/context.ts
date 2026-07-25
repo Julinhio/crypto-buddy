@@ -103,7 +103,11 @@ export function toDecisionContext(
   // drawdown from the peak is precomputed rather than left as arithmetic for the
   // model: it is the number the trailing playbook turns on, and a model doing mental
   // division on two prices is a model that will occasionally get it wrong.
-  const priced = new Map(portfolio.positions.map((p) => [p.asset, p.price]));
+  // Only LIVE prices. `derivePortfolio` falls back to avgCost when a price is missing
+  // and flags it `priceStale`; feeding that fallback in here would produce a
+  // fabricated drawdown from the peak — a peak-versus-cost-basis number — at exactly
+  // the moment the trailing playbook might act on it. No live price, no drawdown.
+  const priced = new Map(portfolio.positions.filter((p) => !p.priceStale).map((p) => [p.asset, p.price]));
   const positions: PositionLifecycleView[] = [];
   for (const [asset, state] of lifecycle) {
     if (state.entryDate == null) continue; // flat lines have no lifecycle to show
