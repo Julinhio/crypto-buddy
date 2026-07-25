@@ -139,6 +139,45 @@ export interface DailySummaryConfig {
   sendAtHourLocal: number;
 }
 
+/**
+ * Thresholds of the CODE-side market-regime classifier (mandate V2 §1). Every number
+ * the classification depends on lives here — nothing is hardcoded in the calculator —
+ * so a threshold can be re-tuned against the replay harness without touching logic.
+ */
+export interface RegimeThresholds {
+  /** Consecutive 4h bars a candidate label must hold before it replaces the active one. */
+  confirmations: number;
+  /** Closed daily bars defining the structural range the position is measured in. */
+  rangeWindowDays: number;
+  /** 4h RSI at or above which 4h momentum counts as UP. */
+  h4RsiUp: number;
+  /** 4h RSI at or below which 4h momentum counts as DOWN. */
+  h4RsiDown: number;
+  /** Range position at or above which the asset is "high in its range" (0..1). */
+  highRangePosition: number;
+  /** Range position at or below which the asset is "low in its range" (0..1). */
+  lowRangePosition: number;
+  /** Daily RSI below which an asset counts as bearish for the risk_off breadth. */
+  bearishDailyRsi: number;
+  /** Percent of the universe that must be bearish for the risk_off override to arm. */
+  riskOffBreadthPercent: number;
+  /** Median 4h RSI across the universe below which the risk_off override may fire. */
+  riskOffMedianH4Rsi: number;
+}
+
+/**
+ * Regime layer (V2 PR 1). The 4h horizon is the TACTICAL timeframe (mandate §2): waking
+ * Sonnet every 2h on almost exclusively daily indicators could only produce repetition —
+ * BTC's daily RSI moves 0.2 point between two wake-ups.
+ */
+export interface RegimeConfig {
+  /** The tactical timeframe. */
+  timeframe: Timeframe;
+  /** 4h candles fetched per pair. Must comfortably exceed the indicator + hysteresis warm-up. */
+  limit: number;
+  thresholds: RegimeThresholds;
+}
+
 export interface AppConfig {
   tradablePairs: string[];
   referencePairs: string[];
@@ -148,6 +187,7 @@ export interface AppConfig {
   longTermLimit: number;
   indicators: IndicatorConfig;
   cache: CacheConfig;
+  regime: RegimeConfig;
   decision: DecisionConfig;
   execution: ExecutionConfig;
   scheduler: SchedulerConfig;
@@ -226,6 +266,32 @@ export const config: AppConfig = {
     stalenessDays: 30,
     // Recent daily candles scanned to catch intraday extremes between runs.
     maintenanceLookbackCandles: 30,
+  },
+
+  regime: {
+    // The tactical horizon. 300 bars ≈ 50 days: far past the EMA21/RSI14 warm-up and
+    // long enough for the hysteresis walk to have converged well before the last bar.
+    timeframe: '4h',
+    limit: 300,
+    thresholds: {
+      // 3 × 4h = 12h of agreement before a regime flips. Below that we would swap the
+      // observed immobility for noise at every candle — the failure mode the mandate
+      // explicitly names.
+      confirmations: 3,
+      rangeWindowDays: 30,
+      // 55/45 around the RSI midline: a deliberate dead band, so a directionless 4h
+      // (RSI 45-55) produces neither an up nor a down momentum reading.
+      h4RsiUp: 55,
+      h4RsiDown: 45,
+      highRangePosition: 0.6,
+      lowRangePosition: 0.4,
+      bearishDailyRsi: 45,
+      // 80% of the universe (4 of the 5 priced assets) bearish AND a median 4h RSI
+      // under 40. Both halves must agree — a broken structure alone is a pullback,
+      // not a reason to de-risk the whole book.
+      riskOffBreadthPercent: 80,
+      riskOffMedianH4Rsi: 40,
+    },
   },
 
   decision: {
@@ -388,6 +454,63 @@ function validateAlertingConfig(cfg: AlertingConfig): void {
 }
 
 validateAlertingConfig(config.alerting);
+
+/**
+ * Fails fast on a regime config that could not classify honestly. The load-bearing
+ * checks are the two DEAD BANDS: `h4RsiDown < h4RsiUp` and `lowRangePosition <
+ * highRangePosition`. If either pair crossed, a single bar could read as both "up"
+ * and "down" (or as both high and low in its range) and the cascade's first-match
+ * ordering would silently decide the regime instead of the data. And `confirmations
+ * >= 1`, else the hysteresis is a no-op and every 4h candle flips the regime — the
+ * exact failure the mandate forbids. Exported for the offline test.
+ */
+export function validateRegimeConfig(cfg: RegimeConfig): void {
+  const t = cfg.thresholds;
+  const problems: string[] = [];
+  if (!(Number.isInteger(cfg.limit) && cfg.limit >= 100)) {
+    problems.push(`limit must be an integer >= 100 candles (got ${cfg.limit})`);
+  }
+  if (!(Number.isInteger(t.confirmations) && t.confirmations >= 1)) {
+    problems.push(`confirmations must be an integer >= 1, else hysteresis is a no-op (got ${t.confirmations})`);
+  }
+  if (!(Number.isInteger(t.rangeWindowDays) && t.rangeWindowDays >= 2)) {
+    problems.push(`rangeWindowDays must be an integer >= 2 (got ${t.rangeWindowDays})`);
+  }
+  if (!(t.h4RsiDown < t.h4RsiUp)) {
+    problems.push(
+      `h4RsiDown (${t.h4RsiDown}) must be strictly below h4RsiUp (${t.h4RsiUp}) — a crossed pair ` +
+        `would let one bar read as both up and down momentum`,
+    );
+  }
+  if (!(t.lowRangePosition < t.highRangePosition)) {
+    problems.push(
+      `lowRangePosition (${t.lowRangePosition}) must be strictly below highRangePosition ` +
+        `(${t.highRangePosition}) — a crossed pair would make a bar both high and low in its range`,
+    );
+  }
+  for (const [name, value] of [
+    ['lowRangePosition', t.lowRangePosition],
+    ['highRangePosition', t.highRangePosition],
+  ] as const) {
+    if (!(value >= 0 && value <= 1)) problems.push(`${name} must be in [0, 1] (got ${value})`);
+  }
+  for (const [name, value] of [
+    ['h4RsiUp', t.h4RsiUp],
+    ['h4RsiDown', t.h4RsiDown],
+    ['bearishDailyRsi', t.bearishDailyRsi],
+    ['riskOffMedianH4Rsi', t.riskOffMedianH4Rsi],
+  ] as const) {
+    if (!(value > 0 && value < 100)) problems.push(`${name} must be in (0, 100) (got ${value})`);
+  }
+  if (!(t.riskOffBreadthPercent > 0 && t.riskOffBreadthPercent <= 100)) {
+    problems.push(`riskOffBreadthPercent must be in (0, 100] (got ${t.riskOffBreadthPercent})`);
+  }
+  if (problems.length > 0) {
+    throw new Error(`Invalid regime config: ${problems.join('; ')}`);
+  }
+}
+
+validateRegimeConfig(config.regime);
 
 /**
  * Fails fast on a bad daily-summary config. The timezone is validated by trying to

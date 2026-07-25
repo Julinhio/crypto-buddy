@@ -55,6 +55,41 @@ function printPair(p: PairContext): void {
   console.log(levelLine('ATH/ATL', a, allTimeSuffix));
 }
 
+/**
+ * The code's regime read. Printed as its own block, above the pairs, because it is a
+ * FACT the system establishes before anything else looks at the market — and because
+ * a human auditing a cycle should see the regime and the raw label side by side (a
+ * gap between them is the hysteresis doing its job, not a bug).
+ */
+function printRegime(ctx: MarketContext): void {
+  sectionHeader('Market regime (computed by the code — shadow mode, not shown to the model)');
+  const r = ctx.regime;
+  if (!r) {
+    console.log('   (no regime this cycle — the 4h series was unavailable)');
+    return;
+  }
+  console.log(`   version ${r.version}  ·  4h bar ${r.barAt}`);
+  const g = r.global;
+  console.log(
+    `   global risk_off ${g.riskOff ? 'ACTIVE' : 'off'}` +
+      `  (raw ${g.raw ? 'on' : 'off'}, breadth ${fmtNum(g.breadthPercent, 0)}%, ` +
+      `median 4h RSI ${fmtNum(g.medianH4Rsi)}, pending ${g.pendingBars} bar(s))`,
+  );
+  for (const [asset, a] of Object.entries(r.assets)) {
+    const pending =
+      a.pendingRegime != null ? `  → ${a.pendingRegime} in ${a.pendingBars} bar(s) so far` : '';
+    console.log(
+      `   ${asset.padEnd(5, ' ')} ${a.effective.padEnd(14, ' ')}` +
+        `(own ${a.regime}, raw ${a.raw}${pending})`,
+    );
+    console.log(
+      `         range pos ${fmtNum(a.signals.rangePosition)}  ` +
+        `SMA50 ${fmtPrice(a.signals.sma50)}  EMA21(1d) ${fmtPrice(a.signals.ema21Daily)}  ` +
+        `RSI4h ${fmtNum(a.signals.rsi14H4)}  EMA21(4h) ${fmtPrice(a.signals.ema21H4)}`,
+    );
+  }
+}
+
 export function printMarketContext(ctx: MarketContext): void {
   console.log('='.repeat(72));
   console.log(`Market context  —  ${ctx.generatedAt}`);
@@ -62,6 +97,8 @@ export function printMarketContext(ctx: MarketContext): void {
     `Source: market=${ctx.source.marketData}  |  account=${ctx.source.account}`,
   );
   console.log('='.repeat(72));
+
+  printRegime(ctx);
 
   sectionHeader('Tradable (bot may allocate)');
   for (const p of ctx.market.tradable) printPair(p);
