@@ -195,7 +195,39 @@ const open = (over: Partial<PositionState> = {}): PositionState => ({
   });
   assert.equal(held[0]?.thesis, 'reclaim of the 50d', 'a hold does NOT let the model restate its thesis');
   assert.equal(held[0]?.thesisUpdatedAt, T2, 'and the stamp does not move either');
-  console.log('  ok: a thesis reaches the stored state on a real move, and is refused on a hold');
+
+  // AND `replace: true` does not buy its way past that. This is the case measured on
+  // probe P1: the model marked three untouched lines for replacement simply because it
+  // had reasoned about them. Reasoning about a position is not moving it, and an opt-in
+  // that the model takes by default is not an exception — it is the road back to 787
+  // reformulations of the same paragraph.
+  const forced = nextPositionStates({
+    assets: ['BTC'],
+    previous: new Map([['BTC', { ...opened[0]!, qty: dec('0.004') }]]),
+    portfolio: book,
+    priceOf: prices,
+    bookedLedger: [],
+    notes: [{ asset: 'BTC', thesis: 'REWRITTEN VIA REPLACE', invalidation: 'x', replace: true }],
+    now: T3,
+  });
+  assert.equal(forced[0]?.thesis, 'reclaim of the 50d', 'replace: true on an unmoved line is ignored');
+  assert.equal(forced[0]?.invalidation, 'daily close under 60k', 'its invalidation is untouched too');
+  assert.equal(forced[0]?.thesisUpdatedAt, T2, 'and the stamp still does not move');
+
+  // The two cases that DO write, with replace either way — the flag changes nothing.
+  for (const replace of [true, false]) {
+    const moved = nextPositionStates({
+      assets: ['BTC'],
+      previous: new Map([['BTC', { ...opened[0]!, qty: dec('0.004') }]]),
+      portfolio: book,
+      priceOf: prices,
+      bookedLedger: ledger, // the line MOVED this cycle
+      notes: [{ asset: 'BTC', thesis: `moved (replace=${replace})`, invalidation: 'y', replace }],
+      now: T3,
+    });
+    assert.equal(moved[0]?.thesis, `moved (replace=${replace})`, 'a line that moved always accepts its thesis');
+  }
+  console.log('  ok: a thesis is written only on a real move or a first thesis — replace: true buys nothing');
   passed += 1;
 }
 

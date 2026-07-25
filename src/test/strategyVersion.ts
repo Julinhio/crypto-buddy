@@ -134,13 +134,21 @@ let passed = 0;
   // WHEN a thesis may be rewritten is the code's call, not the model's. The failure
   // being corrected is 787 reformulations of one paragraph, and a model asked every
   // two hours to state its thinking WILL state it every two hours.
-  assert.equal(mayWriteThesis({ booked: true, hasStoredThesis: true, replace: false }), true, 'a real move rewrites it');
-  assert.equal(mayWriteThesis({ booked: false, hasStoredThesis: false, replace: false }), true, 'a first thesis is written');
-  assert.equal(mayWriteThesis({ booked: false, hasStoredThesis: true, replace: true }), true, 'an explicit replacement is honoured');
+  assert.equal(mayWriteThesis({ booked: true, hasStoredThesis: true }), true, 'a real move rewrites it');
+  assert.equal(mayWriteThesis({ booked: false, hasStoredThesis: false }), true, 'a first thesis is written');
   assert.equal(
-    mayWriteThesis({ booked: false, hasStoredThesis: true, replace: false }),
+    mayWriteThesis({ booked: false, hasStoredThesis: true }),
     false,
-    'a hold does NOT rewrite an existing thesis — the whole point',
+    'an untouched line that already has a thesis keeps it — the whole point',
+  );
+  // TWO cases, and no third. The mandate's "explicit replacement" is deliberately not
+  // honoured, and the predicate cannot even see the flag: it takes the two facts it is
+  // allowed to depend on and nothing else, so no future edit can quietly reopen the
+  // hatch by passing `replace` through. (The end-to-end refusal is pinned in
+  // src/test/lifecycle.ts.)
+  assert.ok(
+    !/replace/.test(mayWriteThesis.toString()),
+    'mayWriteThesis does not read the replace flag at all',
   );
   console.log('  ok: the thesis persists across a hold, and only the code decides when it may not');
   passed += 1;
@@ -182,6 +190,18 @@ let passed = 0;
   assert.ok(v5Text.includes('pullbackConsumed'), 'v5 names the down-move fact');
   assert.ok(v5Text.includes('bounceConsumed'), 'v5 names the up-move fact — the mirror, not just the live case');
   assert.ok(v5Text.includes('Do NOT sell into it'), 'reversal_down with the drop already paid is not a profit-take');
+  // Each regime reads ONE flag. Both are computed for every asset, so an asset at the
+  // bottom of its 4h range has pullbackConsumed true whatever its regime — and probe P2
+  // caught the model using it to conclude "the dip has already happened" about a
+  // reversal_up whose bounce had not started. The pairing has to be stated, not implied.
+  assert.ok(
+    v5Text.includes('EACH REGIME READS EXACTLY ONE OF THEM'),
+    'v5 forbids reading the flag that belongs to the opposite move',
+  );
+  assert.ok(
+    v5Text.includes('the thesis, the position is worth trading') || v5Text.includes('worth trading'),
+    'v5 ties rewriting a thesis to trading the line',
+  );
   assert.ok(v5Text.includes('Do NOT chase it'), 'reversal_up with the bounce already paid is not an entry');
   // And, as with the 25% rule, it must not claim an enforcement the code does not do.
   assert.ok(

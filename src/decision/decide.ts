@@ -18,7 +18,7 @@ import {
 } from './context.js';
 import { clampAllocation, type ClampResult } from '../risk/clamp.js';
 import { computeMovements, movementFloor, type Movement } from '../execution/movements.js';
-import { nextPositionStates } from '../portfolio/lifecycle.js';
+import { mayWriteThesis, nextPositionStates } from '../portfolio/lifecycle.js';
 import type { PositionNote } from './schema.js';
 import { loadPositionStates, savePositionStates } from '../persistence/positionState.js';
 import {
@@ -117,19 +117,47 @@ export async function decide(): Promise<DecideResult> {
     bookedLedger: LedgerEntry[],
     notes: PositionNote[] = [],
   ): Promise<void> => {
-    const written = await savePositionStates(
-      supabase,
-      nextPositionStates({
-        assets: tradableBaseAssets(config),
-        previous: stateRead.states,
-        portfolio: book,
-        priceOf,
-        bookedLedger,
-        notes,
-        now: context.generatedAt,
-      }),
-      context.generatedAt,
+    const states = nextPositionStates({
+      assets: tradableBaseAssets(config),
+      previous: stateRead.states,
+      portfolio: book,
+      priceOf,
+      bookedLedger,
+      notes,
+      now: context.generatedAt,
+    });
+
+    // Surface the theses the code REFUSED. They are dropped on purpose — only a line
+    // that moved, or one with no thesis yet, may have one written — but a silent drop
+    // would hide how often the model tries to restate a thesis it was not asked for.
+    // That frequency is the evidence for ever loosening the rule, so it is logged
+    // rather than swallowed.
+    //
+    // Derived from the RULE, not from the written timestamp. A full exit clears the
+    // thesis and its stamp by design, so a timestamp comparison would report a note on
+    // a line that just sold out as "refused on an unmoved line" — inflating the very
+    // metric this exists to measure. Reusing `mayWriteThesis` means the log and the
+    // rule cannot drift apart.
+    const bookedAssets = new Set(
+      bookedLedger.map((e) => e.symbol.split('/')[0]).filter((a): a is string => a != null),
     );
+    const refused = notes
+      .filter(
+        (n) =>
+          !mayWriteThesis({
+            booked: bookedAssets.has(n.asset),
+            hasStoredThesis: (stateRead.states.get(n.asset)?.thesis ?? '').trim() !== '',
+          }),
+      )
+      .map((n) => n.asset);
+    if (refused.length > 0) {
+      console.log(
+        `[thesis] ignored ${refused.length} proposed thesis/theses on unmoved lines (${refused.join(', ')}) — ` +
+          'a thesis is only recorded when the line moves, or when it has none yet.',
+      );
+    }
+
+    const written = await savePositionStates(supabase, states, context.generatedAt);
     // Not swallowed. savePositionStates already retried and dumped the payload; the
     // cycle carries on because the trade has happened and failing here would not undo
     // it — but a lost lifecycle write is a real, non-self-healing loss, not staleness.
