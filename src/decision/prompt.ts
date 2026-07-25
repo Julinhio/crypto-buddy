@@ -1,6 +1,8 @@
 import { config, tradableBaseAssets, type AppConfig } from '../config/index.js';
 import type { DecisionContext } from './context.js';
 import type { DecisionSummary } from '../persistence/decisions.js';
+import type { RegimeJournal } from '../market/regime.js';
+import type { MarketState } from './schema.js';
 
 /**
  * Bump this whenever the mandate below changes, so decisions stay traceable to
@@ -9,6 +11,24 @@ import type { DecisionSummary } from '../persistence/decisions.js';
  * states the per-asset caps explicitly; v4 adds the notification_summary field.
  */
 export const PROMPT_VERSION = 'v4';
+
+/**
+ * Projects the code's regime onto the legacy `market_state` column under v5, where the
+ * model no longer declares it.
+ *
+ * The column is NOT NULL for a decided row and its enum predates the per-asset
+ * regimes, so this is a compatibility projection, deliberately lossy: the real,
+ * auditable record is the `regime` column, which carries every asset's label and the
+ * signals behind it. Kept so the dashboard and 47 days of history stay comparable
+ * rather than splitting into a before and an after.
+ */
+export function marketStateFromRegime(regime: RegimeJournal | null): MarketState {
+  if (!regime) return 'range';
+  if (regime.global.riskOff) return 'risk_off';
+  const labels = Object.values(regime.assets).map((a) => a.regime);
+  const trending = labels.filter((l) => l === 'trend_up' || l === 'trend_down').length;
+  return trending * 2 > labels.length ? 'trend' : 'range';
+}
 
 /**
  * Frozen system prompt = the mandate + temperament + hard caps. Kept byte-stable

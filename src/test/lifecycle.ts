@@ -46,12 +46,12 @@ const open = (over: Partial<PositionState> = {}): PositionState => ({
 {
   // The peak RATCHETS: it follows a new high and ignores everything below it.
   const higher = nextPositionState({
-    asset: 'ETH', previous: open(), qty: dec(1), price: dec(1950), booked: null, now: T1,
+    asset: 'ETH', previous: open(), qty: dec(1), price: dec(1950), booked: null, note: null, now: T1,
   });
   assert.equal(higher.peakPriceSinceEntry?.toString(), '1950', 'a new high raises the peak');
 
   const lower = nextPositionState({
-    asset: 'ETH', previous: open(), qty: dec(1), price: dec(1500), booked: null, now: T1,
+    asset: 'ETH', previous: open(), qty: dec(1), price: dec(1500), booked: null, note: null, now: T1,
   });
   assert.equal(lower.peakPriceSinceEntry?.toString(), '1900', 'a lower price never lowers the peak');
   assert.equal(lower.entryDate, T0, 'and the entry date is untouched');
@@ -65,7 +65,7 @@ const open = (over: Partial<PositionState> = {}): PositionState => ({
   // wired to a valuation would read that as a 50% drawdown and fire a trailing exit.
   const reinforced = nextPositionState({
     asset: 'ETH', previous: open(), qty: dec(1.5), price: dec(1700),
-    booked: { side: 'buy', notional: dec(850) }, now: T1,
+    booked: { side: 'buy', notional: dec(850) }, note: null, now: T1,
   });
   assert.equal(reinforced.peakPriceSinceEntry?.toString(), '1900', 'a reinforcement does not reset the peak');
   assert.equal(reinforced.entryDate, T0, 'nor the entry date — the life did not restart');
@@ -73,7 +73,7 @@ const open = (over: Partial<PositionState> = {}): PositionState => ({
 
   const trimmed = nextPositionState({
     asset: 'ETH', previous: open(), qty: dec('0.5'), price: dec(1700),
-    booked: { side: 'sell', notional: dec(850) }, now: T1,
+    booked: { side: 'sell', notional: dec(850) }, note: null, now: T1,
   });
   assert.equal(trimmed.peakPriceSinceEntry?.toString(), '1900', 'a 50% trim does not reset the peak');
   assert.equal(trimmed.entryDate, T0, 'nor the entry date');
@@ -89,7 +89,7 @@ const open = (over: Partial<PositionState> = {}): PositionState => ({
   // any one of them behind is how the next entry inherits a previous life.
   const exited = nextPositionState({
     asset: 'ETH', previous: open(), qty: ZERO, price: dec(1700),
-    booked: { side: 'sell', notional: dec(1700) }, now: T2,
+    booked: { side: 'sell', notional: dec(1700) }, note: null, now: T2,
   });
   assert.equal(exited.entryDate, null, 'a full exit clears the entry date');
   assert.equal(exited.peakPriceSinceEntry, null, 'and the peak');
@@ -101,7 +101,7 @@ const open = (over: Partial<PositionState> = {}): PositionState => ({
   // And the RE-ENTRY starts clean: the new peak is today's price, not the old high.
   const reentered = nextPositionState({
     asset: 'ETH', previous: exited, qty: dec(1), price: dec(1650),
-    booked: { side: 'buy', notional: dec(1650) }, now: T3,
+    booked: { side: 'buy', notional: dec(1650) }, note: null, now: T3,
   });
   assert.equal(reentered.entryDate, T3, 'the re-entry sets a NEW entry date');
   assert.equal(reentered.peakPriceSinceEntry?.toString(), '1650', 'and a NEW peak — no previous life inherited');
@@ -114,14 +114,14 @@ const open = (over: Partial<PositionState> = {}): PositionState => ({
   // when a price is stale; doing that here would silently overwrite a high-water mark
   // with a cost basis.
   const stale = nextPositionState({
-    asset: 'ETH', previous: open(), qty: dec(1), price: null, booked: null, now: T1,
+    asset: 'ETH', previous: open(), qty: dec(1), price: null, booked: null, note: null, now: T1,
   });
   assert.equal(stale.peakPriceSinceEntry?.toString(), '1900', 'a stale price leaves the peak alone');
 
   // A brand-new position with no price yet has no peak — not a zero, which would be a
   // different and impossible claim.
   const priceless = nextPositionState({
-    asset: 'ETH', previous: null, qty: dec(1), price: null, booked: null, now: T1,
+    asset: 'ETH', previous: null, qty: dec(1), price: null, booked: null, note: null, now: T1,
   });
   assert.equal(priceless.peakPriceSinceEntry, null, 'no price yet means no peak, never zero');
   assert.equal(priceless.entryDate, T1);

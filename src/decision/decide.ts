@@ -1,4 +1,4 @@
-import { config, tradableBaseAssets } from '../config/index.js';
+import { config, tradableBaseAssets, STRATEGY_VERSION } from '../config/index.js';
 import { dec } from '../money.js';
 import { buildMarketContext, type MarketContext } from '../context/build.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
@@ -18,6 +18,7 @@ import {
 import { clampAllocation, type ClampResult } from '../risk/clamp.js';
 import { computeMovements, movementFloor, type Movement } from '../execution/movements.js';
 import { nextPositionStates } from '../portfolio/lifecycle.js';
+import type { PositionNote } from './schema.js';
 import { loadPositionStates, savePositionStates } from '../persistence/positionState.js';
 import {
   executeMovements,
@@ -26,7 +27,8 @@ import {
 } from '../execution/execute.js';
 import { publicMainnetClient, testnetAccountClient } from '../exchanges/binance.js';
 import { allocatableUniverse, reserveStables, validateDecision } from './schema.js';
-import { buildSystemPrompt, buildUserPrompt, PROMPT_VERSION } from './prompt.js';
+import { buildSystemPrompt, buildUserPrompt, marketStateFromRegime, PROMPT_VERSION } from './prompt.js';
+import { buildSystemPromptV5, buildUserPromptV5, PROMPT_V5_VERSION } from './promptV5.js';
 import { assertAnthropicConfigured, resolveModel, runDecision, type LlmResult } from './llm.js';
 import { getGitSha } from './gitSha.js';
 
@@ -109,7 +111,11 @@ export async function decide(): Promise<DecideResult> {
    * every position flat, or brand new, and wipe the entry dates, peaks and theses the
    * table exists to keep.
    */
-  const persistLifecycle = async (book: VirtualPortfolio, bookedLedger: LedgerEntry[]): Promise<void> => {
+  const persistLifecycle = async (
+    book: VirtualPortfolio,
+    bookedLedger: LedgerEntry[],
+    notes: PositionNote[] = [],
+  ): Promise<void> => {
     const written = await savePositionStates(
       supabase,
       nextPositionStates({
@@ -130,7 +136,7 @@ export async function decide(): Promise<DecideResult> {
     }
   };
   // The AI sees the virtual book, not the testnet balances.
-  const decisionContext = toDecisionContext(context, portfolio);
+  const decisionContext = toDecisionContext(context, portfolio, STRATEGY_VERSION, stateRead.states);
 
   // Edge case 0 — a lifecycle input could not be read. Skip the WHOLE cycle, not just
   // the state write.
@@ -176,19 +182,34 @@ export async function decide(): Promise<DecideResult> {
     supabase,
     config.decision.recentDecisionsToLoad,
   );
-  const systemPrompt = buildSystemPrompt();
-  const userPrompt = buildUserPrompt({
-    allocationAssets: assets,
-    reserveStable,
-    context: decisionContext,
-    recentDecisions,
-  });
+  // THE STRATEGY SWITCH. v4 is the mandate that produced 785 holds out of 787; v5 is
+  // Strategy V2. The absence of STRATEGY_VERSION resolves to v4, so the new behaviour
+  // can only be reached by an explicit, correctly-spelled opt-in — never by omission,
+  // and never by an environment that lost its variables.
+  const v5 = STRATEGY_VERSION === 'v5';
+  const systemPrompt = v5 ? buildSystemPromptV5() : buildSystemPrompt();
+  const userPrompt = v5
+    ? buildUserPromptV5({
+        allocationAssets: assets,
+        reserveStable,
+        context: decisionContext,
+        // The last SIGNIFICANT decision, not the last five wake-ups. v4 fed back five
+        // identical holds to a mandate demanding consistency with the past — an anchor
+        // that showed the bot its own immobility as if it were evidence.
+        lastSignificant: recentDecisions.find((d) => d.action_type !== 'hold') ?? null,
+      })
+    : buildUserPrompt({
+        allocationAssets: assets,
+        reserveStable,
+        context: decisionContext,
+        recentDecisions,
+      });
 
   // Edge case 2 — the LLM call itself fails.
   const llmStart = Date.now();
   let llm: LlmResult;
   try {
-    llm = await runDecision({ systemPrompt, userPrompt, assets });
+    llm = await runDecision({ systemPrompt, userPrompt, assets, strategy: STRATEGY_VERSION });
   } catch (err) {
     const latencyMs = Date.now() - llmStart;
     const message = err instanceof Error ? err.message : String(err);
@@ -206,7 +227,7 @@ export async function decide(): Promise<DecideResult> {
 
   // Edge case 3 — invalid response.
   const validation = llm.parsed
-    ? validateDecision(llm.parsed, assets, config)
+    ? validateDecision(llm.parsed, assets, config, STRATEGY_VERSION)
     : ({
         ok: false,
         error: llm.parseError ?? `no usable output (stop_reason=${llm.stopReason ?? 'unknown'})`,
@@ -240,7 +261,9 @@ export async function decide(): Promise<DecideResult> {
     action_type: v.actionType,
     what_changed: v.whatChanged,
     confidence: v.confidence,
-    market_state: v.marketState,
+    // Under v5 the model no longer declares it; the code projects its own regime onto
+    // this legacy column (the auditable record is the `regime` column).
+    market_state: v.marketState ?? marketStateFromRegime(context.regime),
     reasoning: v.reasoning,
     notification_summary: v.notificationSummary,
     requested_delay_minutes: v.requestedDelayMinutes,
@@ -304,7 +327,7 @@ export async function decide(): Promise<DecideResult> {
 
   // Written from the POST-trade book, so an entry, a reinforcement and a full exit all
   // land in the cycle that caused them.
-  await persistLifecycle(portfolioAfter, bookedLedger);
+  await persistLifecycle(portfolioAfter, bookedLedger, v.positionNotes);
 
   return {
     status: 'decided',
@@ -367,7 +390,7 @@ function makeRow(
     // must still leave its regime in the audit trail.
     regime,
     model: over.model ?? null,
-    prompt_version: PROMPT_VERSION,
+    prompt_version: STRATEGY_VERSION === 'v5' ? PROMPT_V5_VERSION : PROMPT_VERSION,
     git_sha: gitSha,
     raw_response: over.raw_response ?? null,
     latency_ms: over.latency_ms ?? null,

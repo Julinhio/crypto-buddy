@@ -254,6 +254,38 @@ export function schedulerSecondsEnv(name: string, fallback: number): number {
   return n;
 }
 
+/**
+ * Which STRATEGY the bot runs. `v4` is the mandate that produced 785 holds in 47 days;
+ * `v5` is the Strategy V2 mandate — regime playbooks, position lifecycle, franker moves.
+ */
+export type StrategyVersion = 'v4' | 'v5';
+
+/**
+ * Resolves `STRATEGY_VERSION`, and FAILS LOUD on anything it does not recognise.
+ *
+ * The whole safety property is that ABSENCE MEANS SAFE. There is nothing to set on
+ * Railway to stay on v4, so the dangerous mode requires an explicit opt-in and can
+ * never be reached by omission. If the platform ever loses its environment, the bot
+ * comes back on v4 — strictly better than a safety that depends on a variable having
+ * been set correctly.
+ *
+ * A PRESENT but unrecognised value is an error, never a silent fallback: a typo like
+ * `V5` or `v5 ` means someone INTENDED to change the strategy, and quietly running the
+ * old one would be the worst of both worlds — the operator believes v5 is live while
+ * v4 trades. Matching is exact after trimming, so `V5` fails loudly rather than
+ * activating the dangerous mode on a guess about what was meant.
+ */
+export function resolveStrategyVersion(raw: string | undefined = process.env.STRATEGY_VERSION): StrategyVersion {
+  if (raw == null || raw.trim() === '') return 'v4';
+  const value = raw.trim();
+  if (value === 'v4' || value === 'v5') return value;
+  throw new Error(
+    `Invalid STRATEGY_VERSION="${raw}": expected exactly "v4" or "v5" (case-sensitive), or UNSET for the ` +
+      'default "v4". A present-but-unrecognised value is refused rather than defaulted: it means someone ' +
+      'intended to change the strategy, and silently running the other one would be worse than not booting.',
+  );
+}
+
 export const config: AppConfig = {
   // Pairs the bot may take positions on (subject to the risk caps). Add a tradable
   // pair by appending one line AND giving it a cap in execution.caps.perAsset.
@@ -549,6 +581,13 @@ export function validateRegimeConfig(cfg: RegimeConfig): void {
 }
 
 validateRegimeConfig(config.regime);
+
+/**
+ * The strategy in force for this process, resolved ONCE at startup so a malformed
+ * value fails the boot rather than surfacing mid-cycle — and so the whole run cannot
+ * change strategy under its own feet.
+ */
+export const STRATEGY_VERSION: StrategyVersion = resolveStrategyVersion();
 
 /**
  * Fails fast on a bad daily-summary config. The timezone is validated by trying to
