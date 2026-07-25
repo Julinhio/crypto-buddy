@@ -1,4 +1,4 @@
-import { config } from '../config/index.js';
+import { config, tradableBaseAssets } from '../config/index.js';
 import { dec } from '../money.js';
 import { buildMarketContext, type MarketContext } from '../context/build.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
@@ -7,7 +7,7 @@ import {
   loadRecentDecisions,
   type DecisionRow,
 } from '../persistence/decisions.js';
-import { loadLedger } from '../persistence/executions.js';
+import { loadLedger, type LedgerEntry } from '../persistence/executions.js';
 import { loadStartingCapital } from '../persistence/startingCapital.js';
 import { derivePortfolio, type VirtualPortfolio } from '../portfolio/derive.js';
 import {
@@ -17,6 +17,8 @@ import {
 } from './context.js';
 import { clampAllocation, type ClampResult } from '../risk/clamp.js';
 import { computeMovements, movementFloor, type Movement } from '../execution/movements.js';
+import { nextPositionStates } from '../portfolio/lifecycle.js';
+import { loadPositionStates, savePositionStates } from '../persistence/positionState.js';
 import {
   executeMovements,
   emptyExecutionSummary,
@@ -75,7 +77,8 @@ export async function decide(): Promise<DecideResult> {
   // prices, so any held position falls back to avgCost (priceStale) — no crash.
   const reserveStable = reserveStables(config)[0] ?? 'USDT';
   const priceOf = buildPriceLookup(context, reserveStable);
-  const ledger = await loadLedger(supabase);
+  const ledgerRead = await loadLedger(supabase);
+  const ledger = ledgerRead.entries;
   // The sovereign starting capital now lives in the DB (bot_state) so the upcoming
   // reset utility can redefine it from the dashboard. Fall back to the env bootstrap
   // when the DB has no value yet (pre-migration / vierge base / unreachable): the
@@ -87,8 +90,73 @@ export async function decide(): Promise<DecideResult> {
     reserveAsset: reserveStable,
     priceOf,
   });
+  // Read the stored lifecycle state UP FRONT — it is an input to this cycle, not an
+  // output of it. Loading it here also means the early-return paths below can still
+  // ratchet the peak: the price moved whether or not the cycle reached a decision.
+  const stateRead = await loadPositionStates(supabase);
+
+  /**
+   * Writes the lifecycle state for this cycle. Called on EVERY path that got as far as
+   * a valued book — including a skipped, errored or unparseable cycle. The peak is a
+   * property of the MARKET, not of whether the model answered: letting a failed wake-up
+   * skip the ratchet would quietly lose highs, and the trailing logic built on top of
+   * it would then be reading a peak that never happened.
+   *
+   * Reaching it at all implies both inputs loaded: a cycle whose journal or stored
+   * state could not be read is skipped outright above, before the model is called and
+   * before anything can book. Both fall back to "empty" on a transient failure, and
+   * empty is indistinguishable from "holds nothing" — writing from either would mark
+   * every position flat, or brand new, and wipe the entry dates, peaks and theses the
+   * table exists to keep.
+   */
+  const persistLifecycle = async (book: VirtualPortfolio, bookedLedger: LedgerEntry[]): Promise<void> => {
+    const written = await savePositionStates(
+      supabase,
+      nextPositionStates({
+        assets: tradableBaseAssets(config),
+        previous: stateRead.states,
+        portfolio: book,
+        priceOf,
+        bookedLedger,
+        now: context.generatedAt,
+      }),
+      context.generatedAt,
+    );
+    // Not swallowed. savePositionStates already retried and dumped the payload; the
+    // cycle carries on because the trade has happened and failing here would not undo
+    // it — but a lost lifecycle write is a real, non-self-healing loss, not staleness.
+    if (!written && supabase) {
+      console.error('[CRITICAL] this cycle produced no position-state write — see the payload above.');
+    }
+  };
   // The AI sees the virtual book, not the testnet balances.
   const decisionContext = toDecisionContext(context, portfolio);
+
+  // Edge case 0 — a lifecycle input could not be read. Skip the WHOLE cycle, not just
+  // the state write.
+  //
+  // Skipping only the write is not enough, and the hole is narrow but real: a cycle
+  // that fully exits a line leaves the stored row open, and a re-entry before any
+  // later cycle writes the flat state would look continuous — inheriting the previous
+  // life's entry date, peak and thesis. Trading while unable to record what the trade
+  // did to the position is the same mistake as placing an order without a durable
+  // booking, which this codebase already refuses to do.
+  //
+  // It also closes a pre-existing hazard: a failed journal read makes `derivePortfolio`
+  // return a 100%-cash book that does not exist, and deciding on it could redeploy
+  // capital the bot already holds.
+  if (!ledgerRead.ok || !stateRead.ok) {
+    const which = !ledgerRead.ok ? 'the execution journal' : 'the stored position state';
+    const skipReason =
+      `${which} could not be read — refusing to trade on a book and a lifecycle we cannot ` +
+      'record the outcome of. Nothing is booked and no state is written; the next cycle retries.';
+    console.error(`[CRITICAL] Wake-up skipped: ${skipReason} The LLM was not called.`);
+    const row = makeRow(decisionContext, context.regime, gitSha, { status: 'skipped', skip_reason: skipReason });
+    const { persisted, id } = await insertDecision(supabase, row);
+    // Deliberately NO persistLifecycle here: writing from the fallback is the very
+    // thing being avoided.
+    return emptyResult('skipped', persisted, id, row, portfolio);
+  }
 
   // Edge case 1 — empty context: no tradable pair returned usable data. Never
   // let the AI decide on zero data.
@@ -98,6 +166,7 @@ export async function decide(): Promise<DecideResult> {
     console.error(`[CRITICAL] Wake-up skipped: ${skipReason}. The LLM was not called.`);
     const row = makeRow(decisionContext, context.regime, gitSha, { status: 'skipped', skip_reason: skipReason });
     const { persisted, id } = await insertDecision(supabase, row);
+    await persistLifecycle(portfolio, []);
     return emptyResult('skipped', persisted, id, row, portfolio);
   }
 
@@ -131,6 +200,7 @@ export async function decide(): Promise<DecideResult> {
       latency_ms: latencyMs,
     });
     const { persisted, id } = await insertDecision(supabase, row);
+    await persistLifecycle(portfolio, []);
     return emptyResult('error', persisted, id, row, portfolio);
   }
 
@@ -153,6 +223,7 @@ export async function decide(): Promise<DecideResult> {
       output_tokens: llm.outputTokens,
     });
     const { persisted, id } = await insertDecision(supabase, row);
+    await persistLifecycle(portfolio, []);
     return emptyResult('parse_failed', persisted, id, row, portfolio);
   }
 
@@ -230,6 +301,10 @@ export async function decide(): Promise<DecideResult> {
     bookedLedger.length > 0
       ? derivePortfolio([...ledger, ...bookedLedger], { startingCapital, reserveAsset: reserveStable, priceOf })
       : portfolio;
+
+  // Written from the POST-trade book, so an entry, a reinforcement and a full exit all
+  // land in the cycle that caused them.
+  await persistLifecycle(portfolioAfter, bookedLedger);
 
   return {
     status: 'decided',

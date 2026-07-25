@@ -107,8 +107,24 @@ function toPayload(r: ExecutionInsert): Record<string, unknown> {
  * Returns [] when Supabase is unavailable (portfolio falls back to 100% starting
  * cash), consistent with the cache layer.
  */
-export async function loadLedger(supabase: SupabaseClient | null): Promise<LedgerEntry[]> {
-  if (!supabase) return [];
+/**
+ * The journal plus whether it was READ SUCCESSFULLY.
+ *
+ * The distinction is load-bearing for anything that WRITES state. On a failed read
+ * the entries fall back to `[]` — which is indistinguishable from a genuinely empty
+ * journal, i.e. from "the bot holds nothing". A caller that only derives a view can
+ * live with that degraded value; a caller that would persist it must not, because
+ * writing "flat" over a real position destroys history that cannot be recovered.
+ */
+export interface LedgerRead {
+  ok: boolean;
+  entries: LedgerEntry[];
+}
+
+export async function loadLedger(supabase: SupabaseClient | null): Promise<LedgerRead> {
+  // No Supabase is a deliberate local-dev affordance, not a failure: there IS no
+  // journal, and an empty one is the truthful answer.
+  if (!supabase) return { ok: true, entries: [] };
 
   try {
     const { data, error } = await supabase
@@ -122,19 +138,23 @@ export async function loadLedger(supabase: SupabaseClient | null): Promise<Ledge
       .order('id', { ascending: true });
     if (error) throw new Error(error.message);
 
-    return (data ?? []).map((row) => ({
-      symbol: String(row.symbol),
-      side: row.side as ExecutionSide,
-      valuationPrice: fromNumeric(row.valuation_price as string),
-      baseDelta: fromNumeric(row.ledger_base_delta as string),
-      quoteDelta: fromNumeric(row.ledger_quote_delta as string),
-    }));
+    return {
+      ok: true,
+      entries: (data ?? []).map((row) => ({
+        symbol: String(row.symbol),
+        side: row.side as ExecutionSide,
+        valuationPrice: fromNumeric(row.valuation_price as string),
+        baseDelta: fromNumeric(row.ledger_base_delta as string),
+        quoteDelta: fromNumeric(row.ledger_quote_delta as string),
+      })),
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(
-      `[warn] could not load the execution journal (${msg}) — deriving portfolio from starting cash only.`,
+      `[warn] could not load the execution journal (${msg}) — deriving portfolio from starting cash only. ` +
+        'This read is marked FAILED so nothing persists lifecycle state from it.',
     );
-    return [];
+    return { ok: false, entries: [] };
   }
 }
 
