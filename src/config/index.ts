@@ -147,8 +147,10 @@ export interface DailySummaryConfig {
 export interface RegimeThresholds {
   /** Consecutive 4h bars a candidate label must hold before it replaces the active one. */
   confirmations: number;
-  /** Closed daily bars defining the structural range the position is measured in. */
+  /** Closed daily bars defining the STRUCTURAL range (mandate §1: distance to the month's extremes). */
   rangeWindowDays: number;
+  /** Closed 4h bars defining the TACTICAL range (mandate §2: position in the recent 4h range). */
+  h4RangeBars: number;
   /** 4h RSI at or above which 4h momentum counts as UP. */
   h4RsiUp: number;
   /** 4h RSI at or below which 4h momentum counts as DOWN. */
@@ -279,6 +281,9 @@ export const config: AppConfig = {
       // explicitly names.
       confirmations: 3,
       rangeWindowDays: 30,
+      // 42 × 4h = 7 days. The tactical range has to be short enough to say something
+      // the monthly range does not, and long enough not to be a single session.
+      h4RangeBars: 42,
       // 55/45 around the RSI midline: a deliberate dead band, so a directionless 4h
       // (RSI 45-55) produces neither an up nor a down momentum reading.
       h4RsiUp: 55,
@@ -475,6 +480,15 @@ export function validateRegimeConfig(cfg: RegimeConfig): void {
   }
   if (!(Number.isInteger(t.rangeWindowDays) && t.rangeWindowDays >= 2)) {
     problems.push(`rangeWindowDays must be an integer >= 2 (got ${t.rangeWindowDays})`);
+  }
+  if (!(Number.isInteger(t.h4RangeBars) && t.h4RangeBars >= 2)) {
+    problems.push(`h4RangeBars must be an integer >= 2 (got ${t.h4RangeBars})`);
+  }
+  if (t.h4RangeBars >= cfg.limit) {
+    problems.push(
+      `h4RangeBars (${t.h4RangeBars}) must stay below the fetched 4h window (${cfg.limit}), ` +
+        `else the tactical range spans the whole series and stops being "recent"`,
+    );
   }
   if (!(t.h4RsiDown < t.h4RsiUp)) {
     problems.push(

@@ -70,13 +70,22 @@ export interface AssetSignals {
   sma200: number | null;
   ema21Daily: number | null;
   rsi14Daily: number | null;
-  /** Extremes of the last `rangeWindowDays` CLOSED daily candles. */
+  /** Extremes of the last `rangeWindowDays` CLOSED daily candles — the STRUCTURAL range. */
   rangeHigh: number | null;
   rangeLow: number | null;
-  /** Where `close` sits in [rangeLow, rangeHigh], clamped to [0, 1]. */
+  /** Where `close` sits in the structural range, clamped to [0, 1]. */
   rangePosition: number | null;
   ema21H4: number | null;
   rsi14H4: number | null;
+  /** Extremes of the last `h4RangeBars` CLOSED 4h candles — the TACTICAL range. */
+  h4RangeHigh: number | null;
+  h4RangeLow: number | null;
+  /**
+   * Where `close` sits in the tactical range, clamped to [0, 1]. The third component
+   * of the 4h horizon the mandate names (§2: "RSI, EMA21, position dans le range 4h
+   * récent"), alongside `rsi14H4` and `ema21H4`.
+   */
+  h4RangePosition: number | null;
 }
 
 export interface AssetRegimePoint {
@@ -193,8 +202,15 @@ function h4Indicators(h4: Candle[]): H4Indicators {
  * including when the series is too short (never guess a direction from missing data).
  */
 export function classifyRaw(s: AssetSignals, th: RegimeThresholds): AssetRegime {
-  const { sma50, ema21Daily, rangePosition, ema21H4, rsi14H4 } = s;
-  if (sma50 == null || ema21Daily == null || rangePosition == null || ema21H4 == null || rsi14H4 == null) {
+  const { sma50, ema21Daily, rangePosition, ema21H4, rsi14H4, h4RangePosition } = s;
+  if (
+    sma50 == null ||
+    ema21Daily == null ||
+    rangePosition == null ||
+    ema21H4 == null ||
+    rsi14H4 == null ||
+    h4RangePosition == null
+  ) {
     return 'range';
   }
 
@@ -203,13 +219,22 @@ export function classifyRaw(s: AssetSignals, th: RegimeThresholds): AssetRegime 
   const h4Up = s.close > ema21H4 && rsi14H4 >= th.h4RsiUp;
   const h4Down = s.close < ema21H4 && rsi14H4 <= th.h4RsiDown;
 
+  // Position is read on BOTH horizons and they must agree. The monthly range says
+  // where the move sits structurally; the 4h range is the tactical component the
+  // mandate names (§2). Requiring both is what keeps `range` meaningful: an asset
+  // pushing the top of a 7-day range while stuck mid-month is a bounce inside a
+  // range, not a trend — and an asset high on the month but fading on the 4h has
+  // stopped trending. Either horizon alone would label far too much as a trend.
+  const highInRange = rangePosition >= th.highRangePosition && h4RangePosition >= th.highRangePosition;
+  const lowInRange = rangePosition <= th.lowRangePosition && h4RangePosition <= th.lowRangePosition;
+
   // 1-2. Turns — momentum against a structure that has not (yet) confirmed the move.
   if (h4Down && !structureDown) return 'reversal_down';
   if (h4Up && !structureUp) return 'reversal_up';
 
-  // 3-4. Established trends — structure and position in the range agree.
-  if (structureUp && rangePosition >= th.highRangePosition) return 'trend_up';
-  if (structureDown && rangePosition <= th.lowRangePosition) return 'trend_down';
+  // 3-4. Established trends — structure and position on both horizons agree.
+  if (structureUp && highInRange) return 'trend_up';
+  if (structureDown && lowInRange) return 'trend_down';
 
   return 'range';
 }
@@ -303,12 +328,27 @@ function signalsAt(
     }
   }
 
-  let rangePosition: number | null = null;
-  if (rangeHigh != null && rangeLow != null && rangeHigh > rangeLow) {
-    rangePosition = Math.min(1, Math.max(0, (close - rangeLow) / (rangeHigh - rangeLow)));
+  // The TACTICAL range: extremes of the last `h4RangeBars` CLOSED 4h candles, ending
+  // at this bar. Same causality rule as everything else — `h4` only ever contains
+  // closed bars by the time it reaches here (see regimeTimeline's grid).
+  let h4RangeHigh: number | null = null;
+  let h4RangeLow: number | null = null;
+  const h4From = Math.max(0, barIndex - th.h4RangeBars + 1);
+  for (let i = h4From; i <= barIndex; i += 1) {
+    const c = h4[i]!;
+    if (h4RangeHigh == null || c.high > h4RangeHigh) h4RangeHigh = c.high;
+    if (h4RangeLow == null || c.low < h4RangeLow) h4RangeLow = c.low;
   }
 
+  const positionIn = (low: number | null, high: number | null): number | null =>
+    low != null && high != null && high > low
+      ? Math.min(1, Math.max(0, (close - low) / (high - low)))
+      : null;
+
   return {
+    h4RangeHigh,
+    h4RangeLow,
+    h4RangePosition: positionIn(h4RangeLow, h4RangeHigh),
     close,
     sma50: dailyCursor >= 0 ? dailyInd.sma50[dailyCursor] ?? null : null,
     sma200: dailyCursor >= 0 ? dailyInd.sma200[dailyCursor] ?? null : null,
@@ -316,7 +356,7 @@ function signalsAt(
     rsi14Daily: dailyCursor >= 0 ? dailyInd.rsi14[dailyCursor] ?? null : null,
     rangeHigh,
     rangeLow,
-    rangePosition,
+    rangePosition: positionIn(rangeLow, rangeHigh),
     ema21H4: h4Ind.ema21[barIndex] ?? null,
     rsi14H4: h4Ind.rsi14[barIndex] ?? null,
   };

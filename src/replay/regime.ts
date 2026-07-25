@@ -150,7 +150,13 @@ function criterionEthClimb(points: RegimePoint[]): void {
  *
  * The reason the regime is per-asset at all. A single global label would reproduce
  * today's blindness in deterministic form.
+ *
+ * The bound is a SHARE of the window, not "at least one differing bar". A classifier
+ * that agreed on 99% of a month where ETH rose and BNB fell would satisfy a
+ * `differing > 0` test while being exactly the failure this criterion exists to
+ * catch — the criterion would then certify the very thing it was meant to reject.
  * ──────────────────────────────────────────────────────────────────────────── */
+const C2_MIN_DIVERGENCE_SHARE = 25;
 function criterionEthBnbDivergence(points: RegimePoint[]): void {
   const eth = closeSeries(points, 'ETH');
   const bnb = closeSeries(points, 'BNB');
@@ -182,10 +188,11 @@ function criterionEthBnbDivergence(points: RegimePoint[]): void {
   const ethRet = ((eth[best.j]! - eth[best.i]!) / eth[best.i]!) * 100;
   const bnbRet = ((bnb[best.j]! - bnb[best.i]!) / bnb[best.i]!) * 100;
 
+  const divergenceShare = (differing / slice.length) * 100;
   record(
     'C2',
     'ETH and BNB carry different labels while one rises and the other falls',
-    differing > 0,
+    divergenceShare >= C2_MIN_DIVERGENCE_SHARE,
     [
       `most divergent window: ${fmtBar(slice[0]!.timestamp)} → ${fmtBar(slice[slice.length - 1]!.timestamp)} ` +
         `(${slice.length} bars)`,
@@ -194,7 +201,7 @@ function criterionEthBnbDivergence(points: RegimePoint[]): void {
       `ETH regimes: ${distribution(ethLabels)}`,
       `BNB regimes: ${distribution(bnbLabels)}`,
       `bars where the two labels differ: ${differing}/${slice.length} ` +
-        `(${((differing / slice.length) * 100).toFixed(0)}%)`,
+        `(${divergenceShare.toFixed(0)}%, bound ≥ ${C2_MIN_DIVERGENCE_SHARE}%)`,
     ],
   );
 }

@@ -42,6 +42,9 @@ const neutral = (over: Partial<AssetSignals> = {}): AssetSignals => ({
   rangePosition: 0.5,
   ema21H4: 100,
   rsi14H4: 50,
+  h4RangeHigh: 110,
+  h4RangeLow: 90,
+  h4RangePosition: 0.5,
   ...over,
 });
 
@@ -50,12 +53,12 @@ const neutral = (over: Partial<AssetSignals> = {}): AssetSignals => ({
   assert.equal(classifyRaw(neutral(), th), 'range', 'a directionless bar is a range');
 
   assert.equal(
-    classifyRaw(neutral({ close: 115, sma50: 100, ema21Daily: 108, rangePosition: 0.9, ema21H4: 112, rsi14H4: 52 }), th),
+    classifyRaw(neutral({ close: 115, sma50: 100, ema21Daily: 108, rangePosition: 0.9, h4RangePosition: 0.9, ema21H4: 112, rsi14H4: 52 }), th),
     'trend_up',
     'confirmed up-structure, high in the range, no 4h flip → trend_up',
   );
   assert.equal(
-    classifyRaw(neutral({ close: 85, sma50: 100, ema21Daily: 92, rangePosition: 0.1, ema21H4: 87, rsi14H4: 48 }), th),
+    classifyRaw(neutral({ close: 85, sma50: 100, ema21Daily: 92, rangePosition: 0.1, h4RangePosition: 0.1, ema21H4: 87, rsi14H4: 48 }), th),
     'trend_down',
     'confirmed down-structure, low in the range → trend_down',
   );
@@ -80,7 +83,7 @@ const neutral = (over: Partial<AssetSignals> = {}): AssetSignals => ({
   // trend playbook could never have engaged. The structure is the fast/slow
   // relationship, so a still-falling SMA50 must NOT block a confirmed uptrend.
   const recovering = neutral({
-    close: 1876, sma50: 1752, ema21Daily: 1755, rangePosition: 0.95, ema21H4: 1817, rsi14H4: 54,
+    close: 1876, sma50: 1752, ema21Daily: 1755, rangePosition: 0.95, h4RangePosition: 0.92, ema21H4: 1817, rsi14H4: 54,
   });
   assert.equal(
     classifyRaw(recovering, th),
@@ -89,7 +92,7 @@ const neutral = (over: Partial<AssetSignals> = {}): AssetSignals => ({
   );
   // And the symmetric case: price back under a still-rising SMA50 is a real downtrend.
   const rolling = neutral({
-    close: 1600, sma50: 1750, ema21Daily: 1700, rangePosition: 0.08, ema21H4: 1650, rsi14H4: 47,
+    close: 1600, sma50: 1750, ema21Daily: 1700, rangePosition: 0.08, h4RangePosition: 0.05, ema21H4: 1650, rsi14H4: 47,
   });
   assert.equal(classifyRaw(rolling, th), 'trend_down', 'the symmetric down case holds too');
   console.log('  ok: a lagging SMA50 slope no longer masks a confirmed trend');
@@ -108,7 +111,7 @@ const neutral = (over: Partial<AssetSignals> = {}): AssetSignals => ({
   // And a trend with hot 4h momentum stays a trend — the reversal_up guard requires the
   // structure NOT to have confirmed, so a strong uptrend is not mislabelled a reversal.
   const stillTrending = neutral({
-    close: 118, sma50: 100, ema21Daily: 110, rangePosition: 0.95, ema21H4: 110, rsi14H4: 70,
+    close: 118, sma50: 100, ema21Daily: 110, rangePosition: 0.95, h4RangePosition: 0.9, ema21H4: 110, rsi14H4: 70,
   });
   assert.equal(classifyRaw(stillTrending, th), 'trend_up', 'a hot uptrend is not a reversal_up');
   console.log('  ok: reversals win over trends, but a confirmed trend is not mislabelled');
@@ -116,8 +119,32 @@ const neutral = (over: Partial<AssetSignals> = {}): AssetSignals => ({
 }
 
 {
+  // A trend needs BOTH horizons to agree on position. The mandate splits the read in
+  // two (§1 structure on the daily, §2 timing on the 4h), and a trend is precisely
+  // where they say the same thing. Either horizon alone would over-label: pushing the
+  // top of a 7-day range while stuck mid-month is a bounce inside a range, and sitting
+  // high on the month while fading on the 4h has stopped trending.
+  const monthlyOnly = neutral({
+    close: 115, sma50: 100, ema21Daily: 108, rangePosition: 0.9, h4RangePosition: 0.3, ema21H4: 112, rsi14H4: 52,
+  });
+  assert.equal(classifyRaw(monthlyOnly, th), 'range', 'high on the month but mid-4h is not a trend_up');
+
+  const tacticalOnly = neutral({
+    close: 115, sma50: 100, ema21Daily: 108, rangePosition: 0.45, h4RangePosition: 0.95, ema21H4: 112, rsi14H4: 52,
+  });
+  assert.equal(classifyRaw(tacticalOnly, th), 'range', 'topping a 7-day range mid-month is not a trend_up');
+
+  const downMonthlyOnly = neutral({
+    close: 85, sma50: 100, ema21Daily: 92, rangePosition: 0.1, h4RangePosition: 0.7, ema21H4: 87, rsi14H4: 48,
+  });
+  assert.equal(classifyRaw(downMonthlyOnly, th), 'range', 'the symmetric down case needs both horizons too');
+  console.log('  ok: a trend requires the daily and 4h range positions to agree');
+  passed += 1;
+}
+
+{
   // Missing data never invents a direction.
-  for (const missing of ['sma50', 'ema21Daily', 'rangePosition', 'ema21H4', 'rsi14H4'] as const) {
+  for (const missing of ['sma50', 'ema21Daily', 'rangePosition', 'h4RangePosition', 'ema21H4', 'rsi14H4'] as const) {
     const signals = neutral({ close: 200, [missing]: null });
     assert.equal(classifyRaw(signals, th), 'range', `a null ${missing} degrades to range`);
   }
