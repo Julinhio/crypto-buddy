@@ -56,21 +56,25 @@ export interface LifecycleInputs {
 }
 
 /**
- * May the model's thesis be written this cycle?
+ * May the model's thesis be written this cycle? TWO cases, and no third.
  *
- * The mandate allows exactly three cases: a significant decision on the line, a first
- * thesis where there was none, or an explicit replacement. Everything else keeps what
- * is stored — because the failure being corrected is 787 reformulations of the same
- * paragraph, and a model asked every two hours to describe its thinking WILL describe
- * it every two hours. The guarantee therefore lives in the code, not in the prompt:
- * the mandate asks, this function enforces.
+ * The line BOOKED a movement, or it has no thesis yet. That is all.
+ *
+ * The mandate also allows an "explicit replacement", and this deliberately does NOT
+ * honour it. The escape hatch was measured before being closed: on probe P1 the model
+ * set `replace: true` on three lines it had not touched, simply because it had
+ * REASONED about them. That is the most frequent situation there is — a cycle where
+ * one asset moves and the others are merely considered — so an opt-in replacement is
+ * not an exception, it is the default path back to 787 reformulations of the same
+ * paragraph wearing a different hat.
+ *
+ * The cost is real and worth stating: a thesis the model believes invalidated cannot
+ * be rewritten unless it also trades the line. That is the intended trade-off — a
+ * thesis is the durable commitment, not the running commentary, and `what_changed`
+ * and `reasoning` already carry the current thinking every cycle.
  */
-export function mayWriteThesis(params: {
-  booked: boolean;
-  hasStoredThesis: boolean;
-  replace: boolean;
-}): boolean {
-  return params.booked || !params.hasStoredThesis || params.replace;
+export function mayWriteThesis(params: { booked: boolean; hasStoredThesis: boolean }): boolean {
+  return params.booked || !params.hasStoredThesis;
 }
 
 const flat = (qty: Decimal): boolean => qty.lte(DUST);
@@ -134,13 +138,13 @@ export function nextPositionState(input: LifecycleInputs): PositionState {
     };
   }
 
-  // The thesis is the model's, but WHEN it may be rewritten is the code's call.
+  // The thesis is the model's, but WHEN it may be rewritten is the code's call. Note
+  // that `note.replace` is deliberately NOT consulted — see mayWriteThesis.
   const writeThesis =
     note != null &&
     mayWriteThesis({
       booked: booked != null,
       hasStoredThesis: (previous.thesis ?? '').trim() !== '',
-      replace: note.replace,
     });
 
   // 3. Still open — the peak only ever ratchets UP, and only on a real price. A stale

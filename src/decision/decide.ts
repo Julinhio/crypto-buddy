@@ -117,19 +117,33 @@ export async function decide(): Promise<DecideResult> {
     bookedLedger: LedgerEntry[],
     notes: PositionNote[] = [],
   ): Promise<void> => {
-    const written = await savePositionStates(
-      supabase,
-      nextPositionStates({
-        assets: tradableBaseAssets(config),
-        previous: stateRead.states,
-        portfolio: book,
-        priceOf,
-        bookedLedger,
-        notes,
-        now: context.generatedAt,
-      }),
-      context.generatedAt,
-    );
+    const states = nextPositionStates({
+      assets: tradableBaseAssets(config),
+      previous: stateRead.states,
+      portfolio: book,
+      priceOf,
+      bookedLedger,
+      notes,
+      now: context.generatedAt,
+    });
+
+    // Surface the theses the code REFUSED. They are dropped on purpose — only a line
+    // that moved, or one with no thesis yet, may have one written — but a silent drop
+    // would hide how often the model tries to restate a thesis it was not asked for.
+    // That frequency is the evidence for ever loosening the rule, so it is logged
+    // rather than swallowed.
+    const applied = new Map(states.map((s) => [s.asset, s.thesisUpdatedAt]));
+    const refused = notes
+      .map((n) => n.asset)
+      .filter((asset) => applied.get(asset) !== context.generatedAt);
+    if (refused.length > 0) {
+      console.log(
+        `[thesis] ignored ${refused.length} proposed thesis/theses on unmoved lines (${refused.join(', ')}) — ` +
+          'a thesis is only recorded when the line moves, or when it has none yet.',
+      );
+    }
+
+    const written = await savePositionStates(supabase, states, context.generatedAt);
     // Not swallowed. savePositionStates already retried and dumped the payload; the
     // cycle carries on because the trade has happened and failing here would not undo
     // it — but a lost lifecycle write is a real, non-self-healing loss, not staleness.
