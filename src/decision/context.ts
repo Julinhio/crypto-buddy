@@ -112,7 +112,12 @@ export function toDecisionContext(
   for (const [asset, state] of lifecycle) {
     if (state.entryDate == null) continue; // flat lines have no lifecycle to show
     const price = priced.get(asset) ?? null;
-    const peak = state.peakPriceSinceEntry;
+    // The stored peak is last cycle's. If the live price is ABOVE it, the ratchet has
+    // simply not run yet — it happens at the end of this cycle — and reporting the old
+    // one would hand the model a POSITIVE drawdown, which is not a thing. Show the peak
+    // the lifecycle is about to write.
+    const stored = state.peakPriceSinceEntry;
+    const peak = stored == null ? price : price == null ? stored : Decimal.max(stored, price);
     positions.push({
       asset,
       entryDate: state.entryDate,

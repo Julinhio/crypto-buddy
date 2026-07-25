@@ -96,19 +96,25 @@ export async function loadRecentDecisions(
 }
 
 /**
- * The most recent decision that ACTUALLY DID something — the newest `decided` row whose
- * action_type is not `hold`.
+ * The most recent decision that ACTUALLY MOVED THE BOOK — the newest `decided` row with
+ * at least one BOOKED intent behind it.
  *
- * A dedicated query rather than a filter over `loadRecentDecisions`, and the difference
- * is the whole point of the v5 memory. That loader returns the last N rows (5) and only
- * then would a caller filter them; five ordinary holds are enough to push the real
- * decision out of the window, and the model would be told "no significant decision on
- * record" precisely in the steady state the V2 is meant to fix. The bot averaged 785
- * holds in 47 days, so "more than five holds in a row" is not an edge case here — it is
- * the normal condition.
+ * Significance is derived from the LEDGER, not from `action_type`. That field is a
+ * label the model chooses, and on this bot the two disagree constantly: the three most
+ * recent cycles that actually booked a trade are all labelled `hold`. Filtering on
+ * `action_type != 'hold'` would have excluded every one of them while happily
+ * accepting a `rebalance` whose movements were all suppressed by the 2% floor — the
+ * memory would then describe decisions that did nothing and omit the ones that did.
+ * The booked intent is the fact; the label is an opinion.
  *
- * Returns null when persistence is unreachable or nothing significant has happened yet;
- * both mean "no memory to offer", which the prompt states plainly.
+ * A dedicated query rather than a filter over `loadRecentDecisions`, too: that loader
+ * returns the last 5 rows and only then could a caller filter them, so five ordinary
+ * holds would bury the real decision. The bot averaged 785 holds in 47 days, which
+ * makes "more than five holds in a row" the normal condition, not an edge case — the
+ * v5 memory would have vanished in exactly the steady state it exists for.
+ *
+ * Returns null when persistence is unreachable or nothing has booked yet; both mean
+ * "no memory to offer", which the prompt states plainly.
  */
 export async function loadLastSignificantDecision(
   supabase: SupabaseClient | null,
@@ -118,14 +124,22 @@ export async function loadLastSignificantDecision(
     const { data, error } = await supabase
       .from(TABLE)
       .select(
-        'created_at, action_type, target_allocation, applied_allocation, clamped, clamp_reason, confidence, market_state, what_changed, reasoning',
+        'created_at, action_type, target_allocation, applied_allocation, clamped, clamp_reason, ' +
+          'confidence, market_state, what_changed, reasoning, executions!inner(id)',
       )
       .eq('status', 'decided')
-      .neq('action_type', 'hold')
+      // An INNER join on a booked intent: only a decision the ledger actually recorded
+      // a movement for can qualify.
+      .eq('executions.event_type', 'intent')
+      .eq('executions.validation_status', 'executed')
       .order('created_at', { ascending: false })
       .limit(1);
     if (error) throw new Error(error.message);
-    return ((data ?? [])[0] as DecisionSummary | undefined) ?? null;
+    const row = (data ?? [])[0] as (DecisionSummary & { executions?: unknown }) | undefined;
+    if (!row) return null;
+    // Drop the join artefact — the prompt gets a decision, not a query result.
+    const { executions: _joined, ...summary } = row;
+    return summary as DecisionSummary;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[warn] could not load the last significant decision (${msg}) — proceeding without it.`);

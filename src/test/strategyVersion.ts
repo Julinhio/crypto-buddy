@@ -151,6 +151,15 @@ let passed = 0;
   assert.ok(v5Text.includes('not the default posture'), 'v5 says instead that it is not the default posture');
 
   assert.ok(v5Text.includes('25% of the position'), 'v5 states the double size condition');
+  // And it must be HONEST about which half the code actually enforces. Only the
+  // 2%-of-capital floor is checked in code; the 25%-of-the-position condition is the
+  // model's to apply. A mandate that claims a guarantee the code does not provide
+  // teaches the model that a nibble it proposes will be caught — and it will not.
+  assert.ok(v5Text.includes('is HARD'), 'v5 names the hard, code-enforced floor');
+  assert.ok(
+    v5Text.includes('is YOURS to apply. The code does not check it'),
+    'v5 says plainly that the 25% condition is not code-enforced',
+  );
   assert.ok(v5Text.includes('5 to 10 POINTS'), 'v5 states the mobile tactical target');
   assert.ok(v5Text.includes('FULL EXIT of a position is always allowed'), 'v5 keeps the full-exit exemption');
   assert.ok(v5Text.includes('You do NOT output market_state'), 'v5 takes the regime away from the model');
