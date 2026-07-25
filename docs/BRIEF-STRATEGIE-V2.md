@@ -42,9 +42,22 @@ Railway est branché sur le repo en mode Cron Schedule. **Chaque merge sur `main
 
 Le séquencement rend les PR 1 à 3 inoffensives au merge : shadow mode, moins d'ordres inutiles, écriture d'état. La PR 4 changerait le comportement de trading au moment du merge, ce qui n'est pas acceptable dans un run non surveillé.
 
-**Donc : le prompt v5 et les playbooks arrivent derrière une variable d'environnement `STRATEGY_VERSION`, qui vaut `v4` par défaut et reste sur `v4` en production Railway à la fin du goal.** Le code livre la capacité et la prouve, Julien bascule sur `v5` quand il le décide. Merge et activation deviennent deux événements distincts.
+**Donc : le prompt v5 et les playbooks arrivent derrière une variable d'environnement `STRATEGY_VERSION`.** Son **absence vaut `v4`**, donc il n'y a rien à poser sur Railway pour rester en sécurité, et la variable ne doit PAS être créée par ce chantier. Le code livre la capacité et la prouve, Julien pose `v5` lui-même le jour où il décide d'activer. Merge et activation deviennent deux événements distincts.
 
-Un `STRATEGY_VERSION` inconnu ou mal formé doit faire échouer le démarrage bruyamment, pas retomber sur un défaut silencieux.
+Un `STRATEGY_VERSION` présent mais inconnu ou mal formé doit faire échouer le démarrage bruyamment, pas retomber silencieusement sur un défaut.
+
+**Raison de ce choix, indépendante de tout accès** : le mode dangereux exige un opt-in explicite, et l'absence de configuration veut dire mode sûr. Si Railway perd ses variables un jour, le bot reste en `v4`. C'est strictement meilleur qu'une sécurité qui dépend d'une variable posée correctement.
+
+**Classe de test exhaustive à couvrir**, plutôt que des cas au coup par coup :
+
+| Valeur de `STRATEGY_VERSION` | Comportement attendu |
+|---|---|
+| absente | `v4` |
+| `v4` | `v4` |
+| `v5` | `v5` |
+| toute autre valeur présente | échec bruyant au démarrage |
+
+**Railway est en LECTURE SEULE pour ce chantier.** Le CLI est installé sur la machine, donc l'environnement est inspectable, et une vérification en lecture est bienvenue. Mais **ne jamais créer ni modifier `STRATEGY_VERSION`**, ni aucune autre variable. Une variable absente n'est pas un oubli à réparer, c'est la configuration voulue. L'activation de `v5` est une décision de Julien, pas une étape de ce chantier.
 
 ---
 
@@ -84,9 +97,16 @@ Tout mouvement planifié sous **2% du capital** est écarté avant d'atteindre l
 ### Preuves attendues
 
 - le harness de la PR 1 rejoué, montrant qu'aucun mouvement sous 2% du capital n'atteindrait le journal d'exécution
-- une requête Supabase sur les cycles postérieurs au merge montrant zéro intent rejeté pour cause de notional sous le minimum
+- une requête Supabase sur les cycles postérieurs au merge montrant **zéro intent rejeté pour taille insuffisante, les DEUX familles incluses** : `notional < minNotional` et `quantity snapped to zero at the lot step`
 
-Repère de départ, pour mesurer l'effet : environ 3128 intents rejetés sur 3143 générés avant ce changement.
+Repère de départ, pour mesurer l'effet : environ 3128 intents rejetés sur 3143 générés avant ce changement. La répartition compte, parce qu'un critère qui ne viserait que le notional laisserait passer la plus grosse famille :
+
+| Motif de rejet | Volume approximatif |
+|---|---|
+| `quantity snapped to zero at the lot step` | environ 800 |
+| `notional < minNotional` | le reste |
+
+Un plancher à 2% du capital, soit environ 20 dollars, tue bien les deux familles : le lot step le plus grossier des quatre actifs vaut moins d'un dollar, donc 20 dollars ne s'écrase jamais à zéro.
 
 ---
 
@@ -173,7 +193,7 @@ Un goal qui se bloque en plein milieu pour réclamer une clé, c'est un goal per
 
 **Anthropic API** : requise pour les probes de la PR 4. Clé déjà dans le `.env` local.
 
-**Railway** : variables d'environnement. `STRATEGY_VERSION` à poser à `v4` en production dès la PR 4.
+**Railway** : le CLI est installé sur la machine, donc l'environnement est inspectable. **Lecture seule.** Ne jamais créer ni modifier `STRATEGY_VERSION` ni aucune autre variable. Une variable absente est la configuration voulue, pas un oubli à réparer.
 
 **Identifiants et secrets** : jamais dans ce fichier, il part dans git. Ils vont dans le chat Claude Code.
 
@@ -200,11 +220,11 @@ Terminé quand tout ce qui suit est vrai et prouvé dans la conversation :
 
 1. Les 4 PR sont mergées sur `main`, dans l'ordre, chacune après une review Codex propre.
 2. La sortie du harness de replay régime est collée et remplit les critères de la PR 1.
-3. Le replay rejoué prouve qu'aucun mouvement sous 2% du capital n'atteint le journal, et une requête Supabase le confirme sur les cycles postérieurs au merge de la PR 2.
+3. Le replay rejoué prouve qu'aucun mouvement sous 2% du capital n'atteint le journal, et une requête Supabase sur les cycles postérieurs au merge de la PR 2 montre zéro intent rejeté pour taille insuffisante, les deux familles incluses : `notional < minNotional` et `quantity snapped to zero at the lot step`.
 4. Une requête Supabase montre les 4 lignes d'état de position, avec un `peak_price_since_entry` backfillé dynamiquement et cohérent avec l'historique.
 5. Les 6 sorties de probes comportementales sont collées, avec le verdict pour chacune.
 6. Le bot tourne sur testnet, heartbeat de moins de 10 minutes, zéro échec consécutif.
-7. `STRATEGY_VERSION` vaut `v4` en production Railway. Le nouveau comportement est livré et prouvé, pas activé.
+7. La classe de test `STRATEGY_VERSION` est couverte et verte : absente vaut `v4`, `v4` vaut `v4`, `v5` vaut `v5`, toute autre valeur présente fait échouer le démarrage bruyamment. Plus une requête Supabase montrant qu'un cycle live postérieur au merge de la PR 4 a bien journalisé `v4`. Aucune variable Railway créée ni modifiée pendant le goal, aucune activation de `v5`.
 8. Aucune donnée de trading synthétique dans la base vivante.
 
 **Ou arrêt après environ 50 tours** si la condition ne converge pas.
