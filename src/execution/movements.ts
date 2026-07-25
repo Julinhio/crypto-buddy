@@ -34,7 +34,28 @@ export function movementFloor(equity: Decimal, minMovementPercent: number): Deci
   return equity.times(minMovementPercent).div(100);
 }
 
-/** Whether a movement is too small to be worth sending. Full exits are never too small. */
+/**
+ * Whether a movement is too small to be worth sending. Full exits are never too small.
+ *
+ * ACCEPTED RESIDUAL, measured rather than assumed. The floor is a DEAD BAND around the
+ * target allocation, and it applies to the cash side too: if the book has drifted a
+ * little under its reserve, the small sells that would restore it are suppressed until
+ * the correction is worth making. In the worst arrangement — the deficit split evenly
+ * across every asset — the book could in principle sit up to (assets × floor) under
+ * target before any leg clears the floor.
+ *
+ * It is kept unconditional anyway, because every alternative trades one mandate rail
+ * for another: forcing sub-floor sells through re-creates the very crumbs this floor
+ * deletes (a $2.50 sell is refused by the venue, not by us), and aggregating the
+ * correction onto one asset bends the bounded allocation, which is the contract with
+ * the executor. The mandate states the floor with a single exception — the full exit —
+ * and explicitly warns against "fixing" its side effects later.
+ *
+ * So the residual is bounded and monitored instead: replayed over the 789 observed
+ * cycles, the floor costs 0.10 points of post-trade cash in the worst case (32.44% →
+ * 32.34%) and never once takes the book under the sacred 30%. Criterion S5 of
+ * `npm run replay:sizing` fails loudly the day that stops being true.
+ */
 export function isBelowFloor(notional: Decimal, floor: Decimal, fullExit: boolean): boolean {
   return !fullExit && notional.lt(floor);
 }

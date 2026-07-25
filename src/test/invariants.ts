@@ -813,4 +813,36 @@ console.log('\nDaily summary — local-time trigger, variation fallbacks, French
   passed += 1;
 }
 
+{
+  // THE DEAD BAND, pinned. The floor suppresses small corrections in BOTH directions,
+  // including the one that tops the cash reserve back up. This is the composition the
+  // floor's own guard-rail cannot fix without re-creating the crumbs it deletes, so it
+  // is documented here as intended behavior with a measured bound (see isBelowFloor),
+  // not left as an accident for someone to rediscover.
+  const prices: PriceLookup = (a) =>
+    a === 'BTC' ? dec(50000) : a === 'ETH' ? dec(3000) : a === 'USDT' ? dec(1) : null;
+  // $1000 equity, cash at 29% — just under the sacred 30% — with the deficit spread
+  // evenly over two positions, so each correction is a $5 sell against a $20 floor.
+  const ledger: LedgerEntry[] = [
+    entry('BTC/USDT', 0.00710, -355, 50000),
+    entry('ETH/USDT', 0.11833, -355, 3000),
+  ];
+  const book = derivePortfolio(ledger, { startingCapital: dec(1000), reserveAsset: 'USDT', priceOf: prices });
+  const floorPct = config.execution.minMovementPercent;
+
+  const suppressed = computeMovements(book, { BTC: 34.5, ETH: 34.5, USDT: 31 }, prices, 0.1, floorPct);
+  assert.deepEqual(suppressed, [], 'a sub-floor reserve top-up is suppressed — the dead band, by design');
+
+  // The band is self-limiting: let the deficit grow and the correction clears the floor
+  // on its own. Nothing is permanently stuck, which is what makes the residual bounded.
+  const corrected = computeMovements(book, { BTC: 25, ETH: 25, USDT: 50 }, prices, 0.1, floorPct);
+  assert.ok(corrected.length > 0, 'a deficit large enough to matter is corrected normally');
+  assert.ok(
+    corrected.every((m) => m.side === 'sell' && m.notional.gte(movementFloor(book.equity, floorPct))),
+    'and every correction it makes is at or above the floor',
+  );
+  console.log('  ok: the floor is a symmetric dead band, self-limiting, and never traps a real correction');
+  passed += 1;
+}
+
 console.log(`\n${passed} invariant checks passed.`);

@@ -147,6 +147,9 @@ interface CycleOutcome {
   /** Movements that would actually be booked and sent. */
   booked: Array<{ movement: Movement; notional: Decimal }>;
   blocked: number;
+  /** Cash as a percent of equity AFTER this cycle's bookings, and the target it aimed at. */
+  cashPercentAfter: Decimal;
+  targetCashPercent: Decimal;
 }
 
 function runCycle(
@@ -175,15 +178,43 @@ function runCycle(
   });
   const plan = planMovements(resolvable, { rulesOf, cash: book.cash, targetReserve, feePercent, floor });
 
-  const outcome: CycleOutcome = { produced: movements.length, crumbs: [], droppedByFloor: 0, booked: [], blocked: 0 };
+  const outcome: CycleOutcome = {
+    produced: movements.length,
+    crumbs: [],
+    droppedByFloor: 0,
+    booked: [],
+    blocked: 0,
+    cashPercentAfter: ZERO,
+    targetCashPercent: dec(cycle.applied_allocation[reserve] ?? 0),
+  };
+
+  // Replay the bookings on the book, exactly as the ledger would: a sell adds
+  // (notional − fee) to cash, a buy removes (notional + fee).
+  const feeRate = dec(feePercent).div(100);
+  let cashAfter = book.cash;
+  let deployedAfter = book.equity.minus(book.cash);
+
   for (const p of plan) {
     const notional = p.snappedQty.times(p.movement.price);
     const verdict: PlanVerdict = p.verdict;
     if (verdict.kind === 'below_floor') outcome.droppedByFloor += 1;
     else if (verdict.kind === 'crumb') outcome.crumbs.push({ family: crumbFamily(verdict.reason), notional });
     else if (verdict.kind === 'block') outcome.blocked += 1;
-    else outcome.booked.push({ movement: p.movement, notional });
+    else {
+      outcome.booked.push({ movement: p.movement, notional });
+      const fee = notional.times(feeRate);
+      if (p.movement.side === 'sell') {
+        cashAfter = cashAfter.plus(notional.minus(fee));
+        deployedAfter = deployedAfter.minus(notional);
+      } else {
+        cashAfter = cashAfter.minus(notional.plus(fee));
+        deployedAfter = deployedAfter.plus(notional);
+      }
+    }
   }
+
+  const equityAfter = cashAfter.plus(deployedAfter);
+  outcome.cashPercentAfter = equityAfter.gt(0) ? cashAfter.div(equityAfter).times(100) : ZERO;
   return outcome;
 }
 
@@ -205,6 +236,14 @@ interface Totals {
   blocked: number;
   /** Booked movements strictly under the floor of their own cycle. */
   underFloorReachingJournal: Array<{ at: string; symbol: string; notional: string; floor: string }>;
+  /**
+   * Cycles whose POST-trade cash would sit below the sacred reserve because the floor
+   * suppressed the sells that would have restored it. The floor introduces a dead band
+   * around the target allocation, and this measures whether that band can eat into the
+   * one guard-rail no PR of this chantier is allowed to move.
+   */
+  reserveShortfalls: Array<{ at: string; cashPercent: string; targetPercent: string; deficit: string }>;
+  worstCashPercent: number;
 }
 
 function tally(
@@ -221,10 +260,23 @@ function tally(
     booked: 0,
     blocked: 0,
     underFloorReachingJournal: [],
+    reserveShortfalls: [],
+    worstCashPercent: Number.POSITIVE_INFINITY,
   };
+  const sacred = config.execution.caps.minCashPercent;
   for (const cycle of cycles) {
     const out = runCycle(cycle, rulesOf, minMovementPercent);
     t.produced += out.produced;
+    const cashAfter = out.cashPercentAfter.toNumber();
+    if (cashAfter < t.worstCashPercent) t.worstCashPercent = cashAfter;
+    if (cashAfter < sacred - 1e-9) {
+      t.reserveShortfalls.push({
+        at: cycle.created_at,
+        cashPercent: out.cashPercentAfter.toFixed(2),
+        targetPercent: out.targetCashPercent.toFixed(2),
+        deficit: (sacred - cashAfter).toFixed(2),
+      });
+    }
     const floor = movementFloor(dec(cycle.market_context.account.portfolio.equity), config.execution.minMovementPercent);
     for (const c of out.crumbs) {
       t.crumbs += 1;
@@ -411,6 +463,27 @@ async function main(): Promise<number> {
         `fullExit=${exits[0]?.fullExit ?? 'n/a'}`,
       `partial trim of the same line produced: ${trims.length} movement(s)`,
       'the two conditions crossing on a small line is the mandate\'s stated intent, not a regression to fix later.',
+    ],
+  );
+
+  /* S5 — the floor must not eat into the one guard-rail this chantier may not move.
+   *
+   * The floor is a DEAD BAND around the target allocation: a correction smaller than
+   * 2% of equity is not made. Applied to the cash side, that means a book that has
+   * drifted slightly under its reserve can stay there until the correction is worth
+   * making. Rail #1 of the brief is that the 30% cash floor does not move, so this is
+   * measured on the real cycles rather than argued about. */
+  record(
+    'S5',
+    'the floor never leaves the post-trade book under the sacred cash reserve',
+    after.reserveShortfalls.length === 0,
+    [
+      `sacred floor: ${config.execution.caps.minCashPercent}% of equity`,
+      `worst post-trade cash across ${after.cycles} cycles — WITHOUT the movement floor: ` +
+        `${before.worstCashPercent.toFixed(2)}%  ·  WITH it: ${after.worstCashPercent.toFixed(2)}%`,
+      `cycles ending under the sacred floor: ${before.reserveShortfalls.length} without it, ` +
+        `${after.reserveShortfalls.length} with it`,
+      ...after.reserveShortfalls.slice(0, 5).map((s) => `  ${s.at}: cash ${s.cashPercent}% (deficit ${s.deficit} pts)`),
     ],
   );
 
