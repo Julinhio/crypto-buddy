@@ -42,6 +42,13 @@ export interface DecisionRow {
   requested_delay_minutes: number | null;
   applied_delay_minutes: number | null;
   market_context: unknown;
+  /**
+   * The CODE's regime read for this cycle (migration 0016) — per-asset regime after
+   * hysteresis, raw label, global risk_off posture and their signals. Null when the
+   * 4h series was unavailable (a missing regime is journaled as such, never fatal).
+   * Shadow mode at PR 1: written, never shown to the model.
+   */
+  regime: unknown;
   model: string | null;
   prompt_version: string;
   git_sha: string | null;

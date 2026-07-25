@@ -96,7 +96,7 @@ export async function decide(): Promise<DecideResult> {
     const skipReason =
       'no tradable pairs returned usable market data — refusing to decide on an empty universe';
     console.error(`[CRITICAL] Wake-up skipped: ${skipReason}. The LLM was not called.`);
-    const row = makeRow(decisionContext, gitSha, { status: 'skipped', skip_reason: skipReason });
+    const row = makeRow(decisionContext, context.regime, gitSha, { status: 'skipped', skip_reason: skipReason });
     const { persisted, id } = await insertDecision(supabase, row);
     return emptyResult('skipped', persisted, id, row, portfolio);
   }
@@ -124,7 +124,7 @@ export async function decide(): Promise<DecideResult> {
     const latencyMs = Date.now() - llmStart;
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[ERROR] LLM call failed (${message}) — recording status=error; no decision.`);
-    const row = makeRow(decisionContext, gitSha, {
+    const row = makeRow(decisionContext, context.regime, gitSha, {
       status: 'error',
       model: resolveModel(),
       raw_response: message,
@@ -144,7 +144,7 @@ export async function decide(): Promise<DecideResult> {
 
   if (!validation.ok) {
     console.error(`[ERROR] parse_failed: ${validation.error}. Raw response stored; no decision.`);
-    const row = makeRow(decisionContext, gitSha, {
+    const row = makeRow(decisionContext, context.regime, gitSha, {
       status: 'parse_failed',
       model: llm.model,
       raw_response: llm.rawResponse,
@@ -160,7 +160,7 @@ export async function decide(): Promise<DecideResult> {
   const v = validation.value;
   const clamp = clampAllocation(v.targetAllocation, reserveStable, config);
 
-  const row = makeRow(decisionContext, gitSha, {
+  const row = makeRow(decisionContext, context.regime, gitSha, {
     status: 'decided',
     target_allocation: v.targetAllocation,
     applied_allocation: clamp.applied,
@@ -263,6 +263,7 @@ function emptyResult(
 /** Builds a full decision row, defaulting every optional field to null. */
 function makeRow(
   marketContext: unknown,
+  regime: unknown,
   gitSha: string | null,
   over: Partial<DecisionRow> & { status: DecisionRow['status'] },
 ): DecisionRow {
@@ -282,6 +283,10 @@ function makeRow(
     requested_delay_minutes: over.requested_delay_minutes ?? null,
     applied_delay_minutes: over.applied_delay_minutes ?? null,
     market_context: marketContext,
+    // Journaled on EVERY row (decided, skipped, parse_failed, error): the regime is a
+    // reading of the market, not of the decision, so a cycle that failed downstream
+    // must still leave its regime in the audit trail.
+    regime,
     model: over.model ?? null,
     prompt_version: PROMPT_VERSION,
     git_sha: gitSha,

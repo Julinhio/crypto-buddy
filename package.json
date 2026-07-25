@@ -10,8 +10,9 @@
     "beat": "tsx src/beat.ts",
     "notify:test": "tsx src/alerting/sendTestMessage.ts",
     "alerting:debounce-check": "tsx src/alerting/debounceProof.ts",
+    "replay:regime": "tsx src/replay/regime.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/test/invariants.ts && tsx src/test/scheduler.ts"
+    "test": "tsx src/test/invariants.ts && tsx src/test/scheduler.ts && tsx src/test/regime.ts"
   },
   "engines": {
     "node": ">=22"
