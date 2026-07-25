@@ -340,49 +340,101 @@ function criterionHysteresis(points: RegimePoint[]): void {
 /* ────────────────────────────────────────────────────────────────────────────
  * C5 — the replay reproduces production, it does not approximate it.
  *
- * Production only ever holds `config.regime.limit` 4h candles; the harness walks a
- * much longer series. The hysteresis walk must converge to the same state either way,
- * otherwise every number above would describe a calculator the bot does not run. So
- * we recompute the final point from a production-sized slice and require an exact
- * match — the criterion that makes the other four mean anything.
+ * This is the criterion that makes the other four mean anything. C1-C4 are computed
+ * on `points`, a timeline walked over a long series; the live bot only ever holds
+ * `config.regime.limit` 4h candles and recomputes EMA/RSI and the hysteresis from
+ * that rolling, truncated window. If the two ever disagreed, C1-C4 would be
+ * describing regimes the bot never produced.
+ *
+ * So the check is done at EVERY replayed bar, not just the last one. A single
+ * end-of-window comparison would be satisfied by a timeline that diverged early and
+ * reconverged — exactly the case that would invalidate the criteria silently.
+ *
+ * Each comparison reproduces the LIVE FETCH rather than an idealized slice: ccxt
+ * returns `limit` candles of which the last is the one still FORMING, so production
+ * walks limit-1 CLOSED candles. Slicing `limit` closed candles instead would hand the
+ * classifier one extra oldest candle, changing indicator seeding — a window
+ * production never uses. Hence: slice up to and including the forming bar, then set
+ * the clock one millisecond into it so `regimeTimeline` drops it exactly as it does live.
  * ──────────────────────────────────────────────────────────────────────────── */
 function criterionProductionEquivalence(
   points: RegimePoint[],
   universe: Record<string, AssetSeries>,
 ): void {
-  const last = points[points.length - 1];
-  if (!last) {
+  if (points.length === 0) {
     record('C5', 'the replay reproduces what production computes', false, ['empty timeline.']);
     return;
   }
+  const { barMs } = replayRegimeOptions();
+  const assets = assetsOf(points);
 
-  const productionSized: Record<string, AssetSeries> = {};
-  for (const [asset, series] of Object.entries(universe)) {
-    productionSized[asset] = {
-      daily: sliceEndingAt(series.daily, last.timestamp, config.primaryLimit),
-      h4: sliceEndingAt(series.h4, last.timestamp, config.regime.limit),
-    };
+  let compared = 0;
+  let missing = 0;
+  const mismatches: string[] = [];
+
+  for (const point of points) {
+    // The wall clock of a live cycle waking up in the bar that FOLLOWS this one: the
+    // fetch then returns candles up to that forming bar, and the last CLOSED bar is
+    // `point`. One millisecond in is enough — where inside the bar the cycle runs
+    // cannot change which candles are closed.
+    const formingOpensAt = point.timestamp + barMs;
+    const sized: Record<string, AssetSeries> = {};
+    for (const [asset, series] of Object.entries(universe)) {
+      sized[asset] = {
+        daily: sliceEndingAt(series.daily, formingOpensAt, config.primaryLimit),
+        h4: sliceEndingAt(series.h4, formingOpensAt, config.regime.limit),
+      };
+    }
+    const asProduction = resolveRegimes(
+      sized,
+      config.regime.thresholds,
+      replayRegimeOptions(formingOpensAt + 1),
+    );
+
+    if (!asProduction || asProduction.timestamp !== point.timestamp) {
+      missing += 1;
+      if (mismatches.length < 5) {
+        mismatches.push(
+          `${fmtBar(point.timestamp)}: production slice resolved to ` +
+            `${asProduction ? fmtBar(asProduction.timestamp) : 'nothing'}`,
+        );
+      }
+      continue;
+    }
+
+    compared += 1;
+    if (asProduction.global.riskOff !== point.global.riskOff && mismatches.length < 5) {
+      mismatches.push(
+        `${fmtBar(point.timestamp)} risk_off: full ${point.global.riskOff} vs production ${asProduction.global.riskOff}`,
+      );
+    }
+    for (const asset of assets) {
+      const full = point.assets[asset]!.regime;
+      const prod = asProduction.assets[asset]?.regime;
+      if (full !== prod && mismatches.length < 5) {
+        mismatches.push(`${fmtBar(point.timestamp)} ${asset}: full ${full} vs production ${prod ?? 'n/a'}`);
+      }
+    }
   }
-  const asProduction = resolveRegimes(productionSized, config.regime.thresholds, replayRegimeOptions());
 
   const detail: string[] = [
-    `bar compared: ${fmtBar(last.timestamp)}  ·  production window = ` +
-      `${config.regime.limit} × ${config.regime.timeframe} + ${config.primaryLimit} × ${config.primaryTimeframe}`,
+    `every replayed bar recomputed through a production-sized window ` +
+      `(${config.regime.limit} × ${config.regime.timeframe} incl. the forming one → ` +
+      `${config.regime.limit - 1} closed, + ${config.primaryLimit} × ${config.primaryTimeframe})`,
+    `bars compared: ${compared}/${points.length}  ·  assets per bar: ${assets.length}  ` +
+      `·  asset-bar comparisons: ${compared * assets.length}`,
+    `bars where the production slice resolved to a different (or no) bar: ${missing}`,
+    mismatches.length === 0
+      ? 'label mismatches: none — the long-series walk and the rolling production window agree everywhere'
+      : `label mismatches (first ${mismatches.length}): ${mismatches.join(' | ')}`,
   ];
-  let identical = asProduction != null && asProduction.timestamp === last.timestamp;
-  if (asProduction) {
-    if (asProduction.global.riskOff !== last.global.riskOff) identical = false;
-    for (const asset of assetsOf(points)) {
-      const a = last.assets[asset]!.regime;
-      const b = asProduction.assets[asset]?.regime;
-      if (a !== b) identical = false;
-      detail.push(`${asset.padEnd(4, ' ')} full series ${a.padEnd(14, ' ')} production slice ${b ?? 'n/a'}`);
-    }
-    detail.push(
-      `risk_off  full series ${last.global.riskOff}  production slice ${asProduction.global.riskOff}`,
-    );
-  }
-  record('C5', 'the replay reproduces what production computes', identical, detail);
+
+  record(
+    'C5',
+    'the replay reproduces what production computes, at every bar',
+    missing === 0 && mismatches.length === 0 && compared === points.length,
+    detail,
+  );
 }
 
 /** One line per calendar day at 00:00 UTC — the regime seen at a glance. */
