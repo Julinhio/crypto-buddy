@@ -173,6 +173,21 @@ let passed = 0;
   assert.ok(v5Text.includes('FULL EXIT of a position is always allowed'), 'v5 keeps the full-exit exemption');
   assert.ok(v5Text.includes('You do NOT output market_state'), 'v5 takes the regime away from the model');
   assert.ok(v5Text.includes('WITH THE THESIS, not with your last action'), 'anti yo-yo is rebound to the thesis');
+
+  // The reversal playbook must be SPLIT IN BOTH DIRECTIONS. The single line it replaced
+  // ("rotate BETWEEN assets") said nothing about where price already sits, which reads
+  // as "sell the bottom of a dip" one way and "buy the top of a bounce" the other. Only
+  // one of the two is exposed by today's market; fixing only that one would leave the
+  // mirror to be discovered later, in production.
+  assert.ok(v5Text.includes('pullbackConsumed'), 'v5 names the down-move fact');
+  assert.ok(v5Text.includes('bounceConsumed'), 'v5 names the up-move fact — the mirror, not just the live case');
+  assert.ok(v5Text.includes('Do NOT sell into it'), 'reversal_down with the drop already paid is not a profit-take');
+  assert.ok(v5Text.includes('Do NOT chase it'), 'reversal_up with the bounce already paid is not an entry');
+  // And, as with the 25% rule, it must not claim an enforcement the code does not do.
+  assert.ok(
+    v5Text.includes('it does not block a trade for contradicting them'),
+    'v5 states plainly that the two branches are guidance, not a code guarantee',
+  );
   // The risk guard-rails are untouched: both mandates state the same sacred floor.
   assert.ok(v4Text.includes('at least 30% kept in the reserve stable'), 'v4 states the 30% cash floor');
   assert.ok(v5Text.includes('at least 30% kept in the reserve stable'), 'and v5 states exactly the same floor');

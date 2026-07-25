@@ -175,6 +175,18 @@ export interface RegimeThresholds {
   highRangePosition: number;
   /** Range position at or below which the asset is "low in its range" (0..1). */
   lowRangePosition: number;
+  /**
+   * TACTICAL range position at or below which a DOWN move counts as already paid —
+   * `pullbackConsumed`. A reversal_down whose drop has already happened is an
+   * accumulation zone, not a profit-take.
+   */
+  pullbackConsumedPosition: number;
+  /**
+   * TACTICAL range position at or above which an UP move counts as already paid —
+   * `bounceConsumed`. The mirror: a reversal_up whose bounce has already happened is
+   * not something to chase.
+   */
+  bounceConsumedPosition: number;
   /** Daily RSI below which an asset counts as bearish for the risk_off breadth. */
   bearishDailyRsi: number;
   /** Percent of the universe that must be bearish for the risk_off override to arm. */
@@ -338,6 +350,12 @@ export const config: AppConfig = {
       h4RsiDown: 45,
       highRangePosition: 0.6,
       lowRangePosition: 0.4,
+      // Symmetric around the middle of the TACTICAL range: below 0.30 a drop has been
+      // paid, above 0.70 a bounce has. Deliberately tighter than the 0.4/0.6 band used
+      // for trend confirmation — "the move already happened" is a stronger claim than
+      // "the asset sits low", and it drives whether the model buys or sells.
+      pullbackConsumedPosition: 0.3,
+      bounceConsumedPosition: 0.7,
       bearishDailyRsi: 45,
       // 80% of the universe (4 of the 5 priced assets) bearish AND a median 4h RSI
       // under 40. Both halves must agree — a broken structure alone is a pullback,
@@ -558,9 +576,18 @@ export function validateRegimeConfig(cfg: RegimeConfig): void {
         `(${t.highRangePosition}) — a crossed pair would make a bar both high and low in its range`,
     );
   }
+  if (!(t.pullbackConsumedPosition < t.bounceConsumedPosition)) {
+    problems.push(
+      `pullbackConsumedPosition (${t.pullbackConsumedPosition}) must be strictly below ` +
+        `bounceConsumedPosition (${t.bounceConsumedPosition}) — a crossed pair would let one bar count ` +
+        `as both "the drop is paid" and "the bounce is paid", which is the opposite advice twice`,
+    );
+  }
   for (const [name, value] of [
     ['lowRangePosition', t.lowRangePosition],
     ['highRangePosition', t.highRangePosition],
+    ['pullbackConsumedPosition', t.pullbackConsumedPosition],
+    ['bounceConsumedPosition', t.bounceConsumedPosition],
   ] as const) {
     if (!(value >= 0 && value <= 1)) problems.push(`${name} must be in [0, 1] (got ${value})`);
   }

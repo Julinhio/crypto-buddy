@@ -14,10 +14,17 @@ import { validateDecision, type ValidatedDecision } from '../decision/schema.js'
  * us exposed to exactly the failure the whole chantier exists to fix — a mandate that
  * reads well and produces 785 holds.
  *
- * So: six isolated scenarios on synthetic context, each with a behaviour CLASS it must
- * fall into, and the model's real answers printed in full.
+ * So: eight isolated scenarios on synthetic context, each with a behaviour CLASS it
+ * must fall into, and the model's real answers printed in full.
  *
- * What these probes are NOT: a backtest, or any promise about performance. Six
+ * Four of them come in PAIRS that share a label and differ only in whether the move
+ * has already been paid — P1 against P7 for reversal_down, P2 against P8 for
+ * reversal_up. Their checks are paired too: it is not enough for P7 to hold, it must
+ * hold MORE than P1 lightened. A mandate that behaves identically across a pair has
+ * discriminated nothing, and a probe that would not notice is the same weak criterion
+ * as "at least one differing bar".
+ *
+ * What these probes are NOT: a backtest, or any promise about performance. Eight
  * scenarios prove that the mandate produces the right kind of decision when the
  * situation is unambiguous. That is a necessary condition, not a sufficient one.
  *
@@ -42,11 +49,75 @@ interface Holding {
   weight: number;
   /** Per-asset regime as the code would have computed it. */
   regime: string;
-  /** Where price sits in its 30-day range, 0..1. */
+  /** Where price sits in its 30-day range, 0..1 (the STRUCTURAL position). */
   rangePosition: number;
   peak: number;
   thesis?: string;
+  /**
+   * Where price sits in its recent 4h range, 0..1 — the TACTICAL position. Defaults to
+   * the monthly one, which is what the first six probes assumed. P7 and P8 turn on the
+   * two DIVERGING: high on the month, low on the 4h (or the reverse) is exactly the
+   * case a single shared number could not express.
+   */
+  h4RangePosition?: number;
+  /**
+   * The daily structure, stated rather than guessed from the label. It used to be
+   * derived from whether the regime name contained "up", which silently made the
+   * signals contradict the label: `reversal_up` requires the up-structure NOT to be
+   * confirmed, yet the derivation produced a confirmed one. Harmless while the
+   * signals were decoration; fatal now that they are the discriminator.
+   */
+  structure?: 'up' | 'down' | 'unconfirmed';
+  /** 4h momentum. Independent of the range position — see `momentumOf`. */
+  momentum?: 'up' | 'down' | 'neutral';
 }
+
+/**
+ * The DAILY structure a label implies, unless the probe overrides it.
+ *
+ * Defaulted from the label rather than from whether its name contains "up", which is
+ * what the first version did and which quietly produced contexts contradicting their
+ * own label: `reversal_down` means momentum turning against a structure that has NOT
+ * broken, so its structure is UP, not down.
+ */
+function structureOf(h: Holding): 'up' | 'down' | 'unconfirmed' {
+  if (h.structure) return h.structure;
+  if (h.regime === 'trend_up') return 'up';
+  if (h.regime === 'trend_down') return 'down';
+  if (h.regime === 'reversal_down') return 'up'; // momentum down against an intact trend
+  return 'unconfirmed'; // reversal_up: the up-structure is by definition not confirmed
+}
+
+/**
+ * 4h momentum, defaulted from the label and NOT derived from the range position.
+ *
+ * Conflating the two is what broke these contexts: momentum and "where price sits" are
+ * two separate axes in the real classifier, and a reversal_down high in its range has
+ * a LOW 4h RSI — that combination is the whole signal. Deriving the RSI from the range
+ * position made it high instead, handing the model a reversal_down that looked bullish.
+ */
+function momentumOf(h: Holding): 'up' | 'down' | 'neutral' {
+  if (h.momentum) return h.momentum;
+  if (h.regime.endsWith('_down')) return 'down';
+  if (h.regime.endsWith('_up')) return 'up';
+  return 'neutral';
+}
+
+function averagesFor(h: Holding): { sma50: number; ema21Daily: number; sma200: number } {
+  const structure = structureOf(h);
+  if (structure === 'up') return { sma50: h.price * 0.95, ema21Daily: h.price * 0.98, sma200: h.price * 1.15 };
+  if (structure === 'down') return { sma50: h.price * 1.05, ema21Daily: h.price * 1.02, sma200: h.price * 1.15 };
+  return { sma50: h.price * 0.97, ema21Daily: h.price * 0.96, sma200: h.price * 1.15 };
+}
+
+function h4For(h: Holding): { ema21H4: number; rsi14H4: number } {
+  const m = momentumOf(h);
+  if (m === 'up') return { ema21H4: h.price * 0.99, rsi14H4: 63 };
+  if (m === 'down') return { ema21H4: h.price * 1.01, rsi14H4: 37 };
+  return { ema21H4: h.price, rsi14H4: 50 };
+}
+
+const tacticalOf = (h: Holding): number => h.h4RangePosition ?? h.rangePosition;
 
 /** Builds a plausible synthetic context: market read, code regime, book, lifecycle. */
 function buildContext(params: {
@@ -64,8 +135,8 @@ function buildContext(params: {
     primary: { timeframe: '1d', candles: 500 },
     indicators: {
       rsi: { period: 14, value: 30 + h.rangePosition * 40 },
-      sma: { 50: h.price * (h.regime.includes('up') ? 0.95 : 1.05), 200: h.price * 1.15 },
-      ema: { 21: h.price * (h.regime.includes('up') ? 0.98 : 1.02) },
+      sma: { 50: averagesFor(h).sma50, 200: averagesFor(h).sma200 },
+      ema: { 21: averagesFor(h).ema21Daily },
     },
     levels: {
       month: {
@@ -119,18 +190,17 @@ function buildContext(params: {
         bearish: h.regime.includes('down'),
         signals: {
           close: h.price,
-          sma50: h.price * (h.regime.includes('up') ? 0.95 : 1.05),
-          sma200: h.price * 1.15,
-          ema21Daily: h.price * (h.regime.includes('up') ? 0.98 : 1.02),
+          ...averagesFor(h),
           rsi14Daily: 30 + h.rangePosition * 40,
           rangeHigh: h.peak,
           rangeLow: h.peak * 0.75,
           rangePosition: h.rangePosition,
-          ema21H4: h.price * 0.99,
-          rsi14H4: 30 + h.rangePosition * 40,
+          ...h4For(h),
           h4RangeHigh: h.peak,
           h4RangeLow: h.peak * 0.8,
-          h4RangePosition: h.rangePosition,
+          h4RangePosition: tacticalOf(h),
+          pullbackConsumed: tacticalOf(h) <= config.regime.thresholds.pullbackConsumedPosition,
+          bounceConsumed: tacticalOf(h) >= config.regime.thresholds.bounceConsumedPosition,
         },
       },
     ]),
@@ -172,6 +242,9 @@ function buildContext(params: {
   };
 }
 
+/** Allocation change per asset from a probe already run — for the paired assertions. */
+const observed = new Map<string, Record<string, number>>();
+
 interface Probe {
   id: string;
   scenario: string;
@@ -194,7 +267,7 @@ const PROBES: Probe[] = [
       cashWeight: 32,
       holdings: [
         { asset: 'BTC', price: 64000, avgCost: 63000, weight: 25, regime: 'range', rangePosition: 0.5, peak: 67000 },
-        { asset: 'ETH', price: 1940, avgCost: 1550, weight: 28, regime: 'reversal_down', rangePosition: 0.95, peak: 1948, thesis: 'riding the reclaim off the June low' },
+        { asset: 'ETH', price: 1940, avgCost: 1550, weight: 28, regime: 'reversal_down', rangePosition: 0.95, h4RangePosition: 0.62, peak: 1948, thesis: 'riding the reclaim off the June low' },
         { asset: 'BNB', price: 565, avgCost: 595, weight: 10, regime: 'range', rangePosition: 0.5, peak: 630 },
         { asset: 'XRP', price: 1.08, avgCost: 1.14, weight: 5, regime: 'range', rangePosition: 0.45, peak: 1.28 },
       ],
@@ -233,7 +306,7 @@ const PROBES: Probe[] = [
     context: buildContext({
       cashWeight: 33,
       holdings: [
-        { asset: 'BTC', price: 65000, avgCost: 58000, weight: 30, regime: 'trend_up', rangePosition: 0.82, peak: 67000, thesis: 'trend intact above the reclaimed 50d' },
+        { asset: 'BTC', price: 65000, avgCost: 58000, weight: 30, regime: 'trend_up', rangePosition: 0.82, h4RangePosition: 0.55, peak: 67000, thesis: 'trend intact above the reclaimed 50d' },
         { asset: 'ETH', price: 1860, avgCost: 1660, weight: 20, regime: 'range', rangePosition: 0.6, peak: 1948 },
         { asset: 'BNB', price: 570, avgCost: 595, weight: 10, regime: 'range', rangePosition: 0.5, peak: 630 },
         { asset: 'XRP', price: 1.09, avgCost: 1.14, weight: 7, regime: 'range', rangePosition: 0.5, peak: 1.28 },
@@ -308,6 +381,59 @@ const PROBES: Probe[] = [
       return null;
     },
   },
+  {
+    id: 'P7',
+    scenario: 'ETH in reversal_down but the pullback is ALREADY CONSUMED — low on the 4h, daily structure intact',
+    expected: 'NO material reduction — this is a dip inside an intact trend, not a top',
+    context: buildContext({
+      cashWeight: 33,
+      holdings: [
+        // The live shape of BTC/ETH on 2026-07-25: high on the month, bottom of the 4h
+        // range, both price and the daily EMA21 still above the SMA50.
+        { asset: 'ETH', price: 1857, avgCost: 1660, weight: 28, regime: 'reversal_down', rangePosition: 0.78, h4RangePosition: 0.17, structure: 'up', peak: 1948, thesis: 'holding the reclaim off the June low' },
+        { asset: 'BTC', price: 64064, avgCost: 63000, weight: 22, regime: 'reversal_down', rangePosition: 0.68, h4RangePosition: 0.25, structure: 'up', peak: 67234, thesis: 'core holding above the reclaimed 50d' },
+        { asset: 'BNB', price: 565, avgCost: 595, weight: 10, regime: 'range', rangePosition: 0.5, peak: 630 },
+        { asset: 'XRP', price: 1.09, avgCost: 1.14, weight: 7, regime: 'range', rangePosition: 0.46, peak: 1.2856 },
+      ],
+    }),
+    check: (d, cur) => {
+      const change = delta(d, cur, 'ETH');
+      if (change < -1) return `ETH was cut by ${Math.abs(change).toFixed(1)} pts into an already-consumed pullback`;
+      // PAIRED against P1: the same label, the opposite situation. A mandate that
+      // lightens identically in both has discriminated nothing — which is exactly the
+      // weak-criterion trap ("at least one differing bar") caught on C2.
+      const p1 = observed.get('P1')?.ETH;
+      if (p1 != null && change <= p1) {
+        return `ETH was cut as hard as in P1 (${change.toFixed(1)} vs ${p1.toFixed(1)} pts) — the two cases were not told apart`;
+      }
+      return null;
+    },
+  },
+  {
+    id: 'P8',
+    scenario: 'BTC in reversal_up but the bounce is ALREADY CONSUMED — top of the 4h range, month already stretched',
+    expected: 'NO material increase — chasing here is buying the top',
+    context: buildContext({
+      cashWeight: 55,
+      holdings: [
+        // The mirror of P7: momentum up, up-structure NOT confirmed (that is what makes
+        // it reversal_up), but the move has already been paid and the month is extended.
+        { asset: 'BTC', price: 66800, avgCost: 63000, weight: 15, regime: 'reversal_up', rangePosition: 0.93, h4RangePosition: 0.88, structure: 'unconfirmed', peak: 67234, thesis: 'bought the reclaim, watching the monthly high' },
+        { asset: 'ETH', price: 1780, avgCost: 1660, weight: 16, regime: 'range', rangePosition: 0.55, peak: 1948 },
+        { asset: 'BNB', price: 565, avgCost: 595, weight: 8, regime: 'range', rangePosition: 0.5, peak: 630 },
+        { asset: 'XRP', price: 1.09, avgCost: 1.14, weight: 6, regime: 'range', rangePosition: 0.46, peak: 1.2856 },
+      ],
+    }),
+    check: (d, cur) => {
+      const change = delta(d, cur, 'BTC');
+      if (change > 1) return `BTC was increased by ${change.toFixed(1)} pts into an already-consumed bounce`;
+      const p2 = observed.get('P2')?.BTC;
+      if (p2 != null && change >= p2) {
+        return `BTC was added to as hard as in P2 (${change.toFixed(1)} vs +${p2.toFixed(1)} pts) — the two cases were not told apart`;
+      }
+      return null;
+    },
+  },
 ];
 
 function currentAllocation(ctx: DecisionContext): Record<string, number> {
@@ -373,6 +499,9 @@ async function main(): Promise<number> {
     console.log(`     theses:   ${d.positionNotes.length === 0 ? '(none rewritten)' : d.positionNotes.map((n) => `${n.asset}${n.replace ? ' [replace]' : ''}: ${n.thesis}`).join(' | ')}`);
     console.log(`     model:    ${d.reasoning.replace(/\s+/g, ' ').slice(0, 400)}`);
     console.log(`     notif:    ${d.notificationSummary}`);
+
+    // Record every delta so the paired probes (P7 vs P1, P8 vs P2) can compare.
+    observed.set(probe.id, Object.fromEntries(ASSETS.map((a) => [a, delta(d, current, a)])));
 
     const problem = probe.check(d, current);
     if (problem) {

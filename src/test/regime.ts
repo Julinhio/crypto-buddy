@@ -45,6 +45,8 @@ const neutral = (over: Partial<AssetSignals> = {}): AssetSignals => ({
   h4RangeHigh: 110,
   h4RangeLow: 90,
   h4RangePosition: 0.5,
+  pullbackConsumed: false,
+  bounceConsumed: false,
   ...over,
 });
 
@@ -351,6 +353,48 @@ function h4Series(days: number, close: number): Candle[] {
 }
 
 {
+  // `pullbackConsumed` / `bounceConsumed` — the two facts that tell a reversal whose
+  // move is still ahead of it from one that has already happened. They are ADDITIVE:
+  // they change no label, so no replay baseline moves.
+  const days = 60;
+  const flatDaily = dailySeries(days, 100);
+  const opts60 = (u: Record<string, AssetSeries>) => opts(u);
+
+  // A 4h series that ends at the BOTTOM of its recent range → the drop is paid.
+  const falling = h4Series(days, 100).map((c, i, all) =>
+    i >= all.length - 10 ? { ...c, open: 90, high: 90, low: 90, close: 90 } : c,
+  );
+  const low: Record<string, AssetSeries> = { X: { daily: flatDaily, h4: falling } };
+  const lowPoint = regimeTimeline(low, th, opts60(low)).at(-1)!;
+  assert.equal(lowPoint.assets.X!.signals.pullbackConsumed, true, 'at the bottom of the 4h range, the drop is paid');
+  assert.equal(lowPoint.assets.X!.signals.bounceConsumed, false, 'and the bounce is not');
+
+  // The mirror: a series ending at the TOP → the bounce is paid.
+  const rising = h4Series(days, 100).map((c, i, all) =>
+    i >= all.length - 10 ? { ...c, open: 110, high: 110, low: 110, close: 110 } : c,
+  );
+  const high: Record<string, AssetSeries> = { X: { daily: flatDaily, h4: rising } };
+  const highPoint = regimeTimeline(high, th, opts60(high)).at(-1)!;
+  assert.equal(highPoint.assets.X!.signals.bounceConsumed, true, 'at the top of the 4h range, the bounce is paid');
+  assert.equal(highPoint.assets.X!.signals.pullbackConsumed, false, 'and the drop is not');
+
+  // Neither is ever true at once — the two thresholds are a validated dead band.
+  for (const point of [lowPoint, highPoint]) {
+    const s = point.assets.X!.signals;
+    assert.ok(!(s.pullbackConsumed && s.bounceConsumed), 'a bar cannot have both moves already paid');
+  }
+
+  // And they do NOT change the label: the same series classifies identically whatever
+  // the two booleans say, because the cascade never reads them.
+  assert.ok(
+    ['range', 'trend_up', 'trend_down', 'reversal_up', 'reversal_down'].includes(lowPoint.assets.X!.raw),
+    'the label still comes from the unchanged cascade',
+  );
+  console.log('  ok: pullbackConsumed / bounceConsumed are additive facts, mutually exclusive, label-neutral');
+  passed += 1;
+}
+
+{
   // The config validator closes the classes that would make the cascade lie, rather
   // than patching one bad value at a time.
   const base: RegimeConfig = config.regime;
@@ -378,6 +422,11 @@ function h4Series(days: number, close: number): Candle[] {
     () => validateRegimeConfig({ ...base, limit: 50 }),
     /limit must be an integer >= 100/,
     'a 4h window too short for the warm-up is rejected',
+  );
+  assert.throws(
+    () => validateRegimeConfig(withThresholds({ pullbackConsumedPosition: 0.8, bounceConsumedPosition: 0.2 })),
+    /pullbackConsumedPosition .* must be strictly below bounceConsumedPosition/,
+    'a crossed consumed band is rejected — one bar would be told the opposite advice twice',
   );
   console.log('  ok: the regime config validator rejects the whole class of incoherent thresholds');
   passed += 1;
