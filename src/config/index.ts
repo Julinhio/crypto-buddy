@@ -54,6 +54,20 @@ export interface DecisionConfig {
   maxDelayMinutes: number;
   /** Allowed deviation from 100 when validating the allocation sum. */
   allocationTolerancePercent: number;
+  /**
+   * HARD wall-clock bound on ONE LLM attempt, in seconds. The coherence guard adds a
+   * second call inside the same cycle, so a blocked network call must not be able to
+   * eat the 300s budget on its own. Enforced in the decision layer (a race against a
+   * timer) rather than left to the SDK's timeout × retries arithmetic, which multiplies.
+   */
+  attemptTimeoutSeconds: number;
+  /**
+   * Seconds kept in reserve, after the last attempt, for what still has to happen:
+   * journaling the decision, sizing and placing the orders, and writing the lifecycle
+   * state. The second attempt is only started if it fits inside the budget WITH this
+   * reserve still intact — otherwise the cycle fails cleanly before the watchdog kills it.
+   */
+  retryReserveSeconds: number;
 }
 
 /**
@@ -298,6 +312,39 @@ export function resolveStrategyVersion(raw: string | undefined = process.env.STR
   );
 }
 
+/**
+ * Resolves `COHERENCE_GUARD`, and FAILS LOUD on anything it does not recognise.
+ *
+ * Same convention as STRATEGY_VERSION, and the same reason: ABSENCE MEANS SAFE. Here
+ * the safe mode is the guard ACTIVE, so there is nothing to set on Railway to be
+ * protected — the guard can only be switched off by an explicit, correctly-spelled
+ * opt-out, and an environment that loses its variables comes back protected.
+ *
+ * The escape hatch exists for one scenario, stated plainly: the day the guard turns out
+ * to be too tight and blocks the bot, Julien must be able to disable it WITHOUT
+ * reintroducing the output-contract bug. That is why it covers the guard only — the
+ * field reordering in schema.ts is unconditional and has no flag. Turning this off
+ * returns the bot to executing whatever the model emits; it does not return it to
+ * emitting the target before the reasoning.
+ *
+ * A PRESENT but unrecognised value is an error, never a silent fallback. `OFF`, `false`
+ * and `0` all fail: someone typing them INTENDED to disable the guard, and silently
+ * leaving it armed would leave the operator debugging the wrong thing.
+ */
+export function resolveCoherenceGuard(raw: string | undefined = process.env.COHERENCE_GUARD): boolean {
+  if (raw == null || raw.trim() === '') return true;
+  const value = raw.trim();
+  if (value === 'on') return true;
+  if (value === 'off') return false;
+  throw new Error(
+    `Invalid COHERENCE_GUARD="${raw}": expected exactly "on" or "off" (case-sensitive), or UNSET ` +
+      'for the default "on". Absence means the guard is ACTIVE — there is nothing to set to be ' +
+      'protected. A present-but-unrecognised value is refused rather than defaulted: it means ' +
+      'someone intended to change the guard, and silently running the other mode would be worse ' +
+      'than not booting.',
+  );
+}
+
 export const config: AppConfig = {
   // Pairs the bot may take positions on (subject to the risk caps). Add a tradable
   // pair by appending one line AND giving it a cap in execution.caps.perAsset.
@@ -374,6 +421,16 @@ export const config: AppConfig = {
     minDelayMinutes: 15,
     maxDelayMinutes: 240,
     allocationTolerancePercent: 0.5,
+    // Measured over the 128 v5 cycles: median 19.83s, p95 29.21s, worst 39.23s. 90s is
+    // more than twice the worst case ever observed, so a healthy retry is never cut
+    // short — and two of them (180s) still leave 120s of the 300s budget. NOT
+    // env-overridable: it is a safety relation asserted against the cycle budget below,
+    // not an ops knob.
+    attemptTimeoutSeconds: 90,
+    // The whole post-decision tail — insert, clamp, movements, real orders, lifecycle
+    // write. The worst FULL cycle ever measured is 42.10s, of which the LLM call was
+    // 39.23s; the tail has never approached 45s.
+    retryReserveSeconds: 45,
   },
 
   execution: {
@@ -515,6 +572,48 @@ export function validateSchedulerConfig(cfg: SchedulerConfig): void {
 validateSchedulerConfig(config.scheduler);
 
 /**
+ * Fails fast when the decision layer could outlive the cycle budget.
+ *
+ * The coherence guard puts a SECOND LLM call inside one cycle, so the arithmetic that
+ * used to be comfortable has to be asserted rather than assumed:
+ *
+ *   2 × attemptTimeoutSeconds + retryReserveSeconds  ≤  maxCycleSeconds
+ *
+ * Both attempts bounded, plus the tail that still has to journal the decision, place the
+ * real orders and write the lifecycle state. If that sum ever exceeded the budget, a slow
+ * cycle would be killed by the watchdog MID-EXECUTION — after a booking, possibly before
+ * its trace — which is the one place this codebase refuses to be sloppy. Asserted at
+ * STARTUP, with the env overrides (MAX_CYCLE_SECONDS) in scope, rather than discovered at
+ * runtime on the one cycle that needed the retry. Exported for the offline test.
+ */
+export function validateDecisionTimingConfig(
+  decision: DecisionConfig,
+  scheduler: SchedulerConfig,
+): void {
+  const problems: string[] = [];
+  if (!(decision.attemptTimeoutSeconds > 0)) {
+    problems.push(`attemptTimeoutSeconds must be > 0 (got ${decision.attemptTimeoutSeconds})`);
+  }
+  if (!(decision.retryReserveSeconds > 0)) {
+    problems.push(`retryReserveSeconds must be > 0 (got ${decision.retryReserveSeconds})`);
+  }
+  const worstCase = 2 * decision.attemptTimeoutSeconds + decision.retryReserveSeconds;
+  if (worstCase > scheduler.maxCycleSeconds) {
+    problems.push(
+      `two bounded LLM attempts plus the post-decision reserve (2 × ${decision.attemptTimeoutSeconds} + ` +
+        `${decision.retryReserveSeconds} = ${worstCase}s) must fit inside maxCycleSeconds ` +
+        `(${scheduler.maxCycleSeconds}s), else a cycle that needs its retry could be force-exited by ` +
+        `the watchdog mid-execution`,
+    );
+  }
+  if (problems.length > 0) {
+    throw new Error(`Invalid decision timing config: ${problems.join('; ')}`);
+  }
+}
+
+validateDecisionTimingConfig(config.decision, config.scheduler);
+
+/**
  * Fails fast on a nonsensical alerting config. Thresholds must be >= 1, otherwise a
  * counter would be "at or above" from its very first tick and the alert would fire
  * (or be permanently suppressed) without any real crossing.
@@ -615,6 +714,13 @@ validateRegimeConfig(config.regime);
  * change strategy under its own feet.
  */
 export const STRATEGY_VERSION: StrategyVersion = resolveStrategyVersion();
+
+/**
+ * Whether the coherence guard is armed for this process, resolved ONCE at startup so a
+ * malformed value fails the boot rather than surfacing mid-cycle — and so a run cannot
+ * disarm its own guard halfway through.
+ */
+export const COHERENCE_GUARD: boolean = resolveCoherenceGuard();
 
 /**
  * Fails fast on a bad daily-summary config. The timezone is validated by trying to

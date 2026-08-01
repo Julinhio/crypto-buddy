@@ -115,12 +115,46 @@ export function buildDecisionSchema(assets: string[], strategy: StrategyVersion 
   // the cross-field sum-to-100 rule stays in validateDecision (the real guard).
   for (const asset of assets) allocationShape[asset] = z.number().min(0).max(100);
 
-  const common = {
+  // ── THE ORDER OF THESE FIELDS IS THE FIX, NOT A STYLE CHOICE ──────────────────
+  //
+  // A model reasons BY WRITING. The previous contract asked for `target_allocation`
+  // and `action_type` first: it posed its numbers, thought afterwards, sometimes
+  // changed its mind, and could no longer revisit fields it had already emitted.
+  //
+  // Cycle 987 (30/07) is the whole argument. Its reasoning, its notification and its
+  // new BNB thesis all describe lightening BNB from 12% to 8% with cash to 47%. The
+  // fields emitted first say `hold`, BNB 12%, cash 43%. No order was created. The
+  // decision was right — BNB sat at 97% of its 4h range, RSI 4h at 75, at the monthly
+  // high, and the standing thesis said explicitly to lighten between $580 and $593.
+  // It was lost by the output contract, not by the mandate.
+  //
+  // So: ANALYSIS first, then the decision, then how it is communicated.
+  //
+  //   1. reasoning            — where the model actually thinks;
+  //   2. what_changed         — the justification; still analysis;
+  //   3. target_allocation    — the decision, written by a model that has thought;
+  //   4. action_type          — and its label, consistent with the target above it;
+  //   5. position_notes       — the theses that go WITH the moves (v5) / market_state (v4);
+  //   6. confidence           — how sure it is of what it has just decided;
+  //   7. notification_summary — the human one-liner, written LAST so it can only
+  //                             describe the target that precedes it. On 987 this
+  //                             field announced an allègement the target never made;
+  //   8. next_delay_minutes.
+  //
+  // Empirically load-bearing and empirically verified: all 139 v5 production responses
+  // emitted their keys in exactly this object's declaration order, so the constrained
+  // decoder follows the schema. The Anthropic docs do NOT guarantee that, which is why
+  // `outputOrderViolation` below re-checks it on every response rather than trusting it.
+  const analysis = {
+    reasoning: z.string().min(1),
+    what_changed: z.string().min(1),
+  };
+  const decision = {
     target_allocation: z.strictObject(allocationShape),
     action_type: actionTypeSchema,
-    what_changed: z.string().min(1),
+  };
+  const tail = {
     confidence: confidenceSchema,
-    reasoning: z.string().min(1),
     notification_summary: z.string().min(1),
     next_delay_minutes: z.number(),
   };
@@ -131,7 +165,8 @@ export function buildDecisionSchema(assets: string[], strategy: StrategyVersion 
   // quietly satisfy the v5 contract, or the reverse.
   if (strategy === 'v5') {
     return z.strictObject({
-      ...common,
+      ...analysis,
+      ...decision,
       position_notes: z.array(
         z.strictObject({
           asset: z.string().min(1),
@@ -140,10 +175,53 @@ export function buildDecisionSchema(assets: string[], strategy: StrategyVersion 
           replace: z.boolean(),
         }),
       ),
+      ...tail,
     });
   }
 
-  return z.strictObject({ ...common, market_state: marketStateSchema });
+  return z.strictObject({ ...analysis, ...decision, market_state: marketStateSchema, ...tail });
+}
+
+/**
+ * The fields whose ORDER is load-bearing, earliest first. Exported so the offline test
+ * pins the contract against the schema rather than against a copy of it.
+ */
+export const OUTPUT_ORDER_ANCHORS = ['reasoning', 'target_allocation'] as const;
+
+/**
+ * Did the model emit its target BEFORE its reasoning? Read on the RAW TEXT, because
+ * that is the only place the order survives — `JSON.parse` returns an object and any
+ * ordering information is gone by then (jsonb in Postgres reorders too, which is how
+ * this nearly went unnoticed).
+ *
+ * A violation is SYSTEMIC, not a bad cycle. The key order is deterministic and comes
+ * from the schema, so if it ever breaks it breaks every cycle identically — relaunching
+ * would burn a second LLM call to reach the same wall. The caller therefore kills the
+ * cycle outright, alerts, and does NOT retry.
+ *
+ * Returns null when the contract holds, or the reason when it does not. A field that is
+ * absent entirely is not this function's problem (the schema parse already rejected it),
+ * so a missing anchor reads as "no violation to report here".
+ */
+export function outputOrderViolation(rawResponse: string): string | null {
+  const positions = OUTPUT_ORDER_ANCHORS.map((field) => ({
+    field,
+    at: rawResponse.indexOf(`"${field}"`),
+  }));
+  if (positions.some((p) => p.at < 0)) return null;
+  for (let i = 1; i < positions.length; i += 1) {
+    const previous = positions[i - 1]!;
+    const current = positions[i]!;
+    if (current.at < previous.at) {
+      return (
+        `the model emitted "${current.field}" (char ${current.at}) BEFORE "${previous.field}" ` +
+        `(char ${previous.at}). The output contract puts the reasoning first precisely so the ` +
+        'target is written by a model that has already thought — this response was produced the ' +
+        'other way round, which is the cycle-987 failure mode.'
+      );
+    }
+  }
+  return null;
 }
 
 export interface ValidatedDecision {

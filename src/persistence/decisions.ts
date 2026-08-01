@@ -2,7 +2,15 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 const TABLE = 'decisions';
 
-export type DecisionStatus = 'decided' | 'skipped' | 'parse_failed' | 'error';
+/**
+ * `guard_failed` (migration 0019) is a response the coherence guard refused twice: the
+ * JSON parsed perfectly, its structured parts contradicted each other. Kept distinct
+ * from `parse_failed` for two reasons — it keeps the parse-failure metric honest (it has
+ * been at zero since 25/07 and watches something else), and it is what makes "the last
+ * accepted target" readable as "the last `decided` row", so a rejected cycle provably
+ * establishes no reference for the next one.
+ */
+export type DecisionStatus = 'decided' | 'skipped' | 'parse_failed' | 'error' | 'guard_failed';
 
 /** Compact view of a past `decided` row, fed back to the model for coherence. */
 export interface DecisionSummary {

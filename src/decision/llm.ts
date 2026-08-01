@@ -6,13 +6,31 @@ import { buildDecisionSchema, type DecisionOutput } from './schema.js';
 // Memoized client.
 let client: Anthropic | null = null;
 
-// Bound the LLM call well under the scheduler's cycle budget
-// (config.scheduler.maxCycleSeconds). A run that outlives its lock could be
-// reclaimed by a parallel beat and run a second concurrent cycle, so external
-// calls MUST stay bounded: `timeout` caps one attempt, `maxRetries` the multiplier
-// (worst ≈ timeout × (1 + retries) ≈ 120s, comfortably under the 300s budget).
-const LLM_TIMEOUT_MS = 60_000;
+/**
+ * Transport retries the SDK performs inside ONE logical attempt (429s, 5xx, dropped
+ * connections). Kept at 1: a hung socket is worth abandoning and redialling once.
+ */
 const LLM_MAX_RETRIES = 1;
+
+/**
+ * The per-REQUEST timeout, derived so that one logical attempt — request plus its
+ * transport retries — can never exceed `config.decision.attemptTimeoutSeconds`.
+ *
+ * Derived rather than written down twice. The coherence guard puts a second LLM call
+ * inside the same cycle, and `validateDecisionTimingConfig` asserts at startup that
+ * `2 × attemptTimeoutSeconds + retryReserveSeconds ≤ maxCycleSeconds`. That assertion is
+ * only true if this constant actually honours the budget it is asserted against, so it
+ * is computed from it: a hardcoded 60s here would silently make the startup assertion a
+ * lie the day someone tuned the config.
+ *
+ * At today's values: 90s / 2 = 45s per request, ×2 attempts = 90s worst per logical
+ * call. Measured worst case ever observed is 39.23s, p95 29.21s — so the 45s cut only
+ * bites on a call that has already gone far outside its distribution, and when it does,
+ * the SDK redials rather than the cycle dying.
+ */
+const LLM_TIMEOUT_MS = Math.floor(
+  (config.decision.attemptTimeoutSeconds * 1000) / (1 + LLM_MAX_RETRIES),
+);
 
 const MISSING_KEY_MESSAGE =
   'Missing ANTHROPIC_API_KEY — set it in .env to run the decision layer. ' +
@@ -81,23 +99,48 @@ export async function runDecision(params: {
   assets: string[];
   /** Which output contract to enforce — the two strategies do not share a shape. */
   strategy?: StrategyVersion;
+  /**
+   * The coherence guard's SINGLE retry. Replays the rejected exchange so the model can
+   * see what it actually wrote before being told what disagreed with what — sending the
+   * correction ask alone would have it re-derive a decision it has already made, from a
+   * context that no longer contains it.
+   *
+   * The rejected response goes in as a mid-conversation assistant turn, never as a
+   * trailing one: a trailing assistant turn is a prefill and is rejected outright by the
+   * models this bot runs on.
+   */
+  retry?: { rejectedResponse: string; instruction: string };
 }): Promise<LlmResult> {
   const anthropic = getClient();
   const model = resolveModel();
   const schema = buildDecisionSchema(params.assets, params.strategy ?? 'v4');
 
+  const messages: Anthropic.MessageParam[] = [{ role: 'user', content: params.userPrompt }];
+  if (params.retry) {
+    messages.push({ role: 'assistant', content: params.retry.rejectedResponse });
+    messages.push({ role: 'user', content: params.retry.instruction });
+  }
+
   const start = Date.now();
-  const message = await anthropic.messages.create({
-    model,
-    max_tokens: config.decision.maxTokens,
-    // Frozen mandate, cache_control'd for reuse across runs (volatile context
-    // lives in the user turn, after this cached prefix).
-    system: [
-      { type: 'text', text: params.systemPrompt, cache_control: { type: 'ephemeral' } },
-    ],
-    messages: [{ role: 'user', content: params.userPrompt }],
-    output_config: { format: zodOutputFormat(schema) },
-  });
+  const message = await anthropic.messages.create(
+    {
+      model,
+      max_tokens: config.decision.maxTokens,
+      // Frozen mandate, cache_control'd for reuse across runs (volatile context
+      // lives in the user turn, after this cached prefix). The retry keeps the same
+      // system prefix AND the same first user turn, so it reads the cache the first
+      // attempt just wrote rather than paying for the context twice.
+      system: [
+        { type: 'text', text: params.systemPrompt, cache_control: { type: 'ephemeral' } },
+      ],
+      messages,
+      output_config: { format: zodOutputFormat(schema) },
+    },
+    // The per-attempt bound, restated at the call site so it applies to the retry too.
+    // Explicit rather than inherited from the client so the relation to the cycle
+    // budget is visible where the network call actually happens.
+    { timeout: LLM_TIMEOUT_MS, maxRetries: LLM_MAX_RETRIES },
+  );
   const latencyMs = Date.now() - start;
 
   const rawResponse = message.content

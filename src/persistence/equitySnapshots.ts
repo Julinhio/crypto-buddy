@@ -78,8 +78,10 @@ export function buildEquitySnapshot(
  *   - a cycle that timed out / threw before returning a valued book (portfolio
  *     null), or a decision that wasn't persisted (no id) → nothing to key a photo
  *     to → no photo;
- *   - `decided` / `error` / `parse_failed` (all past the empty-universe guard, so
- *     the book IS valued) → a photo.
+ *   - `decided` / `error` / `parse_failed` / `guard_failed` (all past the
+ *     empty-universe guard, so the book IS valued) → a photo. A cycle refused by the
+ *     coherence guard traded nothing, but the market still moved and the curve is a
+ *     photo of the BOOK, not of the decision — skipping it would leave a hole.
  * The actual write (writeEquitySnapshot) is then done OUTSIDE the cycle.
  */
 export function prepareEquitySnapshot(

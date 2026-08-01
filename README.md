@@ -539,7 +539,11 @@ All knobs live in [`src/config/index.ts`](src/config/index.ts):
   `maintenanceLookbackCandles` (recent daily candles scanned for new extremes).
 - `decision` — `defaultModel` (overridden by `ANTHROPIC_MODEL`), `maxTokens`,
   `recentDecisionsToLoad`, delay bounds (`minDelayMinutes` / `maxDelayMinutes`),
-  and `allocationTolerancePercent`.
+  `allocationTolerancePercent`, and the coherence guard's time budget:
+  `attemptTimeoutSeconds` (hard bound on ONE LLM attempt) + `retryReserveSeconds`
+  (kept for journaling, orders and the lifecycle write after the last attempt).
+  Asserted at startup against `scheduler.maxCycleSeconds`:
+  `2 × attemptTimeoutSeconds + retryReserveSeconds ≤ maxCycleSeconds`.
 - `execution` — `startingCapitalUsd` (env `STARTING_CAPITAL_USD`), `feePercent`
   (env `FEE_PERCENT`), the per-class `caps` (big / small / `minCashPercent`), and
   `coinClass` (tag a coin `big`/`small`; unlisted defaults to `small`).
@@ -550,6 +554,31 @@ All knobs live in [`src/config/index.ts`](src/config/index.ts):
 - `alerting` — the alert thresholds `floorStreakThreshold` (overheating, 10) and
   `consecutiveFailuresThreshold` (degraded, 3). The secrets (Telegram / Healthchecks)
   are **not** here — they're read from the environment at call time.
+
+### The coherence guard (`COHERENCE_GUARD`)
+
+Before anything is persisted or executed, deterministic code compares the structured
+parts of the model's answer to each other: a `hold` may not move the reference target, a
+moved target must be able to produce an order, a thesis may only be written for a line
+that moves (or has none yet), and a line that moves must supply its thesis. It never
+reads prose. An invalid response gets **one** retry naming the valid ways out; a second
+failure journals the cycle as `guard_failed`, places no order and sends a Telegram alert.
+
+| `COHERENCE_GUARD` | Behaviour |
+| --- | --- |
+| **unset** (the default) | Guard **armed**. There is nothing to set to be protected. |
+| `on` | Guard armed. |
+| `off` | Guard disarmed — the escape hatch for the day it proves too tight. |
+| anything else | **Startup fails loudly.** Never a silent fallback. |
+
+The flag covers the **guard only**. The output-contract field order (reasoning before
+the target) is unconditional and has no flag: disarming the guard must never
+reintroduce the bug that lost the 30/07 trade.
+
+Traces land in `decision_guard_events`; the three counters are read from
+`decision_guard_counters`. Verify the guard's verdict against every real production
+response with `npm run replay:coherence`, and its recovery behaviour on a single cycle
+with `npm run replay:retry-1000` (this one makes a real LLM call).
 
 The set of balance-tracked assets — and the AI's allocation universe — are both
 derived from `tradablePairs` via `tradableAssets()`; there's no separate asset

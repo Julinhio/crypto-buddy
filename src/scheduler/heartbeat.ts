@@ -155,7 +155,7 @@ export async function runHeartbeat(
       return { action: 'timed-out', reason: 'cycle-timeout' };
     }
 
-    if (status === 'error' || status === 'parse_failed') {
+    if (status === 'error' || status === 'parse_failed' || status === 'guard_failed') {
       console.error(`[error] cycle did not complete cleanly — ${detail}`);
     }
 
