@@ -1,4 +1,4 @@
-import { config, tradableBaseAssets, STRATEGY_VERSION } from '../config/index.js';
+import { config, tradableBaseAssets, STRATEGY_VERSION, COHERENCE_GUARD } from '../config/index.js';
 import { dec } from '../money.js';
 import { buildMarketContext, type MarketContext } from '../context/build.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
@@ -27,7 +27,20 @@ import {
   type ExecutionSummary,
 } from '../execution/execute.js';
 import { publicMainnetClient, testnetAccountClient } from '../exchanges/binance.js';
-import { allocatableUniverse, reserveStables, validateDecision } from './schema.js';
+import {
+  allocatableUniverse,
+  outputOrderViolation,
+  reserveStables,
+  validateDecision,
+  type ValidatedDecision,
+} from './schema.js';
+import { buildRetryPrompt, checkCoherence, type CoherenceViolation } from './coherence.js';
+import {
+  loadReferenceTarget,
+  recordGuardEvent,
+  type GuardEventInsert,
+} from '../persistence/decisionGuard.js';
+import { sendTelegram } from '../alerting/telegram.js';
 import { buildSystemPrompt, buildUserPrompt, marketStateFromRegime, PROMPT_VERSION } from './prompt.js';
 import { buildSystemPromptV5, buildUserPromptV5, PROMPT_V5_VERSION } from './promptV5.js';
 import { assertAnthropicConfigured, resolveModel, runDecision, type LlmResult } from './llm.js';
@@ -69,8 +82,41 @@ export interface DecideResult {
 export async function decide(): Promise<DecideResult> {
   assertAnthropicConfigured();
 
+  // The cycle's own clock. The coherence guard may spend a SECOND LLM call inside this
+  // wake-up, and the decision to start it is a time-budget decision — so the budget has
+  // to be measured from the moment the cycle really began, not from the first LLM call.
+  const cycleStart = Date.now();
+  const elapsedSeconds = (): number => (Date.now() - cycleStart) / 1000;
+
   const supabase = getSupabaseClient();
   const gitSha = getGitSha();
+
+  /**
+   * Guard events accumulated during this cycle, flushed once the decision row exists so
+   * every one of them can carry its `decision_id`. Deliberately not written as they
+   * happen: an event whose decision is unknown is half a trace, and the whole point of
+   * this table is that the 30/07 verdict was unattributable.
+   */
+  const guardEvents: Array<Omit<GuardEventInsert, 'decision_id' | 'run_token'>> = [];
+  /**
+   * DRAINS the queue, so it is safe — and expected — to call more than once per cycle.
+   *
+   * `persistLifecycle` runs AFTER the decision row exists and can itself queue a
+   * `thesis_write_refused`: a movement the guard accepted may still fail to book (the
+   * mainnet filters, or a failed durable booking), and the lifecycle then refuses the
+   * note the guard had allowed. With a single flush placed before it, exactly those
+   * late events would be dropped — and every refusal would be dropped when the guard is
+   * switched off, which is precisely when this detector is the only one left.
+   *
+   * Draining rather than tracking an index keeps that correct without anyone having to
+   * remember the ordering: whatever is in the queue at each call is written, once.
+   */
+  const flushGuardEvents = async (decisionId: number | null): Promise<void> => {
+    const batch = guardEvents.splice(0);
+    for (const event of batch) {
+      await recordGuardEvent(supabase, { ...event, decision_id: decisionId, run_token: null });
+    }
+  };
 
   const context = await buildMarketContext();
 
@@ -96,7 +142,16 @@ export async function decide(): Promise<DecideResult> {
   // Read the stored lifecycle state UP FRONT — it is an input to this cycle, not an
   // output of it. Loading it here also means the early-return paths below can still
   // ratchet the peak: the price moved whether or not the cycle reached a decision.
-  const stateRead = await loadPositionStates(supabase);
+  //
+  // The reference target rides along: it is the guard's comparison basis and, like the
+  // lifecycle, it is an INPUT to this cycle. It must be read from the database on every
+  // wake-up — the bot runs one process per cycle under Cron Schedule, so there is no
+  // in-memory "last target" to carry, and a module-level cache would read null forever
+  // while looking like it worked.
+  const [stateRead, referenceRead] = await Promise.all([
+    loadPositionStates(supabase),
+    loadReferenceTarget(supabase),
+  ]);
 
   /**
    * Writes the lifecycle state for this cycle. Called on EVERY path that got as far as
@@ -151,10 +206,26 @@ export async function decide(): Promise<DecideResult> {
       )
       .map((n) => n.asset);
     if (refused.length > 0) {
-      console.log(
-        `[thesis] ignored ${refused.length} proposed thesis/theses on unmoved lines (${refused.join(', ')}) — ` +
-          'a thesis is only recorded when the line moves, or when it has none yet.',
-      );
+      const detail =
+        `ignored ${refused.length} proposed thesis/theses on unmoved lines (${refused.join(', ')}) — ` +
+        'a thesis is only recorded when the line moves, or when it has none yet.';
+      console.log(`[thesis] ${detail}`);
+      // THE SECOND DEFECT THIS PR FIXES, and it counts as much as the first. This refusal
+      // fired correctly on cycles 987 and 1000 and produced nothing but the console.log
+      // above — no counter, no consultable state, no alert. The detector of the lost trade
+      // worked on 30/07 and its result evaporated with the process logs.
+      //
+      // With the guard armed this path should now be nearly unreachable (rule 3 rejects
+      // the response before it ever gets here), which is exactly why the trace matters:
+      // a line appearing here means the guard let something through, and that is
+      // something we want to find out from the database rather than from a hunch.
+      guardEvents.push({
+        event_type: 'thesis_write_refused',
+        attempt: 1,
+        rules: [],
+        assets: refused,
+        detail,
+      });
     }
 
     const written = await savePositionStates(supabase, states, context.generatedAt);
@@ -181,8 +252,17 @@ export async function decide(): Promise<DecideResult> {
   // It also closes a pre-existing hazard: a failed journal read makes `derivePortfolio`
   // return a 100%-cash book that does not exist, and deciding on it could redeploy
   // capital the bot already holds.
-  if (!ledgerRead.ok || !stateRead.ok) {
-    const which = !ledgerRead.ok ? 'the execution journal' : 'the stored position state';
+  // The reference target joins the same gate when the guard is armed: without it, rules
+  // 1 and 2 silently stop applying, and a cycle that trades with a disarmed guard it
+  // still believes is armed is worse than a cycle that does not trade at all. When the
+  // guard is OFF the read is irrelevant and its failure changes nothing.
+  const referenceUnavailable = COHERENCE_GUARD && !referenceRead.ok;
+  if (!ledgerRead.ok || !stateRead.ok || referenceUnavailable) {
+    const which = !ledgerRead.ok
+      ? 'the execution journal'
+      : !stateRead.ok
+        ? 'the stored position state'
+        : 'the coherence guard\'s reference target';
     const skipReason =
       `${which} could not be read — refusing to trade on a book and a lifecycle we cannot ` +
       'record the outcome of. Nothing is booked and no state is written; the next cycle retries.';
@@ -241,10 +321,40 @@ export async function decide(): Promise<DecideResult> {
       });
 
   // Edge case 2 — the LLM call itself fails.
+  const callModel = async (
+    retry?: { rejectedResponse: string; instruction: string },
+  ): Promise<LlmResult> =>
+    runDecision({ systemPrompt, userPrompt, assets, strategy: STRATEGY_VERSION, retry });
+
+  /**
+   * LLM cost and latency for the WHOLE cycle, not for the last call.
+   *
+   * The guard can spend two calls inside one wake-up, and simply overwriting `llm` on
+   * the retry would journal only the second one — every recovered cycle would then
+   * under-report Anthropic usage and end-to-end latency by roughly half. That is not an
+   * abstract accounting concern here: the per-attempt time bound in this very PR was
+   * sized from `decisions.latency_ms` over the v5 corpus, so a column that silently
+   * stopped counting all the calls would corrupt the next person's calibration of it.
+   *
+   * `latency_ms` therefore means "time spent in the LLM this cycle". On the 133 cycles
+   * that need no retry that is exactly what it meant before.
+   */
+  const telemetry = { latencyMs: 0, inputTokens: null as number | null, outputTokens: null as number | null };
+  const addAttempt = (result: LlmResult): void => {
+    telemetry.latencyMs += result.latencyMs;
+    // Kept null when the API reported nothing for either attempt — a real zero and an
+    // unknown are different facts, and the column is nullable precisely to say so.
+    const add = (running: number | null, next: number | null): number | null =>
+      running == null && next == null ? null : (running ?? 0) + (next ?? 0);
+    telemetry.inputTokens = add(telemetry.inputTokens, result.inputTokens);
+    telemetry.outputTokens = add(telemetry.outputTokens, result.outputTokens);
+  };
+
   const llmStart = Date.now();
   let llm: LlmResult;
   try {
-    llm = await runDecision({ systemPrompt, userPrompt, assets, strategy: STRATEGY_VERSION });
+    llm = await callModel();
+    addAttempt(llm);
   } catch (err) {
     const latencyMs = Date.now() - llmStart;
     const message = err instanceof Error ? err.message : String(err);
@@ -256,8 +366,80 @@ export async function decide(): Promise<DecideResult> {
       latency_ms: latencyMs,
     });
     const { persisted, id } = await insertDecision(supabase, row);
+    await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
     return emptyResult('error', persisted, id, row, portfolio);
+  }
+
+  /**
+   * Ends the cycle without executing anything: journals the row, attaches the guard
+   * events to it, ratchets the lifecycle, and alerts. Shared by the three terminal
+   * failure paths below so none of them can forget one of those four steps.
+   */
+  const failCycle = async (
+    status: 'guard_failed' | 'error',
+    last: LlmResult,
+    event: Omit<GuardEventInsert, 'decision_id' | 'run_token'>,
+    alert: string,
+    proposal?: ValidatedDecision,
+  ): Promise<DecideResult> => {
+    const row = makeRow(decisionContext, context.regime, gitSha, {
+      status,
+      model: last.model,
+      raw_response: last.rawResponse,
+      latency_ms: telemetry.latencyMs,
+      input_tokens: telemetry.inputTokens,
+      output_tokens: telemetry.outputTokens,
+      // What it PROPOSED, kept for the post-mortem. A non-`decided` row is never read
+      // back as the reference target (that query filters on status), so recording the
+      // refused proposal here is evidence, never an input to a later cycle.
+      ...(proposal
+        ? {
+            target_allocation: proposal.targetAllocation,
+            action_type: proposal.actionType,
+            what_changed: proposal.whatChanged,
+            confidence: proposal.confidence,
+            reasoning: proposal.reasoning,
+            notification_summary: proposal.notificationSummary,
+          }
+        : {}),
+    });
+    const { persisted, id } = await insertDecision(supabase, row);
+    guardEvents.push(event);
+    await persistLifecycle(portfolio, []);
+    // After persistLifecycle, so anything it queued is written too. It cannot queue a
+    // refusal here (it is called with no notes), but the ordering is the same on every
+    // path so nobody has to remember which one is the exception.
+    await flushGuardEvents(id);
+    // Best-effort by contract: sendTelegram never throws and never blocks the cycle.
+    await sendTelegram(alert);
+    return emptyResult(status, persisted, id, row, portfolio);
+  };
+
+  // ── The SYSTEMIC check — is the output contract itself still standing? ─────────
+  //
+  // Deliberately NOT routed through the retry. The key order is deterministic and comes
+  // from the schema, so a violation is not a bad cycle: it means the contract broke for
+  // every cycle at once (an SDK change, an API change, a schema edit). Relaunching would
+  // burn a second call to hit the same wall before dying anyway.
+  //
+  // So this kills the cycle immediately, with its own alert, worded as a broken system
+  // contract rather than one failed wake-up — the two need different reactions from
+  // Julien, and an alert that reads like a routine rejection would get the wrong one.
+  const orderProblem = outputOrderViolation(llm.rawResponse);
+  if (orderProblem) {
+    console.error(`[CRITICAL] output contract broken: ${orderProblem} No retry, no execution.`);
+    return failCycle(
+      'error',
+      llm,
+      { event_type: 'output_order_violation', attempt: 1, rules: [], assets: [], detail: orderProblem },
+      '🚨 CONTRAT DE SORTIE CASSÉ (condition systémique)\n\n' +
+        `${orderProblem}\n\n` +
+        "L'ordre des champs vient du schéma et est déterministe : si une réponse l'enfreint, " +
+        'TOUS les cycles sont touchés à l\'identique, pas seulement celui-ci. Aucune relance ' +
+        "n'a été tentée et aucun ordre n'a été passé. Le bot va continuer à échouer à chaque " +
+        'réveil jusqu\'à correction — à regarder maintenant, pas demain.',
+    );
   }
 
   // Edge case 3 — invalid response.
@@ -274,18 +456,210 @@ export async function decide(): Promise<DecideResult> {
       status: 'parse_failed',
       model: llm.model,
       raw_response: llm.rawResponse,
-      latency_ms: llm.latencyMs,
-      input_tokens: llm.inputTokens,
-      output_tokens: llm.outputTokens,
+      latency_ms: telemetry.latencyMs,
+      input_tokens: telemetry.inputTokens,
+      output_tokens: telemetry.outputTokens,
     });
     const { persisted, id } = await insertDecision(supabase, row);
+    await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
     return emptyResult('parse_failed', persisted, id, row, portfolio);
   }
 
-  // Decided — bound to the caps, journal the decision, compute + journal movements.
-  const v = validation.value;
-  const clamp = clampAllocation(v.targetAllocation, reserveStable, config);
+  // ── The COHERENCE GUARD ──────────────────────────────────────────────────────
+  //
+  // Everything the guard needs is derived here, BEFORE any persistence and before any
+  // execution (mandate §4.2 rule 5). The bounded target and its movements are pure
+  // computations, so running them early costs nothing and buys the guard the only honest
+  // answer to "will this target actually produce an order": the one the executor will get.
+  const assetsWithStoredThesis = new Set(
+    [...stateRead.states.values()]
+      .filter((state) => (state.thesis ?? '').trim() !== '')
+      .map((state) => state.asset),
+  );
+
+  const evaluate = (decision: ValidatedDecision) => {
+    const clamp = clampAllocation(decision.targetAllocation, reserveStable, config);
+    const movements = computeMovements(
+      portfolio,
+      clamp.applied,
+      priceOf,
+      config.execution.feePercent,
+      config.execution.minMovementPercent,
+    );
+    const verdict = COHERENCE_GUARD
+      ? checkCoherence({
+          // v4 has no `position_notes` at all, so the thesis rules would be unsatisfiable
+          // under it — and `STRATEGY_VERSION` absent resolving to v4 is the project's
+          // disaster-recovery posture. See CoherenceInput.strategy.
+          strategy: STRATEGY_VERSION,
+          actionType: decision.actionType,
+          targetAllocation: decision.targetAllocation,
+          referenceTarget: referenceRead.target,
+          movements,
+          reserveAsset: reserveStable,
+          notes: decision.positionNotes,
+          assetsWithStoredThesis,
+        })
+      : { ok: true, violations: [] as CoherenceViolation[] };
+    return { clamp, movements, verdict };
+  };
+
+  let v = validation.value;
+  let evaluated = evaluate(v);
+
+  if (!evaluated.verdict.ok) {
+    const first = evaluated.verdict.violations;
+    const firstRules = first.map((x) => x.rule);
+    const firstAssets = [...new Set(first.flatMap((x) => x.assets))];
+    const firstDetail = first.map((x) => `[${x.rule}] ${x.detail}`).join(' | ');
+
+    console.warn(`[guard] response rejected (${firstRules.join(', ')}) — relaunching once. ${firstDetail}`);
+    guardEvents.push({
+      event_type: 'guard_rejected_first_attempt',
+      attempt: 1,
+      rules: firstRules,
+      assets: firstAssets,
+      detail: firstDetail,
+    });
+
+    // THE TIME-BUDGET GATE. One more bounded attempt only if it still fits inside the
+    // cycle WITH the post-decision reserve intact. Refusing here is a clean failure a
+    // second before the watchdog would have produced a dirty one — possibly mid-booking.
+    const remaining = config.scheduler.maxCycleSeconds - elapsedSeconds();
+    const needed = config.decision.attemptTimeoutSeconds + config.decision.retryReserveSeconds;
+    if (remaining < needed) {
+      const detail =
+        `no room for the retry: ${remaining.toFixed(1)}s left of the ${config.scheduler.maxCycleSeconds}s ` +
+        `budget, ${needed}s needed (one bounded attempt + the post-decision reserve). ` +
+        `Rejected on: ${firstRules.join(', ')}.`;
+      console.error(`[guard] ${detail} Failing the cycle cleanly instead.`);
+      return failCycle(
+        'guard_failed',
+        llm,
+        {
+          // NOT `guard_failed_after_retry`: no retry was attempted. Counting it there
+          // would inflate "responses still incoherent after the relaunch" with cycles
+          // that never got one, and point the operator at the retry prompt when the
+          // actual problem is latency.
+          event_type: 'guard_failed_no_retry_budget',
+          attempt: 1,
+          rules: firstRules,
+          assets: firstAssets,
+          detail,
+        },
+        `⚠️ Cycle en échec — garde de cohérence, sans relance\n\n${detail}\n\nAucun ordre passé.`,
+      );
+    }
+
+    // ── THE SINGLE RETRY ───────────────────────────────────────────────────────
+    //
+    // Timed from OUTSIDE the call, because `addAttempt` only runs when the call returns.
+    // A retry that burns its whole 90s deadline and then throws would otherwise
+    // contribute nothing to `latency_ms`, and the cycles that lose the most time would
+    // be exactly the ones recorded as having spent none.
+    //
+    // That matters more here than ordinary accounting: the per-attempt bound in this PR
+    // was sized from `decisions.latency_ms` over the v5 corpus, so the column has to keep
+    // telling the truth about the failure cases it will be re-read on. Tokens are NOT
+    // credited on this path — a call that threw reported none, and inventing a zero
+    // would be a different lie.
+    const retryStart = Date.now();
+    try {
+      llm = await callModel({
+        rejectedResponse: llm.rawResponse,
+        instruction: buildRetryPrompt(first),
+      });
+      addAttempt(llm);
+    } catch (err) {
+      telemetry.latencyMs += Date.now() - retryStart;
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[ERROR] the guard's retry call failed (${message}) — no decision.`);
+      return failCycle(
+        'error',
+        llm,
+        {
+          // NOT `guard_failed_after_retry`: the call never landed, so no corrected
+          // response exists and there is nothing to judge for coherence. Counting it as a
+          // model-coherence failure would send the operator to the retry prompt when the
+          // problem is transport or the API.
+          event_type: 'guard_retry_call_failed',
+          attempt: 2,
+          rules: firstRules,
+          assets: [],
+          detail: `retry call failed: ${message}`,
+        },
+        `⚠️ Cycle en échec — la relance du garde n'a pas abouti (${message}). Aucun ordre passé.`,
+      );
+    }
+
+    const retryOrderProblem = outputOrderViolation(llm.rawResponse);
+    const retryValidation = retryOrderProblem
+      ? ({ ok: false, error: `output contract broken on the retry: ${retryOrderProblem}` } as const)
+      : llm.parsed
+        ? validateDecision(llm.parsed, assets, config, STRATEGY_VERSION)
+        : ({
+            ok: false,
+            error: llm.parseError ?? `no usable output (stop_reason=${llm.stopReason ?? 'unknown'})`,
+          } as const);
+
+    if (!retryValidation.ok) {
+      const detail = `the corrected response is itself unusable: ${retryValidation.error}`;
+      console.error(`[guard] ${detail}`);
+      return failCycle(
+        'guard_failed',
+        llm,
+        {
+          event_type: 'guard_failed_after_retry',
+          attempt: 2,
+          rules: firstRules,
+          assets: [],
+          detail,
+        },
+        `⚠️ Cycle en échec — garde de cohérence\n\n${detail}\n\nAucun ordre passé.`,
+      );
+    }
+
+    const retryDecision = retryValidation.value;
+    const retryEvaluated = evaluate(retryDecision);
+    if (!retryEvaluated.verdict.ok) {
+      const second = retryEvaluated.verdict.violations;
+      const detail =
+        `still incoherent after the single retry. First attempt: ${firstRules.join(', ')}. ` +
+        `Retry: ${second.map((x) => `[${x.rule}] ${x.detail}`).join(' | ')}`;
+      console.error(`[guard] ${detail} No order placed.`);
+      return failCycle(
+        'guard_failed',
+        llm,
+        {
+          event_type: 'guard_failed_after_retry',
+          attempt: 2,
+          rules: second.map((x) => x.rule),
+          assets: [...new Set(second.flatMap((x) => x.assets))],
+          detail,
+        },
+        '⚠️ Cycle en échec — garde de cohérence\n\n' +
+          `Réponse refusée deux fois de suite.\n\n${detail}\n\n` +
+          'Aucun ordre passé, le cycle est marqué en échec. Le prochain réveil retente normalement.',
+        retryDecision,
+      );
+    }
+
+    // The retry corrected it — this is the outcome the whole relaunch exists for.
+    console.log(`[guard] the retry produced a coherent decision (was: ${firstRules.join(', ')}).`);
+    guardEvents.push({
+      event_type: 'guard_recovered_on_retry',
+      attempt: 2,
+      rules: firstRules,
+      assets: firstAssets,
+      detail: `corrected after: ${firstDetail}`,
+    });
+    v = retryDecision;
+    evaluated = retryEvaluated;
+  }
+
+  // Decided — bound to the caps, journal the decision, execute the movements.
+  const { clamp, movements } = evaluated;
 
   const row = makeRow(decisionContext, context.regime, gitSha, {
     status: 'decided',
@@ -305,20 +679,21 @@ export async function decide(): Promise<DecideResult> {
     applied_delay_minutes: v.appliedDelayMinutes,
     model: llm.model,
     raw_response: llm.rawResponse,
-    latency_ms: llm.latencyMs,
-    input_tokens: llm.inputTokens,
-    output_tokens: llm.outputTokens,
+    latency_ms: telemetry.latencyMs,
+    input_tokens: telemetry.inputTokens,
+    output_tokens: telemetry.outputTokens,
   });
   const { persisted, id } = await insertDecision(supabase, row);
-
-  // The movements to reach the bounded allocation, sized on the book at real prices.
-  const movements = computeMovements(
-    portfolio,
-    clamp.applied,
-    priceOf,
-    config.execution.feePercent,
-    config.execution.minMovementPercent,
-  );
+  // NO FLUSH HERE, deliberately. `recordGuardEvent` is a best-effort Supabase write with
+  // no deadline of its own, and everything below it places real orders. Awaiting optional
+  // telemetry ahead of execution would let a stalled observability insert burn the cycle
+  // budget until the watchdog force-exits — leaving a persisted `decided` row and a trade
+  // that never happened. That is the very failure this PR exists to remove, and it would
+  // be absurd to reintroduce it through the trace that documents it.
+  //
+  // Same tier and same placement rule as the equity snapshot and the Telegram sends: the
+  // write happens once the cycle's real work is done. The single flush after
+  // persistLifecycle drains everything queued here.
 
   // Real execution. Each booking needs the decision id as FK and a durable home,
   // so without a persisted decision we place nothing (the book can't evolve).
@@ -363,6 +738,13 @@ export async function decide(): Promise<DecideResult> {
   // Written from the POST-trade book, so an entry, a reinforcement and a full exit all
   // land in the cycle that caused them.
   await persistLifecycle(portfolioAfter, bookedLedger, v.positionNotes);
+
+  // THE SECOND FLUSH, and it is the one that matters on this path. `persistLifecycle`
+  // can queue a `thesis_write_refused` that no earlier flush could have seen: the guard
+  // judges on the movements it COMPUTED, the lifecycle on what actually BOOKED, and a
+  // movement can pass the first and fail the second (a mainnet filter, a failed durable
+  // booking). With the guard switched off, this is the only path those refusals have.
+  await flushGuardEvents(id);
 
   return {
     status: 'decided',

@@ -42,6 +42,21 @@ export function printDecision(result: DecideResult): void {
     return;
   }
 
+  if (status === 'guard_failed') {
+    // Deliberately NOT falling through to the "decided" block below. The row carries a
+    // target and an action_type — the proposal, kept as evidence — and printing them
+    // under the usual headings would read as a decision that was made. It was refused.
+    console.log('The response was REFUSED by the coherence guard (see the rules above).');
+    console.log('Nothing was executed. The proposal is journaled as evidence only:');
+    console.log('');
+    console.log(`proposed action_type   ${row.action_type ?? '(none)'}`);
+    console.log(`proposed allocation    ${JSON.stringify(row.target_allocation ?? null)}`);
+    console.log('');
+    console.log('Raw response:');
+    console.log(row.raw_response ?? '(empty)');
+    return;
+  }
+
   // decided
   console.log('');
   console.log(`action_type   ${row.action_type}`);

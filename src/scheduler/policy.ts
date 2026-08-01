@@ -10,7 +10,7 @@
  */
 
 /** The decide() status the cycle returned (DecisionRow['status']). */
-export type CycleStatus = 'decided' | 'skipped' | 'parse_failed' | 'error';
+export type CycleStatus = 'decided' | 'skipped' | 'parse_failed' | 'error' | 'guard_failed';
 
 /** The scheduler's coarse outcome class — drives rescheduling and counters. */
 export type RunOutcome = 'decided' | 'skip' | 'error';
@@ -56,7 +56,14 @@ export function missedBeats(
 export function classifyOutcome(status: CycleStatus): RunOutcome {
   if (status === 'decided') return 'decided';
   if (status === 'skipped') return 'skip';
-  // parse_failed / error / a thrown cycle: no usable decision → back off.
+  // parse_failed / error / guard_failed / a thrown cycle: no usable decision → back off.
+  //
+  // `guard_failed` deliberately lands here rather than in `skip`. A skip means the run
+  // mechanics worked and there was simply nothing to decide on; a decision refused twice
+  // for incoherence is a cycle that produced no trading, and it should back off and feed
+  // the consecutive-failure counter like any other hard failure — so a guard that starts
+  // rejecting everything raises the "degraded" alert at three in a row instead of quietly
+  // holding the bot flat.
   return 'error';
 }
 

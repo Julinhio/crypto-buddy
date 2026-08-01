@@ -180,6 +180,26 @@ let passed = 0;
   assert.ok(v5Text.includes('5 to 10 POINTS'), 'v5 states the mobile tactical target');
   assert.ok(v5Text.includes('FULL EXIT of a position is always allowed'), 'v5 keeps the full-exit exemption');
   assert.ok(v5Text.includes('You do NOT output market_state'), 'v5 takes the regime away from the model');
+
+  // The output contract's ORDER is now part of the mandate, not just of the schema. The
+  // schema is what actually constrains the decoder (pinned in src/test/coherence.ts);
+  // saying it in the prompt too is what stops the model treating `reasoning` as a
+  // justification written after the fact.
+  assert.ok(
+    v5Text.includes('THE ORDER OF THE FIELDS IS PART OF THE CONTRACT'),
+    'v5 states that the field order is contractual',
+  );
+  assert.ok(
+    v5Text.includes('Do not decide and then'),
+    'v5 tells the model not to decide first and justify afterwards',
+  );
+  // And it must say plainly that the guard does not ask for more trading. A mandate that
+  // reads as "be coherent OR ELSE" is a mandate that manufactures activity to look safe,
+  // which is the exact failure v5 was written to undo.
+  assert.ok(
+    v5Text.includes('None of these ask you to trade more'),
+    'v5 says the coherence check is not a push to trade',
+  );
   assert.ok(v5Text.includes('WITH THE THESIS, not with your last action'), 'anti yo-yo is rebound to the thesis');
 
   // The reversal playbook must be SPLIT IN BOTH DIRECTIONS. The single line it replaced
