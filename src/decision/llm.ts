@@ -13,24 +13,38 @@ let client: Anthropic | null = null;
 const LLM_MAX_RETRIES = 1;
 
 /**
- * The per-REQUEST timeout, derived so that one logical attempt — request plus its
- * transport retries — can never exceed `config.decision.attemptTimeoutSeconds`.
+ * The per-REQUEST timeout: how long ONE HTTP request may take before the SDK gives up on
+ * it and (once) redials. At today's values, 90s / 2 = 45s. Measured worst case ever
+ * observed is 39.23s, p95 29.21s — so this cut only bites on a call that has already
+ * gone far outside its distribution, and when it does the SDK redials rather than the
+ * cycle dying on a wedged socket.
  *
- * Derived rather than written down twice. The coherence guard puts a second LLM call
- * inside the same cycle, and `validateDecisionTimingConfig` asserts at startup that
- * `2 × attemptTimeoutSeconds + retryReserveSeconds ≤ maxCycleSeconds`. That assertion is
- * only true if this constant actually honours the budget it is asserted against, so it
- * is computed from it: a hardcoded 60s here would silently make the startup assertion a
- * lie the day someone tuned the config.
- *
- * At today's values: 90s / 2 = 45s per request, ×2 attempts = 90s worst per logical
- * call. Measured worst case ever observed is 39.23s, p95 29.21s — so the 45s cut only
- * bites on a call that has already gone far outside its distribution, and when it does,
- * the SDK redials rather than the cycle dying.
+ * It is NOT the attempt bound. See ATTEMPT_DEADLINE_MS below.
  */
 const LLM_TIMEOUT_MS = Math.floor(
   (config.decision.attemptTimeoutSeconds * 1000) / (1 + LLM_MAX_RETRIES),
 );
+
+/**
+ * THE ATTEMPT-WIDE DEADLINE — the bound the rest of the system actually reasons about.
+ *
+ * `timeout × (1 + maxRetries)` is NOT a wall-clock bound, and treating it as one is a
+ * quiet lie: between a failed request and its retry the SDK SLEEPS (exponential backoff
+ * with jitter, and on a 429 it honours `retry-after`, which the server can set to
+ * anything). That sleep is unbudgeted, so one logical attempt can outrun the arithmetic.
+ *
+ * It matters because two things are asserted on that arithmetic: the startup invariant
+ * `2 × attemptTimeoutSeconds + retryReserveSeconds ≤ maxCycleSeconds`, and the guard's
+ * pre-retry admission check. If an attempt can overrun, a retry admitted with 135s left
+ * could eat into the 45s reserved for journaling, placing orders and writing the
+ * lifecycle — and the watchdog would fire DURING a booking. That is the one place this
+ * codebase refuses to be sloppy.
+ *
+ * So the deadline is enforced with an `AbortSignal`, which the SDK honours across the
+ * whole operation including its backoff sleeps — and which genuinely cancels the request
+ * rather than leaving an orphan in flight, as a `Promise.race` against a timer would.
+ */
+const ATTEMPT_DEADLINE_MS = config.decision.attemptTimeoutSeconds * 1000;
 
 const MISSING_KEY_MESSAGE =
   'Missing ANTHROPIC_API_KEY — set it in .env to run the decision layer. ' +
@@ -136,10 +150,11 @@ export async function runDecision(params: {
       messages,
       output_config: { format: zodOutputFormat(schema) },
     },
-    // The per-attempt bound, restated at the call site so it applies to the retry too.
-    // Explicit rather than inherited from the client so the relation to the cycle
-    // budget is visible where the network call actually happens.
-    { timeout: LLM_TIMEOUT_MS, maxRetries: LLM_MAX_RETRIES },
+    // The per-attempt bound, restated at the call site so it applies to the retry too,
+    // and so the relation to the cycle budget is visible where the network call actually
+    // happens. `signal` is the load-bearing one: `timeout` and `maxRetries` bound the
+    // REQUESTS, the signal bounds the whole attempt including the SDK's backoff sleeps.
+    { timeout: LLM_TIMEOUT_MS, maxRetries: LLM_MAX_RETRIES, signal: AbortSignal.timeout(ATTEMPT_DEADLINE_MS) },
   );
   const latencyMs = Date.now() - start;
 

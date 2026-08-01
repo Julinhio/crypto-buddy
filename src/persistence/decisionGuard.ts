@@ -104,7 +104,17 @@ export async function loadReferenceTarget(
 export type GuardEventType =
   | 'guard_rejected_first_attempt'
   | 'guard_recovered_on_retry'
+  /** Relaunched once, and the corrected response was still incoherent. */
   | 'guard_failed_after_retry'
+  /**
+   * Rejected, and there was not enough cycle budget left to even attempt the retry
+   * (migration 0020). Kept out of `failed_after_retry` on purpose: the two are different
+   * failures with different reactions. "The model cannot correct itself" sends you to
+   * the retry prompt and the rules; "the cycle ran out of time before trying" sends you
+   * to the latency and the cycle budget, and the model is not involved at all. A counter
+   * that mixed them would send the operator looking in the wrong place.
+   */
+  | 'guard_failed_no_retry_budget'
   | 'output_order_violation'
   | 'thesis_write_refused';
 

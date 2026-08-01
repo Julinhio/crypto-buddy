@@ -538,7 +538,11 @@ export async function decide(): Promise<DecideResult> {
         'guard_failed',
         llm,
         {
-          event_type: 'guard_failed_after_retry',
+          // NOT `guard_failed_after_retry`: no retry was attempted. Counting it there
+          // would inflate "responses still incoherent after the relaunch" with cycles
+          // that never got one, and point the operator at the retry prompt when the
+          // actual problem is latency.
+          event_type: 'guard_failed_no_retry_budget',
           attempt: 1,
           rules: firstRules,
           assets: firstAssets,
