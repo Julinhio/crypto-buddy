@@ -312,10 +312,35 @@ export async function decide(): Promise<DecideResult> {
   ): Promise<LlmResult> =>
     runDecision({ systemPrompt, userPrompt, assets, strategy: STRATEGY_VERSION, retry });
 
+  /**
+   * LLM cost and latency for the WHOLE cycle, not for the last call.
+   *
+   * The guard can spend two calls inside one wake-up, and simply overwriting `llm` on
+   * the retry would journal only the second one — every recovered cycle would then
+   * under-report Anthropic usage and end-to-end latency by roughly half. That is not an
+   * abstract accounting concern here: the per-attempt time bound in this very PR was
+   * sized from `decisions.latency_ms` over the v5 corpus, so a column that silently
+   * stopped counting all the calls would corrupt the next person's calibration of it.
+   *
+   * `latency_ms` therefore means "time spent in the LLM this cycle". On the 133 cycles
+   * that need no retry that is exactly what it meant before.
+   */
+  const telemetry = { latencyMs: 0, inputTokens: null as number | null, outputTokens: null as number | null };
+  const addAttempt = (result: LlmResult): void => {
+    telemetry.latencyMs += result.latencyMs;
+    // Kept null when the API reported nothing for either attempt — a real zero and an
+    // unknown are different facts, and the column is nullable precisely to say so.
+    const add = (running: number | null, next: number | null): number | null =>
+      running == null && next == null ? null : (running ?? 0) + (next ?? 0);
+    telemetry.inputTokens = add(telemetry.inputTokens, result.inputTokens);
+    telemetry.outputTokens = add(telemetry.outputTokens, result.outputTokens);
+  };
+
   const llmStart = Date.now();
   let llm: LlmResult;
   try {
     llm = await callModel();
+    addAttempt(llm);
   } catch (err) {
     const latencyMs = Date.now() - llmStart;
     const message = err instanceof Error ? err.message : String(err);
@@ -348,9 +373,9 @@ export async function decide(): Promise<DecideResult> {
       status,
       model: last.model,
       raw_response: last.rawResponse,
-      latency_ms: last.latencyMs,
-      input_tokens: last.inputTokens,
-      output_tokens: last.outputTokens,
+      latency_ms: telemetry.latencyMs,
+      input_tokens: telemetry.inputTokens,
+      output_tokens: telemetry.outputTokens,
       // What it PROPOSED, kept for the post-mortem. A non-`decided` row is never read
       // back as the reference target (that query filters on status), so recording the
       // refused proposal here is evidence, never an input to a later cycle.
@@ -414,9 +439,9 @@ export async function decide(): Promise<DecideResult> {
       status: 'parse_failed',
       model: llm.model,
       raw_response: llm.rawResponse,
-      latency_ms: llm.latencyMs,
-      input_tokens: llm.inputTokens,
-      output_tokens: llm.outputTokens,
+      latency_ms: telemetry.latencyMs,
+      input_tokens: telemetry.inputTokens,
+      output_tokens: telemetry.outputTokens,
     });
     const { persisted, id } = await insertDecision(supabase, row);
     await flushGuardEvents(id);
@@ -447,6 +472,10 @@ export async function decide(): Promise<DecideResult> {
     );
     const verdict = COHERENCE_GUARD
       ? checkCoherence({
+          // v4 has no `position_notes` at all, so the thesis rules would be unsatisfiable
+          // under it — and `STRATEGY_VERSION` absent resolving to v4 is the project's
+          // disaster-recovery posture. See CoherenceInput.strategy.
+          strategy: STRATEGY_VERSION,
           actionType: decision.actionType,
           targetAllocation: decision.targetAllocation,
           referenceTarget: referenceRead.target,
@@ -507,6 +536,7 @@ export async function decide(): Promise<DecideResult> {
         rejectedResponse: llm.rawResponse,
         instruction: buildRetryPrompt(first),
       });
+      addAttempt(llm);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[ERROR] the guard's retry call failed (${message}) — no decision.`);
@@ -610,9 +640,9 @@ export async function decide(): Promise<DecideResult> {
     applied_delay_minutes: v.appliedDelayMinutes,
     model: llm.model,
     raw_response: llm.rawResponse,
-    latency_ms: llm.latencyMs,
-    input_tokens: llm.inputTokens,
-    output_tokens: llm.outputTokens,
+    latency_ms: telemetry.latencyMs,
+    input_tokens: telemetry.inputTokens,
+    output_tokens: telemetry.outputTokens,
   });
   const { persisted, id } = await insertDecision(supabase, row);
   // Attached to the decision they were about — including a rejection that the retry then

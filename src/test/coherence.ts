@@ -59,6 +59,7 @@ const movement = (asset: string, side: 'buy' | 'sell' = 'sell', fullExit = false
 });
 
 const input = (over: Partial<CoherenceInput> = {}): CoherenceInput => ({
+  strategy: 'v5',
   actionType: 'hold',
   targetAllocation: { ...REFERENCE },
   referenceTarget: { ...REFERENCE },
@@ -235,6 +236,56 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   ok(
     'a full exit that supplies a note anyway is accepted',
     checkCoherence({ ...exit, notes: [note('XRP')] }).ok,
+  );
+}
+
+/* ── v4: the thesis rules must NOT be armed, or the guard is a trading freeze ─── */
+
+{
+  // A thesis is a v5 concept. The v4 schema has no `position_notes` at all, so
+  // `validateDecision` can only ever hand back an empty array under v4 — which means an
+  // armed rule 4 fires on EVERY non-full-exit movement and the retry cannot satisfy it
+  // (adding the field fails the v4 schema). Ordinary buys, partial sells and rebalances
+  // would all be refused twice.
+  //
+  // And v4 is not a dead branch: STRATEGY_VERSION absent resolves to v4 BY DESIGN. That
+  // is the posture that makes "an environment that lost its variables comes back safe"
+  // true. A guard that cannot be satisfied under v4 would turn that fallback from
+  // "trades under the old mandate" into "cannot trade at all".
+  const v4Move = input({
+    strategy: 'v4',
+    actionType: 'rebalance',
+    targetAllocation: { ...REFERENCE, BNB: 8, USDT: 47 },
+    movements: [movement('BNB')],
+    notes: [], // v4 CANNOT produce notes — the schema has no such field
+    assetsWithStoredThesis: new Set(['BNB']),
+  });
+  ok('v4: a movement with no note is NOT rejected (v4 cannot emit notes at all)', checkCoherence(v4Move).ok);
+
+  ok(
+    'v4: a partial trim, a buy and a rebalance all still execute',
+    checkCoherence({ ...v4Move, actionType: 'de_risk' }).ok &&
+      checkCoherence({ ...v4Move, movements: [movement('BTC', 'buy')] }).ok,
+  );
+
+  // But the strategy-agnostic rules stay armed: a hold that moved its target, and a
+  // target that cannot produce an order, are incoherent under any mandate.
+  ok(
+    'v4: rule 1 stays armed',
+    rules(input({ strategy: 'v4', targetAllocation: { ...REFERENCE, BNB: 11, USDT: 44 } })).includes(
+      'hold_moved_target',
+    ),
+  );
+  ok(
+    'v4: rule 2 stays armed',
+    rules(
+      input({
+        strategy: 'v4',
+        actionType: 'rebalance',
+        targetAllocation: { ...REFERENCE, BNB: 11, USDT: 44 },
+        movements: [],
+      }),
+    ).includes('target_not_executable'),
   );
 }
 

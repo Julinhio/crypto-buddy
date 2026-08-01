@@ -183,6 +183,8 @@ export function judge(
     config.execution.minMovementPercent,
   );
   return checkCoherence({
+    // The corpus is v5 by construction (`loadCorpus` filters on prompt_version).
+    strategy: 'v5',
     actionType: decision.actionType,
     targetAllocation: decision.targetAllocation,
     referenceTarget,

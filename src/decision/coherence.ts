@@ -1,4 +1,5 @@
 import type { ActionType, PositionNote } from './schema.js';
+import type { StrategyVersion } from '../config/index.js';
 import type { Movement } from '../execution/movements.js';
 import { mayWriteThesis } from '../portfolio/lifecycle.js';
 
@@ -55,6 +56,26 @@ export interface CoherenceViolation {
 }
 
 export interface CoherenceInput {
+  /**
+   * WHICH CONTRACT the response was produced under. Rules 3 and 4 are about theses, and
+   * a thesis is a v5 concept: the v4 schema has no `position_notes` at all, so
+   * `validateDecision` can only ever hand back an empty array under v4.
+   *
+   * Without this, an armed guard is a TRADING FREEZE on v4. Every non-full-exit movement
+   * trips rule 4 ("this line moved and supplied no note"), and the retry cannot fix it —
+   * adding the field fails the v4 schema. Ordinary buys, partial sells and rebalances
+   * would all be refused twice and journaled `guard_failed`.
+   *
+   * That is not a theoretical path. `STRATEGY_VERSION` absent resolves to v4 BY DESIGN —
+   * it is the project's disaster-recovery posture, the thing that makes "an environment
+   * that lost its variables comes back safe" true. Arming a guard that cannot be
+   * satisfied under v4 would turn that fallback from "trades under the old mandate" into
+   * "cannot trade at all", which is the opposite of a safety net.
+   *
+   * Rules 1 and 2 stay armed under both: a hold that moves its target, and a target that
+   * cannot produce an order, are incoherent whatever the mandate.
+   */
+  strategy: StrategyVersion;
   actionType: ActionType;
   /** The allocation the model emitted this cycle. */
   targetAllocation: Record<string, number>;
@@ -117,9 +138,19 @@ const fmt = (allocation: Record<string, number>): string =>
  * it 139 real production responses without touching the network.
  */
 export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
-  const { actionType, targetAllocation, referenceTarget, movements, notes, assetsWithStoredThesis } =
-    input;
+  const {
+    strategy,
+    actionType,
+    targetAllocation,
+    referenceTarget,
+    movements,
+    notes,
+    assetsWithStoredThesis,
+  } = input;
   const violations: CoherenceViolation[] = [];
+  // Theses only exist under v5 — see the field's documentation above for why arming
+  // rules 3 and 4 under v4 would freeze trading rather than protect it.
+  const thesisRulesApply = strategy === 'v5';
 
   // Which lines actually move this cycle, per the real pipeline. `movements` is computed
   // from the RISK-BOUNDED target against the book, which is exactly what the executor
@@ -180,13 +211,15 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   //
   // Reusing the predicate is also what keeps cycle 879 passing: four theses on four
   // untouched lines, every one of them legitimate because no line had a thesis yet.
-  const refusedNotes = notes.filter(
-    (note) =>
-      !mayWriteThesis({
-        booked: movingAssets.has(note.asset),
-        hasStoredThesis: assetsWithStoredThesis.has(note.asset),
-      }),
-  );
+  const refusedNotes = !thesisRulesApply
+    ? []
+    : notes.filter(
+        (note) =>
+          !mayWriteThesis({
+            booked: movingAssets.has(note.asset),
+            hasStoredThesis: assetsWithStoredThesis.has(note.asset),
+          }),
+      );
   if (refusedNotes.length > 0) {
     const assets = refusedNotes.map((n) => n.asset);
     violations.push({
@@ -210,9 +243,11 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   // the code is contractually about to discard, and rule 4's purpose (no move without a
   // recorded rationale) has no target: there is no line left to record it against. The
   // rationale still lands in what_changed and reasoning, as on any cycle.
-  const movedWithoutNote = [...movingAssets]
-    .filter((asset) => !fullExitAssets.has(asset))
-    .filter((asset) => !notes.some((n) => n.asset === asset));
+  const movedWithoutNote = !thesisRulesApply
+    ? []
+    : [...movingAssets]
+        .filter((asset) => !fullExitAssets.has(asset))
+        .filter((asset) => !notes.some((n) => n.asset === asset));
   if (movedWithoutNote.length > 0) {
     violations.push({
       rule: 'moved_line_without_note',
