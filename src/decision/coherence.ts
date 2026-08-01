@@ -113,14 +113,45 @@ export interface CoherenceVerdict {
 const TARGET_EPSILON = 0.01;
 
 /**
- * The assets whose target moved, comparing ONLY the keys both allocations share.
+ * The reference, RESTATED in this cycle's universe.
  *
- * The intersection matters. This cycle's universe is derived from the pairs that
- * actually returned data, so an asset can legitimately disappear between two wake-ups
- * (a dropped feed). Comparing over the union would then read the code's own universe
- * change as the model changing its mind, and every hold in that window would be
- * rejected — a false positive caused entirely by us.
+ * This cycle's allocatable universe comes from the pairs that actually returned data, so
+ * an asset can vanish between two wake-ups when its feed drops. Two things then happen at
+ * once, and only handling the first is a trap:
+ *
+ *   1. the vanished key is absent from the target. Comparing over the union would read
+ *      that as the model changing its mind — handled by comparing the intersection;
+ *
+ *   2. THE VANISHED ASSET'S WEIGHT HAS TO GO SOMEWHERE. The schema is strict and still
+ *      requires the remaining allocations to sum to 100, so a line that was at 8% leaves
+ *      8 points that the model MUST reassign. The neutral place is cash. Compared
+ *      naively, the reserve then looks like it moved by 8 points, rule 1 rejects a
+ *      perfectly genuine hold, and the retry cannot fix it either — re-emitting the old
+ *      target is impossible, its key is now forbidden. Every cycle would die for as long
+ *      as the feed stayed down.
+ *
+ * So the dropped weight is credited to the reserve before comparing: parking an orphaned
+ * line's weight in cash is what the code itself would do, and it is not a decision. Note
+ * what this deliberately does NOT absolve — a model that reassigns that weight into
+ * another COIN has made a real allocation choice, the coin still reads as moved, and a
+ * `hold` claiming otherwise is still rejected.
  */
+function referenceInCurrentUniverse(
+  target: Record<string, number>,
+  reference: Record<string, number>,
+  reserveAsset: string,
+): Record<string, number> {
+  const orphanedWeight = Object.entries(reference)
+    .filter(([asset]) => !(asset in target))
+    .reduce((sum, [, value]) => sum + value, 0);
+  if (orphanedWeight === 0) return reference;
+
+  const restated: Record<string, number> = { ...reference };
+  restated[reserveAsset] = (restated[reserveAsset] ?? 0) + orphanedWeight;
+  return restated;
+}
+
+/** The assets whose target moved, comparing ONLY the keys both allocations share. */
 function movedAssets(
   target: Record<string, number>,
   reference: Record<string, number>,
@@ -167,7 +198,12 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   // A full exit is exempt from rule 4 — see below.
   const fullExitAssets = new Set(movements.filter((m) => m.fullExit).map((m) => m.asset));
 
-  const moved = referenceTarget ? movedAssets(targetAllocation, referenceTarget) : [];
+  // Restated in this cycle's universe first — a feed that dropped an asset forces its
+  // weight to be reassigned, and that reassignment is the code's doing, not the model's.
+  const reference = referenceTarget
+    ? referenceInCurrentUniverse(targetAllocation, referenceTarget, reserveAsset)
+    : null;
+  const moved = reference ? movedAssets(targetAllocation, reference) : [];
   const targetChanged = moved.length > 0;
 
   // ── Rule 1 — a hold cannot modify the reference target ────────────────────────
@@ -179,13 +215,13 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   //
   // Not evaluated at all when there is no reference (the very first decision on record):
   // there is nothing to have modified.
-  if (actionType === 'hold' && targetChanged && referenceTarget) {
+  if (actionType === 'hold' && targetChanged && reference) {
     violations.push({
       rule: 'hold_moved_target',
       assets: moved,
       detail:
         `action_type is "hold" but the target moved on ${moved.join(', ')}: ` +
-        `reference [${fmt(referenceTarget)}] → emitted [${fmt(targetAllocation)}]. ` +
+        `reference [${fmt(reference)}] → emitted [${fmt(targetAllocation)}]. ` +
         'A hold keeps the reference target; a changed target is not a hold.',
     });
   }

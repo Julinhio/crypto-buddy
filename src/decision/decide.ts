@@ -566,7 +566,11 @@ export async function decide(): Promise<DecideResult> {
         'error',
         llm,
         {
-          event_type: 'guard_failed_after_retry',
+          // NOT `guard_failed_after_retry`: the call never landed, so no corrected
+          // response exists and there is nothing to judge for coherence. Counting it as a
+          // model-coherence failure would send the operator to the retry prompt when the
+          // problem is transport or the API.
+          event_type: 'guard_retry_call_failed',
           attempt: 2,
           rules: firstRules,
           assets: [],
@@ -667,9 +671,16 @@ export async function decide(): Promise<DecideResult> {
     output_tokens: telemetry.outputTokens,
   });
   const { persisted, id } = await insertDecision(supabase, row);
-  // Attached to the decision they were about — including a rejection that the retry then
-  // corrected, which is precisely the case worth being able to count later.
-  await flushGuardEvents(id);
+  // NO FLUSH HERE, deliberately. `recordGuardEvent` is a best-effort Supabase write with
+  // no deadline of its own, and everything below it places real orders. Awaiting optional
+  // telemetry ahead of execution would let a stalled observability insert burn the cycle
+  // budget until the watchdog force-exits — leaving a persisted `decided` row and a trade
+  // that never happened. That is the very failure this PR exists to remove, and it would
+  // be absurd to reintroduce it through the trace that documents it.
+  //
+  // Same tier and same placement rule as the equity snapshot and the Telegram sends: the
+  // write happens once the cycle's real work is done. The single flush after
+  // persistLifecycle drains everything queued here.
 
   // Real execution. Each booking needs the decision id as FK and a durable home,
   // so without a persisted decision we place nothing (the book can't evolve).

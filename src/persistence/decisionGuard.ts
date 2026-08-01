@@ -115,6 +115,15 @@ export type GuardEventType =
    * that mixed them would send the operator looking in the wrong place.
    */
   | 'guard_failed_no_retry_budget'
+  /**
+   * The retry was attempted and the CALL itself failed (timeout, 429, network) — there
+   * is no corrected response, so there is nothing to judge for coherence (migration
+   * 0021). Each of the three retry failures points somewhere different:
+   *   after_retry      → the model cannot correct itself  → the retry prompt, the rules
+   *   no_retry_budget  → out of time before relaunching   → latency, the cycle budget
+   *   retry_call_failed → the relaunch never landed       → transport, the API
+   */
+  | 'guard_retry_call_failed'
   | 'output_order_violation'
   | 'thesis_write_refused';
 

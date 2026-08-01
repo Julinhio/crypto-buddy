@@ -124,9 +124,39 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // comparing over the UNION would read the code's own universe change as the model
   // changing its mind — rejecting every hold for as long as the feed stayed down.
   const shrunk = input({
-    targetAllocation: { BTC: 25, ETH: 20, BNB: 12, USDT: 43 }, // XRP gone from the universe
+    targetAllocation: { BTC: 25, ETH: 20, BNB: 12, USDT: 43 }, // XRP (at 0) gone
   });
   ok('an asset leaving the universe is not the model changing its mind', checkCoherence(shrunk).ok);
+
+  // AND THE HARDER HALF OF THE SAME EVENT, which the case above does not exercise because
+  // XRP sat at 0. When the vanished asset carried REAL weight, the schema still requires
+  // the remaining allocations to sum to 100, so those points MUST be reassigned — and the
+  // neutral place is cash. Compared naively, the reserve then looks like it moved by the
+  // whole orphaned weight, every genuine hold is rejected, and the retry cannot fix it
+  // either: re-emitting the old target is impossible, its key is now forbidden. The bot
+  // would die on every cycle for as long as the feed stayed down.
+  const heldReference = { BTC: 25, ETH: 20, BNB: 12, XRP: 8, USDT: 35 };
+  const feedLost = input({
+    referenceTarget: heldReference,
+    targetAllocation: { BTC: 25, ETH: 20, BNB: 12, USDT: 43 }, // XRP's 8 parked in cash
+  });
+  ok(
+    'a dropped feed whose line held real weight still reads as a hold',
+    checkCoherence(feedLost).ok,
+  );
+
+  // But reassigning that orphaned weight into a COIN is a real allocation decision, and a
+  // `hold` claiming otherwise is still caught. The normalisation absolves the forced move
+  // to cash, not every redistribution.
+  ok(
+    'parking the orphaned weight in a coin instead of cash is still a decision',
+    rules(
+      input({
+        referenceTarget: heldReference,
+        targetAllocation: { BTC: 33, ETH: 20, BNB: 12, USDT: 35 }, // XRP's 8 → BTC
+      }),
+    ).includes('hold_moved_target'),
+  );
 }
 
 /* ── Rule 2 — a moved target that cannot trade is invalid ─────────────────────── */
