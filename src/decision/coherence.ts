@@ -87,6 +87,13 @@ export interface CoherenceInput {
   referenceTarget: Record<string, number> | null;
   /** The movements the real pipeline produced for this target. The 2% floor already applied. */
   movements: Movement[];
+  /**
+   * The reserve stable. Rule 2 needs it: cash moves on EVERY trade (it is the other side
+   * of every leg) but is never traded directly — `computeMovements` skips it outright.
+   * Counting it as an asset that should produce a movement would reject every real
+   * rebalance the bot ever makes.
+   */
+  reserveAsset: string;
   /** The theses the model wants written this cycle. */
   notes: PositionNote[];
   /** Assets that already carry a stored thesis, as journaled in this cycle's context. */
@@ -144,6 +151,7 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
     targetAllocation,
     referenceTarget,
     movements,
+    reserveAsset,
     notes,
     assetsWithStoredThesis,
   } = input;
@@ -192,14 +200,38 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   // The point of stating this separately from rule 1 is what it catches when the label
   // is NOT hold: a `rebalance` that moves the target by one point is equally void, and
   // rule 1 would let it through.
-  if (targetChanged && movements.length === 0) {
+  //
+  // ASKED PER MOVED ASSET, NOT PORTFOLIO-WIDE. "Is there any movement at all" is a
+  // different question and the wrong one: the book drifts on its own, so an UNCHANGED
+  // BTC target can produce a drift order while the one-point BNB change the model
+  // actually intended silently produces nothing. The decision would be accepted, only
+  // BTC would trade, and the intent would be lost — the exact class of silent discard
+  // this guard exists to stop.
+  //
+  // TWO deliberate calibrations:
+  //   - the RESERVE is excluded. Cash moves on every trade (it is the other side of
+  //     every leg) and is never traded directly, so requiring a movement for it would
+  //     reject every legitimate rebalance;
+  //   - "at least one" moved coin must trade, not "all of them". A target that moves BNB
+  //     by 6 points and ETH by 1 does execute the decision; the sub-floor ETH leg is the
+  //     documented, measured residual of the 2% floor (see isBelowFloor), not an
+  //     incoherence. Demanding all of them would fight a rail the project accepted on
+  //     purpose.
+  const movedCoins = moved.filter((asset) => asset !== reserveAsset);
+  const tradedAssets = new Set(movements.map((m) => m.asset));
+  if (targetChanged && movedCoins.length > 0 && !movedCoins.some((asset) => tradedAssets.has(asset))) {
     violations.push({
       rule: 'target_not_executable',
-      assets: moved,
+      assets: movedCoins,
       detail:
-        `the target moved on ${moved.join(', ')} but produces no executable order ` +
-        '(every leg sits under the 2% plumbing floor). A target that cannot move the book ' +
-        'is an invalid target, not a hold — say what you mean, or re-emit the reference.',
+        `the target moved on ${movedCoins.join(', ')} but not one of those lines produces an ` +
+        'executable order (each sits under the 2% plumbing floor)' +
+        (movements.length > 0
+          ? `. The ${[...tradedAssets].join(', ')} movement this cycle comes from book drift on an ` +
+            'UNCHANGED target — it is not the decision you just wrote'
+          : '') +
+        '. A target that cannot move the lines it claims to move is an invalid target, not a ' +
+        'hold — say what you mean, or re-emit the reference.',
     });
   }
 

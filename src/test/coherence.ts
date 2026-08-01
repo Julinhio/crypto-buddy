@@ -64,6 +64,7 @@ const input = (over: Partial<CoherenceInput> = {}): CoherenceInput => ({
   targetAllocation: { ...REFERENCE },
   referenceTarget: { ...REFERENCE },
   movements: [],
+  reserveAsset: 'USDT',
   notes: [],
   assetsWithStoredThesis: new Set<string>(),
   ...over,
@@ -165,6 +166,48 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
       input({ actionType: 'de_risk', movements: [movement('BTC')], notes: [note('BTC')] }),
     ).ok,
   );
+
+  // ASKED PER MOVED ASSET, NOT PORTFOLIO-WIDE. "Is there any movement at all" is a
+  // different question and the wrong one: the book drifts on its own, so an UNCHANGED
+  // BTC target can produce a drift order while the one-point BNB change the model
+  // actually intended produces nothing. Answering "yes, something moved" would accept
+  // the decision, trade only BTC, and silently discard the intent.
+  const unrelated = input({
+    actionType: 'rebalance',
+    targetAllocation: { ...REFERENCE, BNB: 11, USDT: 44 }, // one point — under the floor
+    movements: [movement('BTC', 'buy')], // BTC drifted; BTC's target did NOT move
+    notes: [note('BTC')],
+    assetsWithStoredThesis: new Set(['BTC']),
+  });
+  ok(
+    'an unrelated drift order does not make a sub-floor target change executable',
+    rules(unrelated).includes('target_not_executable'),
+  );
+
+  // THE RESERVE TRAP, which is why this is not simply "every moved asset must trade".
+  // Cash moves on EVERY trade — it is the other side of every leg — and is never traded
+  // directly (computeMovements skips it outright). Requiring a movement for it would
+  // reject every legitimate rebalance the bot ever makes.
+  const realTrim = input({
+    actionType: 'de_risk',
+    targetAllocation: { ...REFERENCE, BNB: 8, USDT: 47 }, // BNB -4, USDT +4
+    movements: [movement('BNB')], // only BNB trades; USDT never does
+    notes: [note('BNB')],
+    assetsWithStoredThesis: new Set(['BNB']),
+  });
+  ok('the reserve moving without its own order is not an incoherence', checkCoherence(realTrim).ok);
+
+  // "At least one" moved coin must trade, not "all of them". A 6-point BNB trim with a
+  // 1-point ETH nibble alongside DOES execute the decision; the sub-floor ETH leg is the
+  // documented, measured residual of the 2% floor, not an incoherence.
+  const withResidual = input({
+    actionType: 'de_risk',
+    targetAllocation: { ...REFERENCE, BNB: 6, ETH: 19, USDT: 50 },
+    movements: [movement('BNB')], // ETH's one point stays under the floor
+    notes: [note('BNB')],
+    assetsWithStoredThesis: new Set(['BNB']),
+  });
+  ok('a sub-floor residual alongside a real move is not an incoherence', checkCoherence(withResidual).ok);
 }
 
 /* ── Rule 3 — the mirror of mayWriteThesis ────────────────────────────────────── */
@@ -265,7 +308,14 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   ok(
     'v4: a partial trim, a buy and a rebalance all still execute',
     checkCoherence({ ...v4Move, actionType: 'de_risk' }).ok &&
-      checkCoherence({ ...v4Move, movements: [movement('BTC', 'buy')] }).ok,
+      checkCoherence({
+        ...v4Move,
+        // A buy: the line whose target moved is the line that trades. (Moving BNB's
+        // target while BTC is what trades is a DIFFERENT decision, and rule 2 rejects
+        // it under v4 exactly as it does under v5 — that rule is strategy-agnostic.)
+        targetAllocation: { ...REFERENCE, BTC: 31, USDT: 37 },
+        movements: [movement('BTC', 'buy')],
+      }).ok,
   );
 
   // But the strategy-agnostic rules stay armed: a hold that moved its target, and a

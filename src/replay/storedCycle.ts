@@ -189,6 +189,7 @@ export function judge(
     targetAllocation: decision.targetAllocation,
     referenceTarget,
     movements,
+    reserveAsset: book.reserveAsset,
     notes: decision.positionNotes,
     assetsWithStoredThesis: thesesOf(ctx),
   });

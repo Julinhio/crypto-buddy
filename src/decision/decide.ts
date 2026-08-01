@@ -98,8 +98,22 @@ export async function decide(): Promise<DecideResult> {
    * this table is that the 30/07 verdict was unattributable.
    */
   const guardEvents: Array<Omit<GuardEventInsert, 'decision_id' | 'run_token'>> = [];
+  /**
+   * DRAINS the queue, so it is safe — and expected — to call more than once per cycle.
+   *
+   * `persistLifecycle` runs AFTER the decision row exists and can itself queue a
+   * `thesis_write_refused`: a movement the guard accepted may still fail to book (the
+   * mainnet filters, or a failed durable booking), and the lifecycle then refuses the
+   * note the guard had allowed. With a single flush placed before it, exactly those
+   * late events would be dropped — and every refusal would be dropped when the guard is
+   * switched off, which is precisely when this detector is the only one left.
+   *
+   * Draining rather than tracking an index keeps that correct without anyone having to
+   * remember the ordering: whatever is in the queue at each call is written, once.
+   */
   const flushGuardEvents = async (decisionId: number | null): Promise<void> => {
-    for (const event of guardEvents) {
+    const batch = guardEvents.splice(0);
+    for (const event of batch) {
       await recordGuardEvent(supabase, { ...event, decision_id: decisionId, run_token: null });
     }
   };
@@ -392,8 +406,11 @@ export async function decide(): Promise<DecideResult> {
     });
     const { persisted, id } = await insertDecision(supabase, row);
     guardEvents.push(event);
-    await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
+    // After persistLifecycle, so anything it queued is written too. It cannot queue a
+    // refusal here (it is called with no notes), but the ordering is the same on every
+    // path so nobody has to remember which one is the exception.
+    await flushGuardEvents(id);
     // Best-effort by contract: sendTelegram never throws and never blocks the cycle.
     await sendTelegram(alert);
     return emptyResult(status, persisted, id, row, portfolio);
@@ -480,6 +497,7 @@ export async function decide(): Promise<DecideResult> {
           targetAllocation: decision.targetAllocation,
           referenceTarget: referenceRead.target,
           movements,
+          reserveAsset: reserveStable,
           notes: decision.positionNotes,
           assetsWithStoredThesis,
         })
@@ -692,6 +710,13 @@ export async function decide(): Promise<DecideResult> {
   // Written from the POST-trade book, so an entry, a reinforcement and a full exit all
   // land in the cycle that caused them.
   await persistLifecycle(portfolioAfter, bookedLedger, v.positionNotes);
+
+  // THE SECOND FLUSH, and it is the one that matters on this path. `persistLifecycle`
+  // can queue a `thesis_write_refused` that no earlier flush could have seen: the guard
+  // judges on the movements it COMPUTED, the lifecycle on what actually BOOKED, and a
+  // movement can pass the first and fail the second (a mainnet filter, a failed durable
+  // booking). With the guard switched off, this is the only path those refusals have.
+  await flushGuardEvents(id);
 
   return {
     status: 'decided',
