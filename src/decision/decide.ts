@@ -553,6 +553,18 @@ export async function decide(): Promise<DecideResult> {
     }
 
     // ── THE SINGLE RETRY ───────────────────────────────────────────────────────
+    //
+    // Timed from OUTSIDE the call, because `addAttempt` only runs when the call returns.
+    // A retry that burns its whole 90s deadline and then throws would otherwise
+    // contribute nothing to `latency_ms`, and the cycles that lose the most time would
+    // be exactly the ones recorded as having spent none.
+    //
+    // That matters more here than ordinary accounting: the per-attempt bound in this PR
+    // was sized from `decisions.latency_ms` over the v5 corpus, so the column has to keep
+    // telling the truth about the failure cases it will be re-read on. Tokens are NOT
+    // credited on this path — a call that threw reported none, and inventing a zero
+    // would be a different lie.
+    const retryStart = Date.now();
     try {
       llm = await callModel({
         rejectedResponse: llm.rawResponse,
@@ -560,6 +572,7 @@ export async function decide(): Promise<DecideResult> {
       });
       addAttempt(llm);
     } catch (err) {
+      telemetry.latencyMs += Date.now() - retryStart;
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[ERROR] the guard's retry call failed (${message}) — no decision.`);
       return failCycle(
