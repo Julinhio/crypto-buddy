@@ -9,11 +9,12 @@ import { fetchCandles, fetchSpotPrice, timeframeMs, type Candle } from '../marke
 import { computeIndicators, type IndicatorSnapshot } from '../market/indicators.js';
 import { monthLevels, yearLevels, type RangeLevels } from '../market/levels.js';
 import {
-  resolveRegimes,
+  regimeTimeline,
   toRegimeJournal,
   type AssetSeries,
   type RegimeJournal,
 } from '../market/regime.js';
+import { stickyTimelines, type StickyPoint } from '../market/transition.js';
 import { fetchRelevantBalances, type AssetBalance } from '../account/balances.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
 import {
@@ -39,6 +40,14 @@ export interface PairContext {
   };
 }
 
+/** The transition layer's read for one cycle: the bar it used, and the state per asset. */
+export interface TransitionRead {
+  /** The 4h bar every state below was computed on. */
+  barAtMs: number;
+  /** Sticky state per asset AT that bar. An asset whose walk ended earlier is omitted. */
+  perAsset: Record<string, StickyPoint>;
+}
+
 export interface MarketContext {
   generatedAt: string;
   source: {
@@ -58,6 +67,21 @@ export interface MarketContext {
    * Null when no asset returned both series (never a reason to fail a cycle).
    */
   regime: RegimeJournal | null;
+  /**
+   * The TRANSITION LAYER's read for this cycle: per asset, whether its raw regime has
+   * held long enough to be actionable (see src/market/transition.ts).
+   *
+   * Deliberately kept OUT of `DecisionContext`, exactly as the regime was in its own
+   * shadow phase — and here the reason is sharper than convention. This PR MEASURES what
+   * the gate would do while the model keeps deciding as before; if the payload changed at
+   * the same time, nothing observed could be attributed to the gate rather than to the
+   * new field. `decisions.market_context` therefore stays byte-identical too, since it
+   * stores the DecisionContext and not this.
+   *
+   * Null under the same conditions as `regime`: no usable 4h series, or no closed bar in
+   * common. A missing read is information, never a crash.
+   */
+  transition: TransitionRead | null;
   /**
    * Pairs are grouped by family so the boundary is structurally explicit:
    * `reference` pairs feed the LLM's market read but must never be allocated.
@@ -221,7 +245,8 @@ async function safeBuildPair(
  * are only read for the tradable ones, but the risk_off breadth is a market-wide
  * measure — SOL belongs in the breadth even though the bot never allocates to it.
  */
-function readRegime(pairs: BuiltPair[]): RegimeJournal | null {
+function readRegime(pairs: BuiltPair[]): { regime: RegimeJournal | null; transition: TransitionRead | null } {
+  const nothing = { regime: null, transition: null };
   const universe: Record<string, AssetSeries> = {};
   for (const p of pairs) {
     const base = p.context.symbol.split('/')[0];
@@ -229,27 +254,51 @@ function readRegime(pairs: BuiltPair[]): RegimeJournal | null {
   }
   if (Object.keys(universe).length === 0) {
     console.warn('[warn] no pair had a usable 4h series — no regime computed this cycle.');
-    return null;
+    return nothing;
   }
   try {
-    const point = resolveRegimes(universe, config.regime.thresholds, {
+    // The TIMELINE, not just its last point, because the sticky rule needs the run of
+    // identical raw labels ending at this bar — and that run is NOT recoverable from the
+    // journaled fields. `pendingBars` counts a CANDIDATE's streak and is 0 whenever the
+    // raw label equals the active one, so a bar sitting two readings into a confirmed
+    // regime and a bar fifty readings into it are indistinguishable there. Cycle 1061 is
+    // exactly that case: raw == confirmed == reversal_down, `pendingBars` 0, sticky run 2.
+    //
+    // `resolveRegimes` is `regimeTimeline` followed by "take the last point", so reading
+    // the last point here produces the SAME journal it did — byte for byte, by
+    // construction rather than by inspection (asserted in src/test/transitionLayer.ts).
+    const timeline = regimeTimeline(universe, config.regime.thresholds, {
       nowMs: Date.now(),
       barMs: timeframeMs(config.regime.timeframe),
       // The CONFIGURED universe, not what loaded — a pair whose series failed must not
       // shrink the risk_off breadth denominator (see RegimeOptions.universeSize).
       universeSize: config.tradablePairs.length + config.referencePairs.length,
     });
+    const point = timeline[timeline.length - 1];
     if (!point) {
       console.warn(
         '[warn] the pairs share no CLOSED 4h bar in common — no regime computed this cycle.',
       );
-      return null;
+      return nothing;
     }
-    return toRegimeJournal(point);
+
+    const sticky = stickyTimelines(timeline, config.regime.thresholds.confirmations, timeframeMs(config.regime.timeframe));
+    const perAsset: Record<string, StickyPoint> = {};
+    for (const [asset, walk] of Object.entries(sticky)) {
+      const last = walk[walk.length - 1];
+      // Only the walk that actually ends on this cycle's bar. An asset whose series stops
+      // short would otherwise contribute a stale verdict dated to an older bar.
+      if (last && last.timestamp === point.timestamp) perAsset[asset] = last;
+    }
+
+    return {
+      regime: toRegimeJournal(point),
+      transition: { barAtMs: point.timestamp, perAsset },
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[warn] regime computation failed (${msg}) — no regime journaled this cycle.`);
-    return null;
+    return nothing;
   }
 }
 
@@ -282,7 +331,7 @@ export async function buildMarketContext(): Promise<MarketContext> {
       marketData: 'binance-public-mainnet',
       account: 'binance-testnet',
     },
-    regime: readRegime([...tradable, ...reference]),
+    ...readRegime([...tradable, ...reference]),
     market: {
       tradable: tradable.map((p) => p.context),
       reference: reference.map((p) => p.context),

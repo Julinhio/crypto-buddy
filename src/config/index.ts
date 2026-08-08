@@ -222,6 +222,32 @@ export interface RegimeConfig {
   thresholds: RegimeThresholds;
 }
 
+/**
+ * Transition layer (observe mode). The actionability rule itself has no tuning — it is
+ * the regime's own `confirmations`, deliberately NOT duplicated here: a second copy could
+ * drift from the hysteresis it must mirror, and the whole claim of the layer is that it
+ * gates without ever relabelling.
+ *
+ * So the only number is the stop's.
+ */
+export interface TransitionConfig {
+  /**
+   * Percent below `peak_price_since_entry` at which the peak stop fires DURING a
+   * transition. Calibrated at 10% over the 61-day replay — the only threshold of the four
+   * tested that keeps the best net result AND survives removing its single best episode,
+   * and the deepest one that still triggers on BTC (at 12% it never does: zero frozen
+   * asset-cycles reach it). See docs/RAPPORT-CONTRAT-TRANSITION.md §5.
+   *
+   * Uniform across the four assets for now. The per-asset case is defensible on the
+   * drawdown profile (XRP's median frozen drawdown is −13.8%, BTC's −4.5%) but there were
+   * five stop episodes in total, so splitting by asset would leave one or two each — no
+   * longer a measurement. Revisit when the corpus has doubled.
+   *
+   * NOT env-overridable: it is a strategy guard-rail like the caps, not an ops knob.
+   */
+  peakStopPercent: number;
+}
+
 export interface AppConfig {
   tradablePairs: string[];
   referencePairs: string[];
@@ -232,6 +258,7 @@ export interface AppConfig {
   indicators: IndicatorConfig;
   cache: CacheConfig;
   regime: RegimeConfig;
+  transition: TransitionConfig;
   decision: DecisionConfig;
   execution: ExecutionConfig;
   scheduler: SchedulerConfig;
@@ -410,6 +437,10 @@ export const config: AppConfig = {
       riskOffBreadthPercent: 80,
       riskOffMedianH4Rsi: 40,
     },
+  },
+
+  transition: {
+    peakStopPercent: 10,
   },
 
   decision: {
@@ -707,6 +738,24 @@ export function validateRegimeConfig(cfg: RegimeConfig): void {
 }
 
 validateRegimeConfig(config.regime);
+
+/**
+ * Fails fast on a stop threshold that could not do its job. At 0 (or below) the stop
+ * fires on every frozen bar with a held line — a full liquidation of the book at the
+ * first transition; at 100 it can never fire at all, which is a stop that exists only on
+ * paper. Both are configuration mistakes, not usable modes, and in OBSERVE mode neither
+ * would produce a visible failure — just a journal full of confident nonsense. Exported
+ * for the offline test.
+ */
+export function validateTransitionConfig(cfg: TransitionConfig): void {
+  if (!(cfg.peakStopPercent > 0 && cfg.peakStopPercent < 100)) {
+    throw new Error(
+      `Invalid transition config: peakStopPercent must be in (0, 100) (got ${cfg.peakStopPercent})`,
+    );
+  }
+}
+
+validateTransitionConfig(config.transition);
 
 /**
  * The strategy in force for this process, resolved ONCE at startup so a malformed

@@ -84,6 +84,8 @@ export interface Cycle {
   generatedAtMs: number;
   generatedAt: string;
   status: string;
+  /** `decisions.skip_reason` — null unless the cycle was skipped. See `expectsObservation`. */
+  skipReason: string | null;
   promptVersion: string;
   equity: Decimal;
   reserveAsset: string;
@@ -92,8 +94,70 @@ export interface Cycle {
   regimeBarAtMs: number | null;
   /** Per-asset regime journal, or null when this cycle journaled none. */
   regime: Map<string, CycleRegimeAsset> | null;
+  /**
+   * The CONFIRMED global risk_off posture this cycle journaled — the one after
+   * hysteresis, never the raw reading. Null when the cycle journaled no regime.
+   *
+   * Read rather than recomputed because it is an INPUT to the transition layer's second
+   * rung, and the point of a replay is to feed the production function the values the bot
+   * actually held.
+   */
+  riskOff: boolean | null;
   /** Sovereign bookings attributed to this cycle, in id order. */
   bookings: Booking[];
+}
+
+/**
+ * Should this cycle have written transition observations?
+ *
+ * `decide()` has TWO skipped paths and they behave differently, so status alone cannot
+ * answer:
+ *
+ *  - EDGE CASE 0 — the execution journal, the stored position state or the guard's
+ *    reference target could not be read. It journals a `skipped` row and returns BEFORE
+ *    both `persistLifecycle` and `observeTransition`, deliberately: writing anything from
+ *    a fallback book is the very thing that path avoids. No observation is correct.
+ *  - EDGE CASE 1 — no tradable pair returned usable data. It DOES call
+ *    `observeTransition`, so an observation is expected, and its absence means a lost
+ *    write (the writer's deadline firing, say) rather than an intentional abstention.
+ *
+ * Exempting every `skipped` cycle would hide the second case entirely — and the layer's
+ * 5s write deadline makes a lost batch more likely, not less. So the exemption is granted
+ * POSITIVELY, on the recognised edge-case-0 wording, and everything else is expected to
+ * have written. That direction matters: an unrecognised skip reason turns the check RED
+ * and gets looked at, rather than being waved through as "probably fine".
+ *
+ * Matching on the reason text is not elegant, and it is the only discriminator that
+ * exists — the two paths differ by an early `return`, which leaves no other trace in the
+ * row. Kept beside the cycle model so the proof harness and its test share one definition.
+ */
+export function expectsObservation(cycle: Pick<Cycle, 'status' | 'skipReason'>): boolean {
+  if (cycle.status !== 'skipped') return true;
+  // The exact wording of edge case 0 in decide.ts: "<which> could not be read — refusing
+  // to trade on a book and a lifecycle we cannot record the outcome of."
+  return !/could not be read/i.test(cycle.skipReason ?? '');
+}
+
+/**
+ * Cycles at or after the deployment cutoff that SHOULD have written observations and did
+ * not — the whole-batch losses P1d exists to surface.
+ *
+ * Pure, and separated from the proof harness so the property can be regression-tested
+ * without a database: the failure it guards against (a lost batch looking exactly like a
+ * pre-deployment cycle) is invisible by nature, so a test that can construct it is the
+ * only way to know the guard works.
+ */
+export function missingObservationBatches(params: {
+  cycles: Array<Pick<Cycle, 'id' | 'status' | 'skipReason'>>;
+  /** Cycle ids that produced at least one observation row. */
+  observedCycleIds: Set<number>;
+  /** First cycle known to have observed — everything before it predates the deployment. */
+  cutoff: number;
+}): Array<{ id: number; status: string }> {
+  const { cycles, observedCycleIds, cutoff } = params;
+  return cycles
+    .filter((c) => c.id >= cutoff && expectsObservation(c) && !observedCycleIds.has(c.id))
+    .map((c) => ({ id: c.id, status: c.status }));
 }
 
 /* ── Loading ──────────────────────────────────────────────────────────────── */
@@ -104,6 +168,7 @@ interface RawDecision {
   id: number;
   created_at: string;
   status: string;
+  skip_reason: string | null;
   prompt_version: string;
   market_context: unknown;
   regime: unknown;
@@ -131,7 +196,7 @@ async function loadDecisions(supabase: SupabaseClient, beforeIso: string): Promi
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await supabase
       .from('decisions')
-      .select('id, created_at, status, prompt_version, market_context, regime')
+      .select('id, created_at, status, skip_reason, prompt_version, market_context, regime')
       .lt('created_at', beforeIso)
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
@@ -196,12 +261,19 @@ async function loadBookings(supabase: SupabaseClient, maxDecisionId: number): Pr
 
 /* ── Shaping ──────────────────────────────────────────────────────────────── */
 
-function parseRegime(journal: unknown): { barAtMs: number | null; assets: Map<string, CycleRegimeAsset> | null } {
-  if (journal == null || typeof journal !== 'object') return { barAtMs: null, assets: null };
+function parseRegime(journal: unknown): {
+  barAtMs: number | null;
+  assets: Map<string, CycleRegimeAsset> | null;
+  riskOff: boolean | null;
+} {
+  const nothing = { barAtMs: null, assets: null, riskOff: null };
+  if (journal == null || typeof journal !== 'object') return nothing;
   const j = journal as Record<string, unknown>;
   const barAt = typeof j.barAt === 'string' ? Date.parse(j.barAt) : Number.NaN;
+  const global = j.global as Record<string, unknown> | undefined;
+  const riskOff = typeof global?.riskOff === 'boolean' ? global.riskOff : null;
   const raw = j.assets;
-  if (raw == null || typeof raw !== 'object') return { barAtMs: null, assets: null };
+  if (raw == null || typeof raw !== 'object') return nothing;
 
   const assets = new Map<string, CycleRegimeAsset>();
   for (const [asset, entry] of Object.entries(raw as Record<string, Record<string, unknown>>)) {
@@ -216,7 +288,7 @@ function parseRegime(journal: unknown): { barAtMs: number | null; assets: Map<st
       bounceConsumed: typeof signals.bounceConsumed === 'boolean' ? signals.bounceConsumed : null,
     });
   }
-  return { barAtMs: Number.isFinite(barAt) ? barAt : null, assets };
+  return { barAtMs: Number.isFinite(barAt) ? barAt : null, assets, riskOff };
 }
 
 /**
@@ -304,7 +376,7 @@ export function toCycles(
       });
     }
 
-    const { barAtMs, assets: regime } = parseRegime(row.regime);
+    const { barAtMs, assets: regime, riskOff } = parseRegime(row.regime);
 
     cycles.push({
       id: row.id,
@@ -312,12 +384,14 @@ export function toCycles(
       generatedAtMs: Date.parse(generatedAt),
       generatedAt,
       status: row.status,
+      skipReason: row.skip_reason ?? null,
       promptVersion: row.prompt_version,
       equity: dec(num(portfolio.equity) ?? 0),
       reserveAsset: String(portfolio.reserveAsset ?? 'USDT'),
       assets,
       regimeBarAtMs: barAtMs,
       regime,
+      riskOff,
       bookings: (byDecision.get(row.id) ?? []).sort((a, b) => a.id - b.id),
     });
   }
