@@ -661,6 +661,59 @@ const withCaps = (perAsset: Record<string, number>, minCashPercent?: number): Ap
 }
 
 {
+  // A DROPPED FEED **AND** A POLICY CHANGE AT ONCE — the case where the orphaned key bites.
+  //
+  // `referenceInCurrentUniverse` transfers a vanished line's weight to cash. While the
+  // reference was only ever compared key-by-key that transfer could afford to be sloppy:
+  // `movedAssets` walks the TARGET's keys, so a key the target no longer has was never
+  // looked at, and leaving the ghost behind was invisible. Sending the restated reference
+  // through the clamp makes it visible — the ghost takes its own cap surplus and inflates
+  // the `coinTotal` the cash-floor pass scales by, so the reference gets a different
+  // scaling from the candidate and an honest hold is rejected until the feed returns.
+  const policy = withCaps({}, 50);
+  const storedReference = { BTC: 25, ETH: 20, BNB: 12, XRP: 8, USDT: 35 };
+  // XRP's feed died: the model must reassign its 8 points, and cash is the neutral place.
+  const rawProposal = { BTC: 25, ETH: 20, BNB: 12, USDT: 43 };
+  const candidate = clampAllocation(rawProposal, 'USDT', policy).applied;
+
+  ok(
+    'a hold survives a dropped feed and a raised cash floor arriving together',
+    checkCoherence(
+      input({ actionType: 'hold', effectiveTarget: candidate, referenceTarget: storedReference, riskPolicy: policy }),
+    ).ok,
+  );
+
+  // The same coincidence with a tightened per-asset cap rather than the floor.
+  const capPolicy = withCaps({ BTC: 20 });
+  ok(
+    'and the same with a tightened per-asset cap',
+    checkCoherence(
+      input({
+        actionType: 'hold',
+        effectiveTarget: clampAllocation(rawProposal, 'USDT', capPolicy).applied,
+        referenceTarget: storedReference,
+        riskPolicy: capPolicy,
+      }),
+    ).ok,
+  );
+
+  // And the guarantee that keeps the earlier rule intact: reassigning the orphaned weight
+  // into a COIN is still a real decision, cap change or not.
+  ok(
+    'parking the orphaned weight in a coin is still caught, even under a changed policy',
+    rules(
+      input({
+        actionType: 'hold',
+        effectiveTarget: clampAllocation({ BTC: 33, ETH: 20, BNB: 12, USDT: 35 }, 'USDT', policy).applied,
+        referenceTarget: storedReference,
+        riskPolicy: policy,
+      }),
+    ).includes('hold_moved_target'),
+  );
+  passed += 1;
+}
+
+{
   // NEUTRAL WHILE THE POLICY HOLDS STILL — the property the corpus proof rests on.
   // Clamping an already-bounded allocation under the same caps returns it unchanged, so
   // normalisation cannot move a verdict on any of the 1083 recorded cycles.

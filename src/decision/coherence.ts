@@ -171,6 +171,16 @@ const TARGET_EPSILON = 0.01;
  * what this deliberately does NOT absolve — a model that reassigns that weight into
  * another COIN has made a real allocation choice, the coin still reads as moved, and a
  * `hold` claiming otherwise is still rejected.
+ *
+ * THE ORPHANED KEY IS DROPPED, not merely credited. Keeping it while also adding its
+ * weight to cash leaves an allocation summing past 100, and that used to be invisible:
+ * `movedAssets` walks the TARGET's keys, so a key the target no longer has was never
+ * looked at. It stopped being invisible the moment the restated reference started going
+ * through the clamp — `clampAllocation` counts every non-reserve key, so the ghost would
+ * take its own cap surplus and inflate the `coinTotal` the cash-floor pass scales by,
+ * giving the reference a different scaling from the candidate and rejecting honest holds
+ * for as long as the feed stayed down. Transferring a weight means moving it, not copying
+ * it.
  */
 function referenceInCurrentUniverse(
   target: Record<string, number>,
@@ -182,7 +192,10 @@ function referenceInCurrentUniverse(
     .reduce((sum, [, value]) => sum + value, 0);
   if (orphanedWeight === 0) return reference;
 
-  const restated: Record<string, number> = { ...reference };
+  const restated: Record<string, number> = {};
+  for (const [asset, value] of Object.entries(reference)) {
+    if (asset in target || asset === reserveAsset) restated[asset] = value;
+  }
   restated[reserveAsset] = (restated[reserveAsset] ?? 0) + orphanedWeight;
   return restated;
 }

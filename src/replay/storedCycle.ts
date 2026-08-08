@@ -218,7 +218,25 @@ export function judge(
   // resolver doubles as the validator — an unusable stored value falls back to the clamp
   // rather than poisoning the judgement.
   const stored = resolveEffectiveTarget({ applied_allocation: storedApplied });
-  const effective = stored.source === 'applied' ? stored.allocation! : clamp.applied;
+  // NORMALISED UNDER TODAY'S POLICY, like the reference the guard will compare it to.
+  //
+  // The persisted value carries the caps of ITS day. `checkCoherence` normalises the
+  // reference under the current policy, so leaving the candidate in its historical frame
+  // would recreate — inside the replay — exactly the mismatch this PR removes from
+  // production: an old accepted hold with both operands stored at 35% would be replayed
+  // as candidate 35% against reference 30% once a cap is tightened, reported as a false
+  // rejection, and the corpus chain would stop advancing.
+  //
+  // Production is symmetric for free (its candidate is `clampAllocation(raw, config)`);
+  // the replay has to ask for it, because its candidate comes from the database. Both
+  // sides then answer the same question: what would TODAY's guard, under TODAY's policy,
+  // make of these responses. Idempotent while the policy holds still, so the corpus
+  // verdicts do not move.
+  const effective = clampAllocation(
+    stored.source === 'applied' ? stored.allocation! : clamp.applied,
+    book.reserveAsset,
+    config,
+  ).applied;
   const movements = computeMovements(
     book,
     effective,
