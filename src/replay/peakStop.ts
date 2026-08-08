@@ -164,11 +164,14 @@ export function closeAt(candles: Candle[], atMs: number, barMs: number): Decimal
  *
  * ── Two properties worth stating plainly, because the report quotes this number ──
  *
- * COVERAGE IS CHECKED AT BOTH ENDS AND IN THE MIDDLE. Guarding only the right end still
- * lets a feed that starts late, or that drops a bar somewhere inside, return a minimum
- * over an unknown subset — the plausible partial-window value this guard exists to
- * reject, reached from a different direction. So: the series must begin at or before
- * `fromMs`, must reach `toMs`, and the bars inside must be consecutive.
+ * COVERAGE IS CHECKED ON THE WHOLE SPAN, NOT ON THE SURVIVORS. Guarding only the right
+ * end lets a feed that starts late return a minimum over an unknown subset; checking
+ * adjacency only among the bars that passed the "fully inside" filter is the subtler
+ * version of the same hole, because a bar missing at either edge of the interior simply
+ * shifts where that filter begins and the survivors are then trivially adjacent. So the
+ * verification runs over every bar OVERLAPPING [fromMs, toMs]: that span must be
+ * contiguous, must start at or before `fromMs`, and must end at or after `toMs`. Any
+ * missing interior bar then breaks contiguity by construction, wherever it sits.
  *
  * IT IS A CONSERVATIVE BOUND, and deliberately the conservative one. Episode boundaries
  * are cycle timestamps and do not land on bar boundaries, so a bar straddling the exit
@@ -180,16 +183,24 @@ export function closeAt(candles: Candle[], atMs: number, barMs: number): Decimal
  * this 1h bars rather than the 4h regime bars precisely to shrink that residue.
  */
 export function lowestBetween(candles: Candle[], fromMs: number, toMs: number, barMs: number): Decimal | null {
-  const first = candles[0];
-  const last = candles[candles.length - 1];
-  if (first == null || last == null) return null;
-  if (first.timestamp > fromMs || toMs > last.timestamp + barMs) return null;
+  if (toMs <= fromMs) return null;
 
-  const inside = candles.filter((c) => c.timestamp >= fromMs && c.timestamp + barMs <= toMs);
-  if (inside.length === 0) return null;
-  for (let i = 1; i < inside.length; i += 1) {
-    if (inside[i]!.timestamp - inside[i - 1]!.timestamp !== barMs) return null;
+  // Every bar that OVERLAPS the interval — the span whose completeness has to be proven.
+  const covering = candles.filter((c) => c.timestamp + barMs > fromMs && c.timestamp < toMs);
+  const first = covering[0];
+  const last = covering[covering.length - 1];
+  if (first == null || last == null) return null;
+  // The span must actually reach both ends of the interval...
+  if (first.timestamp > fromMs || last.timestamp + barMs < toMs) return null;
+  // ...and have no hole anywhere in it.
+  for (let i = 1; i < covering.length; i += 1) {
+    if (covering[i]!.timestamp - covering[i - 1]!.timestamp !== barMs) return null;
   }
+
+  // Only now is the fully-contained subset trustworthy: it is a contiguous slice of a
+  // span already proven complete.
+  const inside = covering.filter((c) => c.timestamp >= fromMs && c.timestamp + barMs <= toMs);
+  if (inside.length === 0) return null;
 
   let low: Decimal | null = null;
   for (const c of inside) {

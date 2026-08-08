@@ -11,6 +11,7 @@ import { fetchCandlesSince } from './klines.js';
 import { PEAK_STOP_THRESHOLDS, closeAt, runPeakStop, type StopEpisode, type StopRun } from './peakStop.js';
 import {
   freezeRuns,
+  gridGaps,
   startedBefore,
   stickyAt,
   stickyTimelines,
@@ -129,14 +130,14 @@ interface FreezeStats {
  */
 function blocA(
   sticky: Record<string, StickyPoint[]>,
-  stickyFull: Record<string, StickyPoint[]>,
+  stickyAnalysed: Record<string, StickyPoint[]>,
   assets: string[],
   window: { fromMs: number; toMs: number },
 ): FreezeStats[] {
   const stats: FreezeStats[] = [];
   for (const asset of assets) {
     const timeline = sticky[asset] ?? [];
-    const runs = freezeRuns(asset, stickyFull[asset] ?? [], barMs).filter(
+    const runs = freezeRuns(asset, stickyAnalysed[asset] ?? [], barMs).filter(
       (r) => r.toMs + barMs >= window.fromMs && r.fromMs + barMs <= window.toMs,
     );
     const frozenBars = timeline.filter((p) => p.frozen).length;
@@ -791,9 +792,16 @@ function validateWarmUp(
   // for free. It cannot: the timeline is walked from ~60 days before the window opens.
   const firstThaw = assets.map((asset) => (sticky[asset] ?? []).findIndex((p) => p.actionable));
   const worst = Math.max(...firstThaw);
+  const gaps = assets.map((a) => gridGaps(sticky[a] ?? [], barMs));
   validate('T3', 'no warm-up artefact reaches the measured window', worst >= 0 && worst < warmUpBars, [
     `bars replayed before the observation window opens: ${warmUpBars}`,
-    `bars that closed AFTER the last decision (excluded from bloc A by timestamp): ${postWindowBars}`,
+    `bars that closed AFTER the last decision (excluded from the analysed views): ${postWindowBars}`,
+    // A hole in the grid is not an error — `regimeTimeline` intersects the assets' 4h
+    // timestamps, so one missing candle removes the bar for everyone. It IS something the
+    // reader has to know, because the sticky run restarts across it: a freeze spanning a
+    // hole is shorter in observations than in hours, and bloc A reports the hours.
+    `holes in the 4h grid, per asset: ${assets.map((a, i) => `${a} ${gaps[i]}`).join(', ')} ` +
+      `(a hole restarts the confirmation run; durations are measured in elapsed time)`,
     `first actionable bar per asset: ${assets.map((a, i) => `${a} @${firstThaw[i]}`).join(', ')}`,
     `worst = bar ${worst}, i.e. ${worst < warmUpBars ? 'well inside' : 'OUTSIDE'} the warm-up`,
   ]);
@@ -859,35 +867,44 @@ async function main(): Promise<number> {
   const points = withinWindow(fullTimeline, window, barMs);
   if (points.length === 0) throw new Error('transition replay: no 4h bar inside the observation window.');
 
-  // The sticky walk runs over the FULL timeline, warm-up included. TWO views come out
-  // of it, and they are not interchangeable:
+  // The warm-up prefix is what blocs B and C need at the LEFT edge: a cycle is matched to
+  // the last bar that CLOSED before it, and the earliest cycles sit before the window's
+  // first closed bar. On a window-only view they resolve to nothing and are scored "no
+  // regime" — which is how the four opening buys of cycle 85 were briefly, and wrongly,
+  // counted as orders the rule could not judge.
   //
-  //  - `sticky` is sliced to the observation window and feeds bloc A, because a freeze
-  //    RATE has to be measured over the period being described, not over the warm-up
-  //    the harness loaded to converge;
-  //  - `stickyFull` feeds blocs B and C, because a cycle is matched to the last bar that
-  //    CLOSED before it, and the earliest cycles sit before the window's first closed
-  //    bar. On the sliced view they resolve to nothing and are scored "no regime" — which
-  //    is how the four opening buys of cycle 85 were briefly, and wrongly, counted as
-  //    orders the rule could not judge.
+  // THREE views of the sticky walk, and the distinctions are load-bearing.
   //
-  // The window view is taken BY TIMESTAMP, never by counting bars off the front.
-  // `fullTimeline` extends past the last decision whenever a newer 4h candle has closed
-  // since — which is the normal case for any run of this harness after the fact — so
+  //  - `stickyWalk` is the whole walk, warm-up included. Only the validations read it.
+  //  - `stickyAnalysed` is that walk CAPPED at `window.toMs` but keeping the warm-up
+  //    prefix. This is what blocs A, B and C read. The cap matters as much as the
+  //    prefix: `fullTimeline` extends past the last decision whenever a newer 4h candle
+  //    has closed since — the normal case for any run of this harness after the fact —
+  //    and letting those bars through would resolve, with the future, freezes that were
+  //    still open at the window's end and thaw orders that never became actionable
+  //    inside it. The advertised fixed-window statistics would silently be revised by
+  //    observations the bot never had.
+  //  - `stickyInWindow` drops the warm-up too, and is used ONLY for the freeze RATE,
+  //    which is a property of the observation window and must be counted on its bars.
+  //
+  // Durations, by contrast, are read off `stickyAnalysed`, so a freeze already running
+  // when the window opened is measured whole instead of being truncated at the boundary.
+  //
+  // The window predicate is applied BY TIMESTAMP, never by counting bars off the front:
   // `fullTimeline.length - points.length` counts pre-window AND post-window bars as
-  // warm-up, and slicing that many off the front shifts the whole window forward. Bloc A
-  // would then be measured on bars the bot never traded through. Filtering on the same
-  // predicate `points` uses cannot drift from it.
-  const stickyFull = stickyTimelines(fullTimeline, confirmations);
+  // warm-up, so slicing that many off would shift the whole window forward.
+  const stickyWalk = stickyTimelines(fullTimeline, confirmations, barMs);
   const warmUpBars = fullTimeline.findIndex((p) => p.timestamp + barMs >= window.fromMs);
   const inWindow = new Set(points.map((p) => p.timestamp));
-  const sticky: Record<string, StickyPoint[]> = {};
-  for (const [asset, timeline] of Object.entries(stickyFull)) {
-    sticky[asset] = timeline.filter((p) => inWindow.has(p.timestamp));
+  const stickyAnalysed: Record<string, StickyPoint[]> = {};
+  const stickyInWindow: Record<string, StickyPoint[]> = {};
+  for (const [asset, timeline] of Object.entries(stickyWalk)) {
+    stickyAnalysed[asset] = timeline.filter((p) => p.timestamp + barMs <= window.toMs);
+    stickyInWindow[asset] = timeline.filter((p) => inWindow.has(p.timestamp));
   }
 
-  const tradable = tradableBaseAssets(config).filter((a) => sticky[a] != null);
-  const allAssets = Object.keys(sticky);
+  const tradable = tradableBaseAssets(config).filter((a) => stickyAnalysed[a] != null);
+  const allAssets = Object.keys(stickyAnalysed);
 
   // Bounded to the window captured above — the bot is live and keeps committing rows.
   const { cycles, bookings, skippedNoBook, arrivedDuringTheRun } = await loadCycleStream(
@@ -902,19 +919,19 @@ async function main(): Promise<number> {
   );
 
   section('VALIDATIONS — what has to be true before any number below means anything');
-  validateEquivalence(points, sticky, allAssets);
+  validateEquivalence(points, stickyInWindow, allAssets);
   validateAgainstJournal(cycles, points);
   validatePeaks(cycles, snapshots);
-  validateWarmUp(stickyFull, allAssets, warmUpBars, fullTimeline.length - warmUpBars - points.length);
+  validateWarmUp(stickyWalk, allAssets, warmUpBars, fullTimeline.length - warmUpBars - points.length);
 
-  printBlocA(blocA(sticky, stickyFull, allAssets, window));
-  printBlocB(blocB(cycles, stickyFull, priceSeries, priceBarMs), stickyFull);
+  printBlocA(blocA(stickyInWindow, stickyAnalysed, allAssets, window));
+  printBlocB(blocB(cycles, stickyAnalysed, priceSeries, priceBarMs), stickyAnalysed);
   const runs = PEAK_STOP_THRESHOLDS.map((threshold) =>
     runPeakStop({
       threshold,
       cycles,
       snapshots,
-      sticky: stickyFull,
+      sticky: stickyAnalysed,
       series: priceSeries,
       assets: tradable,
       barMs,
@@ -922,7 +939,7 @@ async function main(): Promise<number> {
     }),
   );
   section('BLOC C — calibrating the peak stop');
-  printDrawdownProfile(cycles, snapshots, stickyFull, tradable);
+  printDrawdownProfile(cycles, snapshots, stickyAnalysed, tradable);
   printBlocC(runs, cycles[cycles.length - 1]?.equity ?? dec(0), cycles.length);
 
   const failed = validations.filter((v) => !v.passed);

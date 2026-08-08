@@ -85,13 +85,18 @@ export interface StickyPoint {
 export function stickyTimeline(
   raws: Array<{ timestamp: number; raw: AssetRegime }>,
   confirmations: number,
+  barMs: number,
 ): StickyPoint[] {
   if (!Number.isInteger(confirmations) || confirmations < 1) {
     throw new Error(`stickyTimeline: confirmations must be an integer >= 1 (got ${confirmations}).`);
   }
+  if (!(barMs > 0)) {
+    throw new Error(`stickyTimeline: barMs must be > 0 (got ${barMs}).`);
+  }
 
   const out: StickyPoint[] = [];
   let previousRaw: AssetRegime | null = null;
+  let previousTimestamp: number | null = null;
   let runLength = 0;
   // Before the first confirmation there is no confirmed regime. The first raw label
   // seeds it, exactly as production's `Hysteresis` is constructed with the first raw
@@ -100,8 +105,18 @@ export function stickyTimeline(
   let active: AssetRegime | null = null;
 
   for (const bar of raws) {
-    runLength = bar.raw === previousRaw ? runLength + 1 : 1;
+    // A HOLE IN THE GRID BREAKS THE RUN. `regimeTimeline` builds its grid from the
+    // INTERSECTION of every asset's 4h timestamps, so one asset missing a candle removes
+    // that bar for all of them — and the series arriving here is then not gap-free,
+    // whatever this module would prefer. Counting across a hole would let two readings
+    // eight or more hours apart stand as consecutive confirmations, thawing an asset that
+    // was never observed for three consecutive bars. "Consecutive" has to mean observed
+    // back to back, so an unobserved bar restarts the count rather than being assumed
+    // unchanged.
+    const contiguous = previousTimestamp != null && bar.timestamp - previousTimestamp === barMs;
+    runLength = contiguous && bar.raw === previousRaw ? runLength + 1 : 1;
     previousRaw = bar.raw;
+    previousTimestamp = bar.timestamp;
     active ??= bar.raw;
     if (runLength >= confirmations) active = bar.raw;
 
@@ -123,6 +138,7 @@ export function stickyTimeline(
 export function stickyTimelines(
   points: RegimePoint[],
   confirmations: number,
+  barMs: number,
 ): Record<string, StickyPoint[]> {
   const assets = points.length > 0 ? Object.keys(points[0]!.assets) : [];
   const out: Record<string, StickyPoint[]> = {};
@@ -130,9 +146,18 @@ export function stickyTimelines(
     const raws = points
       .filter((p) => p.assets[asset] != null)
       .map((p) => ({ timestamp: p.timestamp, raw: p.assets[asset]!.raw }));
-    out[asset] = stickyTimeline(raws, confirmations);
+    out[asset] = stickyTimeline(raws, confirmations, barMs);
   }
   return out;
+}
+
+/** Bars missing from an otherwise regular grid — reported, never silently smoothed over. */
+export function gridGaps(timeline: StickyPoint[], barMs: number): number {
+  let gaps = 0;
+  for (let i = 1; i < timeline.length; i += 1) {
+    if (timeline[i]!.timestamp - timeline[i - 1]!.timestamp !== barMs) gaps += 1;
+  }
+  return gaps;
 }
 
 /** One uninterrupted stretch of frozen bars. */
@@ -142,7 +167,15 @@ export interface FreezeRun {
   fromMs: number;
   /** Bar the freeze ended on (the LAST non-actionable bar, not the bar that thawed it). */
   toMs: number;
+  /** Bars OBSERVED as frozen. Below `hours / (barMs/h)` when the grid had a hole. */
   bars: number;
+  /**
+   * Wall-clock span of the freeze, derived from the timestamps rather than from
+   * `bars × barMs`. The two agree on a gap-free grid; where a bar is missing, the bar
+   * count understates how long the position was actually unactionable — and "how long
+   * can a line be frozen" is the question bloc A exists to answer, so it is measured in
+   * elapsed time, not in observations.
+   */
   hours: number;
   /** The regime that was active when the freeze began. */
   leftRegime: AssetRegime;
@@ -194,7 +227,7 @@ export function freezeRuns(asset: string, timeline: StickyPoint[], barMs: number
       fromMs: first.timestamp,
       toMs: last.timestamp,
       bars,
-      hours: (bars * barMs) / 3_600_000,
+      hours: (last.timestamp + barMs - first.timestamp) / 3_600_000,
       leftRegime,
       // On an open-ended run this is the last RAW label seen, which by definition has
       // not been confirmed — hence the `openEnded` flag beside it, and hence

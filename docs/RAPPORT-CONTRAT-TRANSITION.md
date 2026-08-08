@@ -77,8 +77,9 @@ Deux ont été trouvés en construisant la mesure, et **ont réellement mordu** 
 - une ligne à plat est absente du tableau `positions`, donc le cycle qui l'**ouvre** n'y trouve aucun
   prix pour amorcer son pic. L'union avec les actifs négociables est nécessaire.
 
-Cinq ont été trouvés en revue. Trois étaient **latents** — vérifié : après correction, chaque chiffre
-publié dans ce rapport est inchangé au caractère près.
+Neuf ont été trouvés en revue. Sept étaient **latents** — vérifié à chaque tour : après correction,
+chaque chiffre publié dans ce rapport est inchangé au caractère près, à l'exception des trois colonnes
+de chemin de prix, qui gagnent en précision (voir §4).
 
 - la vue « fenêtre » du gel était découpée en **comptant** les bougies de préchauffage
   (`fullTimeline.length − points.length`). Dès que le harness tourne après coup et qu'une bougie 4h
@@ -101,6 +102,25 @@ publié dans ce rapport est inchangé au caractère près.
   gel non terminé à l'autre bord. Les durées sont désormais extraites de la marche complète
   (préchauffage inclus, où vit le vrai début) puis filtrées aux épisodes qui recoupent la fenêtre.
   Un seul épisode était concerné ; le bloc A publie ce compte.
+- corriger le bord gauche a ouvert le bord **droit** : passer la marche complète aux blocs laissait les
+  bougies postérieures à `window.toMs` résoudre, *avec le futur*, des gels encore ouverts à la fin de
+  la fenêtre, et dégeler des ordres qui n'étaient jamais redevenus actionnables dedans. Les
+  statistiques annoncées comme portant sur une fenêtre fixe auraient été révisées par des observations
+  que le bot n'a jamais eues. Il y a maintenant **trois vues** explicites : la marche complète (les
+  validations seules), la marche **plafonnée à `window.toMs` mais gardant le préchauffage** (les trois
+  blocs), et la vue fenêtre stricte (le taux de gel seul).
+- la vérification de continuité de `lowestBetween` ne comparait que les bougies **ayant survécu** au
+  filtre « entièrement à l'intérieur ». Une bougie manquante juste au bord de l'intérieur décale
+  simplement le début du filtre, et les survivantes sont alors trivialement adjacentes. La
+  vérification porte désormais sur **toutes les bougies qui recoupent** l'intervalle : ce segment doit
+  être contigu et atteindre les deux bornes, donc tout trou intérieur casse la contiguïté où qu'il
+  soit.
+- `stickyTimeline` supposait une grille **sans trou** mais ne le vérifiait pas. Or la grille de
+  `regimeTimeline` est l'**intersection** des horodatages 4h de tous les actifs : une bougie manquante
+  chez un seul actif retire la barre pour tous. Deux lectures distantes de 8 h auraient compté comme
+  des confirmations consécutives, dégelant un actif jamais observé trois bougies de suite. Un trou
+  **remet le compteur à 1**, et les durées de gel sont mesurées en **temps écoulé** plutôt qu'en
+  `bougies × barMs`. La validation T3 publie le nombre de trous par actif (0 sur ce run).
 
 Et deux corrigés en revue qui, eux, **ont mordu** — le harness tourne pendant que le bot écrit :
 
