@@ -1,6 +1,7 @@
 import { config, tradableBaseAssets, STRATEGY_VERSION, COHERENCE_GUARD } from '../config/index.js';
 import { Decimal, ZERO, dec, toNumericString } from '../money.js';
-import { evaluateTransition, judgeOrder } from '../transition/gate.js';
+import { evaluateTransition, judgeOrder, type TransitionVerdict } from '../transition/gate.js';
+import { judgeVector } from '../transition/vector.js';
 import {
   saveTransitionObservations,
   toObservationRow,
@@ -268,6 +269,14 @@ export async function decide(): Promise<DecideResult> {
   const observeTransition = async (
     decisionId: number | null,
     bookedLedger: LedgerEntry[],
+    /**
+     * The model's VECTOR — the movements computed from the distance between its
+     * allocation and the book, BEFORE execution. This is the population the gate will act
+     * on the day it blocks, so it is the population the provenance columns rehearse. The
+     * skip paths pass an empty vector, which is a fact ("examined, nothing to refuse")
+     * rather than an absence.
+     */
+    vectorLegs: Movement[],
   ): Promise<void> => {
     // No decision row means no foreign key to hang the observation on. Nothing is lost
     // that was not already lost: the cycle itself was not journaled either.
@@ -291,8 +300,8 @@ export async function decide(): Promise<DecideResult> {
       );
     }
 
-    const rows = tradableBaseAssets(config).map((asset) => {
-      const verdict = evaluateTransition({
+    const verdicts: TransitionVerdict[] = tradableBaseAssets(config).map((asset) =>
+      evaluateTransition({
         asset,
         sticky: context.transition?.perAsset[asset] ?? null,
         // The CONFIRMED posture, never the raw one: an unconfirmed risk_off must not be
@@ -305,14 +314,36 @@ export async function decide(): Promise<DecideResult> {
         // itself, exactly as `toDecisionContext` does for the model.
         peakPriceSinceEntry: stateRead.states.get(asset)?.peakPriceSinceEntry ?? null,
         stopThresholdPercent: config.transition.peakStopPercent,
-      });
-      const order = booked.get(asset);
+      }),
+    );
+
+    // ATOMICITY, computed and journaled — never applied. `judgeVector` is total, so this
+    // cannot throw and the closure keeps the property that makes observe mode observe-only:
+    // it is incapable of failing a cycle.
+    const vector = judgeVector(
+      vectorLegs.map((m) => ({ asset: m.asset, side: m.side, notional: m.notional })),
+      new Map(verdicts.map((v) => [v.asset, v])),
+    );
+    if (vector.refused) {
+      console.log(`[transition] would have refused this vector — ${vector.reason} (observe mode: nothing blocked).`);
+    }
+    const orphan = vector.legs.filter((l) => l.reason.includes('outside the observed universe'));
+    if (orphan.length > 0) {
+      console.warn(
+        `[warn] ${orphan.length} movement(s) on assets the transition layer produced no verdict for ` +
+          `(${orphan.map((l) => l.asset).join(', ')}) — journaled as unjudged; the observation is incomplete.`,
+      );
+    }
+
+    const rows = verdicts.map((verdict) => {
+      const order = booked.get(verdict.asset);
       return toObservationRow(
         decisionId,
         verdict,
         order == null
           ? null
           : { side: order.side, notional: toNumericString(order.notional), ...judgeOrder(verdict, order.side) },
+        vector,
       );
     });
 
@@ -366,7 +397,7 @@ export async function decide(): Promise<DecideResult> {
     const row = makeRow(decisionContext, context.regime, gitSha, { status: 'skipped', skip_reason: skipReason });
     const { persisted, id } = await insertDecision(supabase, row);
     await persistLifecycle(portfolio, []);
-    await observeTransition(id, []);
+    await observeTransition(id, [], []);
     return emptyResult('skipped', persisted, id, row, portfolio);
   }
 
@@ -452,7 +483,7 @@ export async function decide(): Promise<DecideResult> {
     const { persisted, id } = await insertDecision(supabase, row);
     await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
-    await observeTransition(id, []);
+    await observeTransition(id, [], []);
     return emptyResult('error', persisted, id, row, portfolio);
   }
 
@@ -492,7 +523,7 @@ export async function decide(): Promise<DecideResult> {
     const { persisted, id } = await insertDecision(supabase, row);
     guardEvents.push(event);
     await persistLifecycle(portfolio, []);
-    await observeTransition(id, []);
+    await observeTransition(id, [], []);
     // After persistLifecycle, so anything it queued is written too. It cannot queue a
     // refusal here (it is called with no notes), but the ordering is the same on every
     // path so nobody has to remember which one is the exception.
@@ -549,7 +580,7 @@ export async function decide(): Promise<DecideResult> {
     const { persisted, id } = await insertDecision(supabase, row);
     await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
-    await observeTransition(id, []);
+    await observeTransition(id, [], []);
     return emptyResult('parse_failed', persisted, id, row, portfolio);
   }
 
@@ -835,10 +866,13 @@ export async function decide(): Promise<DecideResult> {
   // Written from the POST-trade book, so an entry, a reinforcement and a full exit all
   // land in the cycle that caused them.
   await persistLifecycle(portfolioAfter, bookedLedger, v.positionNotes);
-  // The layer sees what actually BOOKED, so its order verdicts judge the movements that
-  // really happened rather than the ones that were merely computed. Runs after every
-  // order is placed, and its result is discarded — see the closure's header.
-  await observeTransition(id, bookedLedger);
+  // The layer sees BOTH populations, and they answer different questions. `bookedLedger`
+  // is what really happened, and the `order_*` verdicts keep judging exactly that.
+  // `movements` is the vector the model asked for, before any venue filter or failed
+  // booking could thin it — and that is the population the gate will act on the day it
+  // blocks, so it is the one the atomicity provenance rehearses. Runs after every order is
+  // placed, and its result is discarded — see the closure's header.
+  await observeTransition(id, bookedLedger, movements);
 
   // THE SECOND FLUSH, and it is the one that matters on this path. `persistLifecycle`
   // can queue a `thesis_write_refused` that no earlier flush could have seen: the guard
