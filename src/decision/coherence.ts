@@ -1,5 +1,6 @@
 import type { ActionType, PositionNote } from './schema.js';
-import type { StrategyVersion } from '../config/index.js';
+import type { AppConfig, StrategyVersion } from '../config/index.js';
+import { clampAllocation } from '../risk/clamp.js';
 import type { Movement } from '../execution/movements.js';
 import { mayWriteThesis } from '../portfolio/lifecycle.js';
 
@@ -97,8 +98,29 @@ export interface CoherenceInput {
    * in memory (the bot runs one process per wake-up under Cron Schedule, so there is
    * no memory to carry it in). Resolved from `applied_allocation` (see
    * `resolveEffectiveTarget`). Null only when no decision has ever been recorded.
+   *
+   * Passed RAW, as stored. `checkCoherence` normalises it under `riskPolicy` before any
+   * rule sees it — see the note there. Callers must not clamp it themselves: two callers
+   * normalising separately is how the operands drift apart again.
    */
   referenceTarget: Record<string, number> | null;
+  /**
+   * The risk policy IN FORCE THIS CYCLE — the caps the clamp applies.
+   *
+   * A guard that took no config was the right shape until the reference became an
+   * `applied_allocation`. A stored applied target was bounded by the policy of ITS day;
+   * the candidate is bounded by today's. Tighten a cap and the two live in different
+   * coordinate systems: a reference at 35% is compared to a candidate the clamp can no
+   * longer take above 30%, every `hold` is rejected for "moving" 35 → 30, no `decided`
+   * row is written, the reference never advances, and the risk-mandated reduction never
+   * executes. An interlock, and a regression — before the reference became the applied
+   * allocation, raw-versus-raw survived a cap change and the clamp quietly applied 30.
+   *
+   * So the policy is an INPUT to the judgement now. Passed in rather than imported, which
+   * keeps the function pure and — the reason that actually matters — lets a test run it
+   * under a synthetic tightened cap without touching the real configuration.
+   */
+  riskPolicy: AppConfig;
   /** The movements the real pipeline produced for this target. The 2% floor already applied. */
   movements: Movement[];
   /**
@@ -149,6 +171,16 @@ const TARGET_EPSILON = 0.01;
  * what this deliberately does NOT absolve — a model that reassigns that weight into
  * another COIN has made a real allocation choice, the coin still reads as moved, and a
  * `hold` claiming otherwise is still rejected.
+ *
+ * THE ORPHANED KEY IS DROPPED, not merely credited. Keeping it while also adding its
+ * weight to cash leaves an allocation summing past 100, and that used to be invisible:
+ * `movedAssets` walks the TARGET's keys, so a key the target no longer has was never
+ * looked at. It stopped being invisible the moment the restated reference started going
+ * through the clamp — `clampAllocation` counts every non-reserve key, so the ghost would
+ * take its own cap surplus and inflate the `coinTotal` the cash-floor pass scales by,
+ * giving the reference a different scaling from the candidate and rejecting honest holds
+ * for as long as the feed stayed down. Transferring a weight means moving it, not copying
+ * it.
  */
 function referenceInCurrentUniverse(
   target: Record<string, number>,
@@ -160,7 +192,10 @@ function referenceInCurrentUniverse(
     .reduce((sum, [, value]) => sum + value, 0);
   if (orphanedWeight === 0) return reference;
 
-  const restated: Record<string, number> = { ...reference };
+  const restated: Record<string, number> = {};
+  for (const [asset, value] of Object.entries(reference)) {
+    if (asset in target || asset === reserveAsset) restated[asset] = value;
+  }
   restated[reserveAsset] = (restated[reserveAsset] ?? 0) + orphanedWeight;
   return restated;
 }
@@ -195,6 +230,7 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
     actionType,
     effectiveTarget,
     referenceTarget,
+    riskPolicy,
     movements,
     reserveAsset,
     notes,
@@ -212,10 +248,31 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   // A full exit is exempt from rule 4 — see below.
   const fullExitAssets = new Set(movements.filter((m) => m.fullExit).map((m) => m.asset));
 
-  // Restated in this cycle's universe first — a feed that dropped an asset forces its
-  // weight to be reassigned, and that reassignment is the code's doing, not the model's.
+  // THE REFERENCE, PUT IN THIS CYCLE'S FRAME. Two corrections, in this order, and then
+  // every rule below reads the SAME result — none of them clamps, and none of them ever
+  // sees the raw value.
+  //
+  //   1. THE UNIVERSE. A feed that dropped an asset forces its weight to be reassigned,
+  //      and that reassignment is the code's doing, not the model's.
+  //   2. THE RISK POLICY. The reference is a stored `applied_allocation`, bounded by the
+  //      caps of its day; the candidate is bounded by today's. Comparing them across a
+  //      cap change compares two different coordinate systems — see `riskPolicy`.
+  //
+  // Restate THEN clamp, so the two operands are built the same way: the candidate is the
+  // clamp of an allocation expressed in this cycle's universe, and now so is the
+  // reference. Idempotent while the policy holds still — clamping an already-bounded
+  // allocation under the same caps returns it unchanged — which is why this corrects the
+  // interlock without moving a single verdict on the existing corpus.
+  //
+  // Only ONE place derives `reference`, and rules 1 and 2 both read it from here. Rules 3
+  // and 4 are about theses and never touch the reference at all, so there is no rule left
+  // that could read an unnormalised value.
   const reference = referenceTarget
-    ? referenceInCurrentUniverse(effectiveTarget, referenceTarget, reserveAsset)
+    ? clampAllocation(
+        referenceInCurrentUniverse(effectiveTarget, referenceTarget, reserveAsset),
+        reserveAsset,
+        riskPolicy,
+      ).applied
     : null;
   const moved = reference ? movedAssets(effectiveTarget, reference) : [];
   const targetChanged = moved.length > 0;
