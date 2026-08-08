@@ -386,36 +386,75 @@ async function main(): Promise<number> {
       'Re-run `npm run replay:transition-layer` after the first deployed cycle.',
     ]);
   } else {
+    // A cycle that produced ANY observation must have produced one per tradable asset —
+    // the live closure writes the whole batch or none of it. Skipping absent rows
+    // unconditionally would let a half-wired layer (one asset per cycle, say) pass on the
+    // strength of the rows that did land, which is the exact regression this check exists
+    // to catch. Cycles that predate the deployment have no rows at all and are excluded
+    // wholesale; a cycle with 1..n-1 rows is a defect.
+    const observedCycles = new Set<number>();
+    for (const key of persisted.keys()) observedCycles.add(Number(key.split(':')[0]));
+
     let compared = 0;
     const drift: string[] = [];
+    const incomplete: string[] = [];
+
     for (const [cycleId, perAsset] of verdicts) {
+      if (!observedCycles.has(cycleId)) continue;
+      const cycle = cycles.find((c) => c.id === cycleId);
+
       for (const [asset, verdict] of perAsset) {
         const row = persisted.get(`${cycleId}:${asset}`);
-        if (row == null) continue; // cycles that predate the deployment
+        if (row == null) {
+          if (incomplete.length < 5) {
+            incomplete.push(`#${cycleId} ${asset}: the cycle wrote observations but not this asset's`);
+          }
+          continue;
+        }
         compared += 1;
+
+        // The ORDER verdict is compared too, not merely selected. Without it, a closure
+        // that attributed a booking to the wrong asset — or persisted the wrong
+        // `judgeOrder` result — would leave this check green while P1c stayed green as
+        // well, since P1c recomputes everything offline and never looks at a stored row.
+        const booking = cycle?.bookings.find((b) => b.asset === asset) ?? null;
+        const expectedOrder = booking == null ? null : judgeOrder(verdict, booking.side);
+
         const expected = {
           gate: verdict.gate,
           actionable: verdict.actionable,
           run_length: verdict.runLength,
           stop_would_fire: verdict.stopWouldFire,
+          order_side: booking?.side ?? null,
+          order_verdict: expectedOrder?.verdict ?? null,
         };
         const actual = {
           gate: row.gate,
           actionable: row.actionable,
           run_length: Number(row.run_length),
           stop_would_fire: row.stop_would_fire,
+          order_side: (row.order_side as string | null) ?? null,
+          order_verdict: (row.order_verdict as string | null) ?? null,
         };
         if (JSON.stringify(expected) !== JSON.stringify(actual) && drift.length < 5) {
           drift.push(`#${cycleId} ${asset}: wrote ${JSON.stringify(actual)}, gate says ${JSON.stringify(expected)}`);
         }
       }
     }
-    check('P1d', 'the LIVE layer persisted what the gate computes', drift.length === 0 && compared > 0, [
-      `${persisted.size} observation rows found for this window; ${compared} compared against the gate`,
-      drift.length === 0
-        ? 'every persisted verdict matches — the layer is wired, not merely correct'
-        : `drift: ${drift.join(' | ')}`,
-    ]);
+
+    check(
+      'P1d',
+      'the LIVE layer persisted what the gate computes, in full',
+      drift.length === 0 && incomplete.length === 0 && compared > 0,
+      [
+        `${persisted.size} observation rows over ${observedCycles.size} cycles; ${compared} compared against the gate`,
+        `each observed cycle is required to carry all ${tradable.length} tradable assets — ` +
+          `${incomplete.length === 0 ? 'none is short' : `INCOMPLETE: ${incomplete.join(' | ')}`}`,
+        drift.length === 0
+          ? 'every persisted verdict matches, order verdicts included — the layer is wired, not merely correct'
+          : `drift: ${drift.join(' | ')}`,
+      ],
+    );
   }
 
   /* ── P2 — no real order was modified ──────────────────────────────────────── */
@@ -442,8 +481,22 @@ async function main(): Promise<number> {
   /* ── P3 — the reference cases ─────────────────────────────────────────────── */
   section('P3 — the reference cases');
 
+  // THE REFERENCE CORPUS IS A FIXED HISTORICAL SET, so it is pinned at BOTH ends.
+  //
+  // The lower bound alone was wrong: the observation window grows with every cycle the bot
+  // runs, so later divergent orders would silently join "the 13 measured cases". A single
+  // legitimate risk_off sell would then fail P3a for behaving correctly, and extra
+  // forbidden orders would keep it green while the set it reports is no longer the one the
+  // report measured. Either way the check stops describing what it claims to.
+  //
+  // Pinned by cycle id rather than by date because that is exactly the set: cycle 1163 was
+  // the last one on record when RAPPORT §3 was written, and its BNB sell is reference case
+  // C6. A date bound would be a proxy for this; the id IS it.
+  const REFERENCE_CORPUS_LAST_CYCLE = 1163;
   const fromMs = Date.parse('2026-08-01T00:00:00.000Z');
-  const weekDiverging = judged.filter((j) => j.cycle.generatedAtMs >= fromMs && j.diverging);
+  const weekDiverging = judged.filter(
+    (j) => j.cycle.generatedAtMs >= fromMs && j.cycle.id <= REFERENCE_CORPUS_LAST_CYCLE && j.diverging,
+  );
   const weekDivergingBlocked = weekDiverging.filter((j) => j.order.verdict !== 'allowed');
   const c1163 = judged.filter((j) => j.cycle.id === 1163);
   const c85 = judged.filter((j) => j.cycle.id === 85);
@@ -470,7 +523,8 @@ async function main(): Promise<number> {
       c1163.length > 0 &&
       c1163.every((j) => j.order.verdict !== 'allowed'),
     [
-      `orders placed while raw ≠ shown, from 2026-08-01 to the window's end: ${weekDiverging.length}`,
+      `orders placed while raw ≠ shown, over the PINNED corpus ` +
+        `[2026-08-01, cycle ${REFERENCE_CORPUS_LAST_CYCLE}]: ${weekDiverging.length}`,
       `refused by the layer: ${weekDivergingBlocked.length}/${weekDiverging.length}`,
       `cycle 1163 (BNB sold on a \`range\` label while raw was already trend_up): ` +
         `${c1163.map((j) => `${j.booking.asset} ${j.order.verdict}`).join(', ')}`,
