@@ -10,6 +10,7 @@ import {
   type ValidatedDecision,
 } from '../decision/schema.js';
 import { checkCoherence, type CoherenceViolation } from '../decision/coherence.js';
+import { resolveEffectiveTarget } from '../decision/effectiveTarget.js';
 
 /**
  * Rebuilding one journaled cycle into the exact inputs the guard would have seen.
@@ -129,7 +130,18 @@ export function thesesOf(ctx: StoredContext): Set<string> {
 }
 
 export type CycleVerdict =
-  | { kind: 'accepted'; decision: ValidatedDecision }
+  | {
+      kind: 'accepted';
+      decision: ValidatedDecision;
+      /**
+       * What production would have written to `applied_allocation` for this cycle — the
+       * risk-clamped target. Carried so the reference chain can be established from the
+       * EFFECTIVE target rather than from the raw proposal, exactly as production reads it
+       * back. Identical to `decision.targetAllocation` on the whole corpus (the clamp has
+       * never fired), which is what makes this change provably inert.
+       */
+      appliedAllocation: Record<string, number>;
+    }
   | { kind: 'rejected'; decision: ValidatedDecision; violations: CoherenceViolation[] }
   | { kind: 'unusable'; reason: string };
 
@@ -172,7 +184,7 @@ export function judge(
   decision: ValidatedDecision,
   ctx: StoredContext,
   referenceTarget: Record<string, number> | null,
-): { ok: boolean; violations: CoherenceViolation[] } {
+): { ok: boolean; violations: CoherenceViolation[]; appliedAllocation: Record<string, number> } {
   const book = bookOf(ctx);
   const clamp = clampAllocation(decision.targetAllocation, book.reserveAsset, config);
   const movements = computeMovements(
@@ -182,7 +194,7 @@ export function judge(
     config.execution.feePercent,
     config.execution.minMovementPercent,
   );
-  return checkCoherence({
+  const verdict = checkCoherence({
     // The corpus is v5 by construction (`loadCorpus` filters on prompt_version).
     strategy: 'v5',
     actionType: decision.actionType,
@@ -193,6 +205,10 @@ export function judge(
     notes: decision.positionNotes,
     assetsWithStoredThesis: thesesOf(ctx),
   });
+  // The clamp result is what production writes to `applied_allocation`, so it is returned
+  // rather than discarded: `replayInOrder` needs it to establish the next reference the
+  // same way production does. See the note there.
+  return { ...verdict, appliedAllocation: clamp.applied };
 }
 
 /** One journaled cycle, decoded and judged. */
@@ -206,7 +222,7 @@ export function replayCycle(
 
   const verdict = judge(decoded.decision, cycle.market_context, referenceTarget);
   return verdict.ok
-    ? { kind: 'accepted', decision: decoded.decision }
+    ? { kind: 'accepted', decision: decoded.decision, appliedAllocation: verdict.appliedAllocation }
     : { kind: 'rejected', decision: decoded.decision, violations: verdict.violations };
 }
 
@@ -223,9 +239,16 @@ export interface ReplayStep {
  * The ordering is load-bearing and is the correction the brief's §4.2 needed: the
  * reference is the last target the guard ACCEPTED, not the previous cycle's target. A
  * rejected cycle books nothing and establishes nothing, so it must not move the
- * reference — which is exactly what production does, where the reference is read as the
- * `target_allocation` of the last `decided` row and a rejected cycle is journaled
- * `guard_failed`.
+ * reference — which is exactly what production does, where the reference is read from the
+ * last `decided` row and a rejected cycle is journaled `guard_failed`.
+ *
+ * And it is the EFFECTIVE target that carries forward, not the raw proposal — the same
+ * definition `loadReferenceTarget` now resolves in production, so the two cannot drift.
+ * Production writes `applied_allocation = clamp.applied` and reads that column back; the
+ * replay rebuilds the same value from the same clamp and feeds it through the same
+ * `resolveEffectiveTarget`. On this corpus the clamp has never fired, so the reference is
+ * unchanged cycle for cycle — which is exactly why the change can be made now and proven
+ * inert, instead of on the day the transition gate makes the two columns diverge.
  *
  * Read the difference on the real corpus: 946/948/957 propose BNB at 11% against a
  * standing 12% and are rejected; 947/949/958 re-emit 12% and pass. Under "compare to the
@@ -238,7 +261,15 @@ export function replayInOrder(cycles: StoredCycle[]): ReplayStep[] {
     const referenceTarget = reference;
     const verdict = replayCycle(cycle, referenceTarget);
     steps.push({ cycle, verdict, referenceTarget });
-    if (verdict.kind === 'accepted') reference = verdict.decision.targetAllocation;
+    if (verdict.kind === 'accepted') {
+      // Through the SAME resolver production uses, on the row this cycle would have
+      // written. Going straight to `verdict.appliedAllocation` would give the identical
+      // value today and would be a second definition tomorrow.
+      reference = resolveEffectiveTarget({
+        target_allocation: verdict.decision.targetAllocation,
+        applied_allocation: verdict.appliedAllocation,
+      }).allocation;
+    }
   }
   return steps;
 }
