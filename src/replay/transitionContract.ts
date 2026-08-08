@@ -749,7 +749,12 @@ function validatePeaks(cycles: Cycle[], snapshots: Array<{ states: Map<string, {
   ]);
 }
 
-function validateWarmUp(sticky: Record<string, StickyPoint[]>, assets: string[], warmUpBars: number): void {
+function validateWarmUp(
+  sticky: Record<string, StickyPoint[]>,
+  assets: string[],
+  warmUpBars: number,
+  postWindowBars: number,
+): void {
   // The opening bars of ANY series are frozen by construction (a run of 1 is not a run
   // of 3). If that artefact reached the measured window it would inflate the freeze rate
   // for free. It cannot: the timeline is walked from ~60 days before the window opens.
@@ -757,6 +762,7 @@ function validateWarmUp(sticky: Record<string, StickyPoint[]>, assets: string[],
   const worst = Math.max(...firstThaw);
   validate('T3', 'no warm-up artefact reaches the measured window', worst >= 0 && worst < warmUpBars, [
     `bars replayed before the observation window opens: ${warmUpBars}`,
+    `bars that closed AFTER the last decision (excluded from bloc A by timestamp): ${postWindowBars}`,
     `first actionable bar per asset: ${assets.map((a, i) => `${a} @${firstThaw[i]}`).join(', ')}`,
     `worst = bar ${worst}, i.e. ${worst < warmUpBars ? 'well inside' : 'OUTSIDE'} the warm-up`,
   ]);
@@ -820,10 +826,21 @@ async function main(): Promise<number> {
   //    bar. On the sliced view they resolve to nothing and are scored "no regime" — which
   //    is how the four opening buys of cycle 85 were briefly, and wrongly, counted as
   //    orders the rule could not judge.
+  //
+  // The window view is taken BY TIMESTAMP, never by counting bars off the front.
+  // `fullTimeline` extends past the last decision whenever a newer 4h candle has closed
+  // since — which is the normal case for any run of this harness after the fact — so
+  // `fullTimeline.length - points.length` counts pre-window AND post-window bars as
+  // warm-up, and slicing that many off the front shifts the whole window forward. Bloc A
+  // would then be measured on bars the bot never traded through. Filtering on the same
+  // predicate `points` uses cannot drift from it.
   const stickyFull = stickyTimelines(fullTimeline, confirmations);
-  const warmUpBars = fullTimeline.length - points.length;
+  const warmUpBars = fullTimeline.findIndex((p) => p.timestamp + barMs >= window.fromMs);
+  const inWindow = new Set(points.map((p) => p.timestamp));
   const sticky: Record<string, StickyPoint[]> = {};
-  for (const [asset, timeline] of Object.entries(stickyFull)) sticky[asset] = timeline.slice(warmUpBars);
+  for (const [asset, timeline] of Object.entries(stickyFull)) {
+    sticky[asset] = timeline.filter((p) => inWindow.has(p.timestamp));
+  }
 
   const tradable = tradableBaseAssets(config).filter((a) => sticky[a] != null);
   const allAssets = Object.keys(sticky);
@@ -839,7 +856,7 @@ async function main(): Promise<number> {
   validateEquivalence(points, sticky, allAssets);
   validateAgainstJournal(cycles, points);
   validatePeaks(cycles, snapshots);
-  validateWarmUp(stickyFull, allAssets, warmUpBars);
+  validateWarmUp(stickyFull, allAssets, warmUpBars, fullTimeline.length - warmUpBars - points.length);
 
   const series: Record<string, Candle[]> = {};
   for (const [asset, s] of Object.entries(universe)) series[asset] = s.h4;

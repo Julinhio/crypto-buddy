@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import type { Candle } from '../market/klines.js';
 import { Hysteresis, type AssetRegime } from '../market/regime.js';
+import { closeAt, lowestBetween } from '../replay/peakStop.js';
 import { freezeRuns, stickyAt, stickyTimeline } from '../replay/stickyTransition.js';
 
 /**
@@ -196,6 +198,26 @@ const D: AssetRegime = 'trend_down';
 }
 
 {
+  // An UNTERMINATED freeze is never an aborted return, whatever its last raw bar says.
+  // The series ends with two `trend_up` bars after leaving trend_up — a flicker back that
+  // has NOT reconfirmed, since it is one bar short. Reading its raw label as a return
+  // would inflate the aborted-return count, which is bloc A's headline statistic.
+  const runs = freezeRuns('BTC', stickyTimeline(bars([U, U, U, R, R, U, U]), CONFIRMATIONS), H4_MS);
+  const trailing = runs[runs.length - 1]!;
+  assert.equal(trailing.openEnded, true, 'the run is still frozen at the last bar');
+  assert.equal(trailing.enteredRegime, U, 'its last raw bar does print the regime it left');
+  assert.equal(trailing.abortedReturn, false, 'but an unconfirmed flicker back is not a return');
+
+  // One more bar confirms it, and only then is it an aborted return.
+  const confirmed = freezeRuns('BTC', stickyTimeline(bars([U, U, U, R, R, U, U, U]), CONFIRMATIONS), H4_MS);
+  const resolved = confirmed[confirmed.length - 1]!;
+  assert.equal(resolved.openEnded, false, 'the third trend_up bar closes the freeze');
+  assert.equal(resolved.abortedReturn, true, 'and NOW it is an aborted return');
+  console.log('  ok: an unterminated freeze is never counted as an aborted return');
+  passed += 1;
+}
+
+{
   // A cycle reads the last bar that had CLOSED by its wall clock — production's own
   // rule. A cycle running one millisecond into a bar must read the PREVIOUS one.
   const t = stickyTimeline(bars([U, U, U, R]), CONFIRMATIONS);
@@ -224,6 +246,39 @@ const D: AssetRegime = 'trend_down';
   }
   assert.equal(stickyTimeline(bars([U]), 1)[0]!.actionable, true, 'confirmations=1 is a valid no-op');
   console.log('  ok: a nonsensical confirmations count is refused, not silently tolerated');
+  passed += 1;
+}
+
+{
+  // The price lookups the stop calibration reads must go NULL past the end of the
+  // series, never fall back to the last close available. A feed that stops short would
+  // otherwise answer "what was the price 72h after the exit" with a price from before
+  // the exit — a plausible number for the wrong horizon, which is the one failure mode a
+  // measurement harness cannot detect in its own output.
+  const candles: Candle[] = [0, 1, 2].map((i) => ({
+    timestamp: i * H4_MS,
+    open: 100,
+    high: 110,
+    low: 90 - i,
+    close: 100 + i,
+    volume: 1,
+  }));
+  const lastClose = 2 * H4_MS + H4_MS; // the series covers up to here
+
+  assert.equal(closeAt(candles, 0, H4_MS), null, 'before the first close, nothing has closed');
+  assert.equal(closeAt(candles, H4_MS, H4_MS)!.toNumber(), 100, 'the first candle closes on time');
+  assert.equal(closeAt(candles, lastClose, H4_MS)!.toNumber(), 102, 'the last close is reachable exactly');
+  assert.equal(closeAt(candles, lastClose + 1, H4_MS), null, 'one ms past the series is already out of range');
+  assert.equal(closeAt(candles, lastClose + 72 * 3_600_000, H4_MS), null, 'a 72h horizon past the feed is null');
+  assert.equal(closeAt([], H4_MS, H4_MS), null, 'an empty series has no price');
+
+  assert.equal(lowestBetween(candles, 0, lastClose, H4_MS)!.toNumber(), 88, 'the lowest low over the covered span');
+  assert.equal(
+    lowestBetween(candles, 0, lastClose + 1, H4_MS),
+    null,
+    'a span the series does not fully cover is null, not a low over the part we happen to have',
+  );
+  console.log('  ok: the price lookups go null past the series instead of substituting a stale close');
   passed += 1;
 }
 

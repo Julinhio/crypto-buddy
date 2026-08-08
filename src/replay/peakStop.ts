@@ -130,8 +130,19 @@ export interface StopRun {
   armedAssetCycles: number;
 }
 
-/** The close of the last candle that had CLOSED at or before `atMs`. Null past the series. */
+/**
+ * The close of the last candle that had CLOSED at or before `atMs` — or null when the
+ * series does not reach that far.
+ *
+ * The out-of-range guard is the load-bearing half. Without it, walking to the end of the
+ * series and keeping the last match silently answers a question about 72 hours from now
+ * with a price from three days ago: a feed that stops short would not produce a gap, it
+ * would produce a plausible number for the wrong horizon. A missing rebound must read as
+ * missing, so the report can exclude it, which is the whole no-synthetic-data rule.
+ */
 export function closeAt(candles: Candle[], atMs: number, barMs: number): Decimal | null {
+  const last = candles[candles.length - 1];
+  if (last == null || atMs > last.timestamp + barMs) return null;
   let found: Candle | null = null;
   for (const c of candles) {
     if (c.timestamp + barMs > atMs) break;
@@ -140,8 +151,15 @@ export function closeAt(candles: Candle[], atMs: number, barMs: number): Decimal
   return found == null ? null : dec(found.close);
 }
 
-/** Lowest traded low over [fromMs, toMs]. Null when the interval holds no closed candle. */
+/**
+ * Lowest traded low over [fromMs, toMs]. Null when the series does not cover the whole
+ * interval, for the same reason as `closeAt`: a low taken over a truncated window is not
+ * the lowest price of the episode, it is the lowest price of the part we happened to
+ * have — and it would be reported as though it were the former.
+ */
 export function lowestBetween(candles: Candle[], fromMs: number, toMs: number, barMs: number): Decimal | null {
+  const last = candles[candles.length - 1];
+  if (last == null || toMs > last.timestamp + barMs) return null;
   let low: Decimal | null = null;
   for (const c of candles) {
     if (c.timestamp < fromMs) continue;

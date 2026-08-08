@@ -64,14 +64,34 @@ réconcilié avec la seule trace journalisée qui existe — les 933 vues de cyc
 modèle. L'état final du rejeu coïncide aussi, exactement, avec la table `position_state` vivante
 (qty, entry_date et pic, sur les quatre actifs).
 
-Deux pièges rencontrés en route, corrigés, et signalés parce qu'ils auraient produit des chiffres
-plausibles et faux :
+### Pièges corrigés dans le harness
+
+Signalés parce qu'ils auraient tous produit des chiffres plausibles et faux — la seule catégorie de
+défaut qu'un harness de mesure ne peut pas détecter dans sa propre sortie.
+
+Deux ont été trouvés en construisant la mesure, et **ont réellement mordu** avant correction :
 
 - `positions[].price` du contexte est **arrondi à 2 décimales** pour l'affichage. Sur XRP à ~1,10 $
   c'est 0,9 % d'erreur, un sixième du plus petit seuil testé. Le prix est lu depuis
   `market.tradable[].price`, en pleine précision.
 - une ligne à plat est absente du tableau `positions`, donc le cycle qui l'**ouvre** n'y trouve aucun
   prix pour amorcer son pic. L'union avec les actifs négociables est nécessaire.
+
+Trois autres ont été trouvés en revue et étaient **latents** — vérifié : après correction, chaque
+chiffre publié dans ce rapport est inchangé au caractère près.
+
+- la vue « fenêtre » du gel était découpée en **comptant** les bougies de préchauffage
+  (`fullTimeline.length − points.length`). Dès que le harness tourne après coup et qu'une bougie 4h
+  plus récente a clôturé, ce compte inclut aussi les bougies post-fenêtre et le découpage décale toute
+  la fenêtre vers l'avant. Le découpage se fait maintenant **par horodatage**, sur le même prédicat que
+  `points`. La validation T3 publie désormais le nombre de bougies post-fenêtre exclues (0 sur ce run).
+- un gel **non terminé** dont les dernières bougies brutes réaffichaient l'ancien régime était compté
+  comme retour avorté, alors que rien n'a été reconfirmé. `abortedReturn` est désormais faux sur tout
+  épisode ouvert — la statistique de 30,4 % en dépend directement.
+- `closeAt` et `lowestBetween` renvoyaient la **dernière valeur disponible** au lieu de `null` quand
+  l'horizon demandé dépassait la série. Un flux s'arrêtant court aurait répondu à « quel était le prix
+  72 h après la sortie » avec un prix antérieur à la sortie. Les deux sortent maintenant `null` hors
+  couverture, conformément à la règle « pas de donnée synthétique ».
 
 ---
 

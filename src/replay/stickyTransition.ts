@@ -151,9 +151,15 @@ export interface FreezeRun {
   /** Distinct raw labels seen during the freeze — how much the tape flickered. */
   rawLabelsSeen: number;
   /**
-   * True when the freeze resolved back to the regime it left. This is the case point 4
+   * True when the freeze RESOLVED back into the regime it left. This is the case point 4
    * exists for: the tape wobbled, the old regime came back, and the asset was frozen
    * throughout instead of being handed a stale label paired with live flags.
+   *
+   * Always false on an `openEnded` run, and that is not a detail. An unterminated freeze
+   * whose last bars happen to print the old label has NOT reconfirmed it — the run is
+   * still one or two bars short, which is exactly the state point 4 refuses to treat as
+   * a return. Reading the raw label of a bar that never confirmed would inflate the
+   * aborted-return count, and that count is the headline statistic of bloc A.
    */
   abortedReturn: boolean;
   /** Still frozen at the last bar of the measured window — the duration is a LOWER bound. */
@@ -185,9 +191,12 @@ export function freezeRuns(asset: string, timeline: StickyPoint[], barMs: number
       bars,
       hours: (bars * barMs) / 3_600_000,
       leftRegime,
+      // On an open-ended run this is the last RAW label seen, which by definition has
+      // not been confirmed — hence the `openEnded` flag beside it, and hence
+      // `abortedReturn` being false regardless of what that label happens to be.
       enteredRegime: last.raw,
       rawLabelsSeen: labels.size,
-      abortedReturn: last.raw === leftRegime,
+      abortedReturn: !openEnded && last.raw === leftRegime,
       openEnded,
     });
   };
