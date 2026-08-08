@@ -156,19 +156,23 @@ dernière bougie de la fenêtre, donc aucune durée n'est une borne inférieure.
 
 ### Distribution des durées
 
-| durée | épisodes | part |
-|-------|----------|------|
-| 2 bougies (8 h) | 76 | 45,2 % |
-| 3 bougies (12 h) | 29 | 17,3 % |
-| 4 bougies (16 h) | 23 | 13,7 % |
-| 5 bougies (20 h) | 20 | 11,9 % |
-| 6 bougies (24 h) | 7 | 4,2 % |
-| 7 bougies (28 h) | 3 | 1,8 % |
-| 8 bougies (32 h) | 8 | 4,8 % |
-| 10 bougies (40 h) | 1 | 0,6 % |
-| 11 bougies (44 h) | 1 | 0,6 % |
+Agrégée en **temps écoulé**, pas en nombre d'observations. Les deux coïncident ici parce que la grille
+4h n'a aucun trou sur la fenêtre (publié par T3) ; là où elles diffèrent, c'est le temps écoulé qui
+répond à la question « combien de temps une ligne peut-elle rester gelée ».
 
-n = 168 · médiane **3 bougies** · p90 **6 bougies** · p99 **10 bougies** · max **11 bougies**
+| durée écoulée | bougies observées | épisodes | part |
+|---------------|-------------------|----------|------|
+| 8 h | 2 | 76 | 45,2 % |
+| 12 h | 3 | 29 | 17,3 % |
+| 16 h | 4 | 23 | 13,7 % |
+| 20 h | 5 | 20 | 11,9 % |
+| 24 h | 6 | 7 | 4,2 % |
+| 28 h | 7 | 3 | 1,8 % |
+| 32 h | 8 | 8 | 4,8 % |
+| 40 h | 10 | 1 | 0,6 % |
+| 44 h | 11 | 1 | 0,6 % |
+
+n = 168 · médiane **12 h** · p90 **24 h** · p99 **40 h** · max **44 h**
 
 La forme compte plus que le total. **Deux gels sur trois durent 12 h ou moins**, et la queue est
 courte : un seul épisode dépasse 40 h sur 61 jours et cinq actifs. Le taux de 31,6 % ne décrit donc pas

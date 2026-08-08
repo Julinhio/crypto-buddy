@@ -141,7 +141,9 @@ function blocA(
       (r) => r.toMs + barMs >= window.fromMs && r.fromMs + barMs <= window.toMs,
     );
     const frozenBars = timeline.filter((p) => p.frozen).length;
-    const longest = runs.reduce<FreezeRun | null>((best, r) => (best == null || r.bars > best.bars ? r : best), null);
+    // Longest by ELAPSED TIME, not by observation count: across a hole in the grid the
+    // two disagree, and the question bloc A answers is how long a line can stay frozen.
+    const longest = runs.reduce<FreezeRun | null>((best, r) => (best == null || r.hours > best.hours ? r : best), null);
     stats.push({
       asset,
       bars: timeline.length,
@@ -164,7 +166,11 @@ function printBlocA(stats: FreezeStats[]): void {
   const totalBars = stats.reduce((s, a) => s + a.bars, 0);
   const totalFrozen = stats.reduce((s, a) => s + a.frozenBars, 0);
   const allRuns = stats.flatMap((a) => a.runs);
-  const durations = allRuns.map((r) => r.bars).sort((a, b) => a - b);
+  // Aggregated on ELAPSED HOURS, not on observed bars. The two coincide on a gap-free
+  // grid — which this run has — but a hole makes the bar count understate how long the
+  // position was actually unactionable, and that is the quantity bloc A is about. Bar
+  // counts are still published, next to the hours rather than instead of them.
+  const durations = allRuns.map((r) => r.hours).sort((a, b) => a - b);
 
   subsection('freeze rate');
   console.log(`   ${'asset'.padEnd(8)}${'bars'.padStart(7)}${'frozen'.padStart(9)}${'rate'.padStart(9)}${'runs'.padStart(7)}${'longest'.padStart(20)}${'aborted returns'.padStart(18)}`);
@@ -188,19 +194,32 @@ function printBlocA(stats: FreezeStats[]): void {
       `— measured whole from the warm-up walk, never truncated at the boundary`,
   );
 
-  subsection('distribution of freeze durations (all assets, in 4h bars)');
-  const histogram = new Map<number, number>();
-  for (const d of durations) histogram.set(d, (histogram.get(d) ?? 0) + 1);
-  for (const [bars, n] of [...histogram.entries()].sort((a, b) => a[0] - b[0])) {
-    const share = (n / durations.length) * 100;
+  subsection('distribution of freeze durations (all assets, in ELAPSED hours)');
+  const histogram = new Map<number, { runs: number; barsMin: number; barsMax: number }>();
+  for (const r of allRuns) {
+    const bucket = histogram.get(r.hours) ?? { runs: 0, barsMin: r.bars, barsMax: r.bars };
+    bucket.runs += 1;
+    bucket.barsMin = Math.min(bucket.barsMin, r.bars);
+    bucket.barsMax = Math.max(bucket.barsMax, r.bars);
+    histogram.set(r.hours, bucket);
+  }
+  for (const [hours, bucket] of [...histogram.entries()].sort((a, b) => a[0] - b[0])) {
+    const share = (bucket.runs / durations.length) * 100;
+    const observed =
+      bucket.barsMin === bucket.barsMax ? `${bucket.barsMin}` : `${bucket.barsMin}-${bucket.barsMax}`;
     console.log(
-      `   ${String(bars).padStart(3)} bars (${String(bars * 4).padStart(3)}h)  ${String(n).padStart(4)} runs  ` +
+      `   ${n1(hours).padStart(5)}h  (${observed.padStart(5)} bars observed)  ${String(bucket.runs).padStart(4)} runs  ` +
         `${n1(share).padStart(5)}%  ${'█'.repeat(Math.max(1, Math.round(share / 2)))}`,
     );
   }
+  const q = (p: number): string => `${n1(quantile(durations, p) ?? 0)}h`;
   console.log(
-    `   n = ${durations.length}  ·  median ${quantile(durations, 0.5)} bars  ·  p90 ${quantile(durations, 0.9)} bars  ` +
-      `·  p99 ${quantile(durations, 0.99)} bars  ·  max ${durations[durations.length - 1]} bars`,
+    `   n = ${durations.length}  ·  median ${q(0.5)}  ·  p90 ${q(0.9)}  ·  p99 ${q(0.99)}  ` +
+      `·  max ${n1(durations[durations.length - 1] ?? 0)}h`,
+  );
+  console.log(
+    '   "bars observed" is the count of 4h readings inside that span. It equals hours / 4 on a gap-free',
+    '\n   grid (this run has no holes — see T3); where the two differ, the elapsed figure is the honest one.',
   );
 
   subsection('aborted returns — the flicker point 4 neutralises');
