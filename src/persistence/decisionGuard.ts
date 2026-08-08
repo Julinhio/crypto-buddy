@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CoherenceRule } from '../decision/coherence.js';
+import { resolveEffectiveTarget, type TargetColumns } from '../decision/effectiveTarget.js';
 
 const DECISIONS_TABLE = 'decisions';
 const EVENTS_TABLE = 'decision_guard_events';
@@ -16,9 +17,16 @@ const EVENTS_TABLE = 'decision_guard_events';
  * "Accepted" is derived from the STATUS rather than from a join against the guard's own
  * event log, and that is the load-bearing choice: a cycle the guard rejects is journaled
  * as `guard_failed`, never as `decided`. So "the last accepted target" is exactly "the
- * target_allocation of the most recent `decided` row", and the rule that a rejected
- * cycle establishes no reference becomes a property of the schema rather than a join
- * someone can forget.
+ * EFFECTIVE target of the most recent `decided` row", and the rule that a rejected cycle
+ * establishes no reference becomes a property of the schema rather than a join someone
+ * can forget.
+ *
+ * Effective, not proposed: the reference is resolved by `resolveEffectiveTarget`, so it is
+ * `applied_allocation` — what the deterministic chain retained — and not the model's raw
+ * ask. The two are identical on all 1079 decided rows today, and they separate the day the
+ * transition gate starts blocking. Reading the proposal then would set the reference to a
+ * target the book never pursued, and the guard would reject the next honest hold for
+ * "moving" away from it.
  *
  * ── THE BOOTSTRAP CASE, STATED EXPLICITLY ────────────────────────────────────────
  *
@@ -60,39 +68,44 @@ export async function loadReferenceTarget(
   try {
     const { data, error } = await supabase
       .from(DECISIONS_TABLE)
-      .select('target_allocation')
+      // BOTH columns, resolved by `resolveEffectiveTarget`. The reference is what the
+      // chain RETAINED, not what the model proposed — identical today (the clamp has
+      // never fired), and the two part company the day the transition gate blocks. The
+      // guard must compare against the target the book actually pursued, or it would
+      // reject every subsequent hold for "moving" away from a target that was never real.
+      .select('target_allocation, applied_allocation')
       .eq('status', 'decided')
       .order('created_at', { ascending: false })
       .limit(1);
     if (error) throw new Error(error.message);
 
-    const row = (data ?? [])[0] as { target_allocation: unknown } | undefined;
+    const row = (data ?? [])[0] as TargetColumns | undefined;
     if (!row) return { ok: true, target: null }; // genuinely the first decision on record
 
-    const target = row.target_allocation;
-    if (target == null || typeof target !== 'object' || Array.isArray(target)) {
-      // A `decided` row is CHECK-constrained to have a target_allocation, so this means
-      // the column holds something the guard cannot compare. Refusing is safer than
-      // coercing: a mangled reference would silently reject every subsequent hold.
+    const effective = resolveEffectiveTarget(row);
+    if (effective.allocation == null) {
+      // A `decided` row is CHECK-constrained to have a target_allocation, so reaching
+      // here means both columns hold something the guard cannot compare. Refusing is
+      // safer than coercing: a mangled reference would not fail loudly, it would
+      // silently reject every subsequent hold.
       console.error(
-        `[CRITICAL] the last decided row has an unusable target_allocation (${JSON.stringify(target)}) — ` +
+        '[CRITICAL] the last decided row has no usable allocation in either column ' +
+          `(target=${JSON.stringify(row.target_allocation)}, applied=${JSON.stringify(row.applied_allocation)}) — ` +
           'the coherence guard has no reference to compare against.',
       );
       return { ok: false, target: null };
     }
 
-    const numeric: Record<string, number> = {};
-    for (const [asset, value] of Object.entries(target as Record<string, unknown>)) {
-      if (typeof value !== 'number' || !Number.isFinite(value)) {
-        console.error(
-          `[CRITICAL] the last decided row's target_allocation["${asset}"] is not a finite number ` +
-            `(${JSON.stringify(value)}) — the coherence guard has no usable reference.`,
-        );
-        return { ok: false, target: null };
-      }
-      numeric[asset] = value;
+    // The fallback is a contract for rows predating `applied_allocation`, and no such row
+    // exists on the corpus. If one ever answers here, it means the guard is comparing
+    // against a raw proposal — worth knowing about rather than discovering later.
+    if (effective.source === 'proposal-fallback') {
+      console.warn(
+        '[warn] the last decided row carries no applied_allocation — the coherence guard is ' +
+          'falling back to the raw proposal as its reference.',
+      );
     }
-    return { ok: true, target: numeric };
+    return { ok: true, target: effective.allocation };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[CRITICAL] could not read the reference target (${msg}).`);

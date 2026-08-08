@@ -1,6 +1,7 @@
 import { config, tradableBaseAssets, type AppConfig } from '../config/index.js';
 import type { DecisionContext } from './context.js';
 import type { DecisionSummary } from '../persistence/decisions.js';
+import { resolveEffectiveTarget } from './effectiveTarget.js';
 
 /**
  * THE v5 MANDATE — Strategy V2.
@@ -256,9 +257,11 @@ export function buildUserPromptV5(params: {
           // target the book never actually pursued — and quietly invite the model to
           // propose past the cap again, since nothing would tell it the last attempt
           // was cut.
+          // Resolved rather than `applied ?? target` — see effectiveTarget.ts. Same value
+          // today; explicit about the fallback from now on.
           ...(lastSignificant.clamped
             ? {
-                risk_bounded_target: lastSignificant.applied_allocation ?? lastSignificant.target_allocation,
+                risk_bounded_target: resolveEffectiveTarget(lastSignificant).allocation,
                 clamped: true,
                 clamp_reason: lastSignificant.clamp_reason ?? null,
               }

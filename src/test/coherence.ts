@@ -61,7 +61,7 @@ const movement = (asset: string, side: 'buy' | 'sell' = 'sell', fullExit = false
 const input = (over: Partial<CoherenceInput> = {}): CoherenceInput => ({
   strategy: 'v5',
   actionType: 'hold',
-  targetAllocation: { ...REFERENCE },
+  effectiveTarget: { ...REFERENCE },
   referenceTarget: { ...REFERENCE },
   movements: [],
   reserveAsset: 'USDT',
@@ -83,7 +83,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // target to the VALUATION would reject every hold the bot ever makes.
   ok(
     'the guard never looks at the book valuation, only at the previous target',
-    checkCoherence(input({ targetAllocation: { ...REFERENCE } })).ok,
+    checkCoherence(input({ effectiveTarget: { ...REFERENCE } })).ok,
   );
 }
 
@@ -92,13 +92,13 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
 {
   // The 946 / 948 / 957 shape, one point of BNB.
   const moved = input({
-    targetAllocation: { ...REFERENCE, BNB: 11, USDT: 44 },
+    effectiveTarget: { ...REFERENCE, BNB: 11, USDT: 44 },
   });
   ok('a hold that moved the target is rejected', rules(moved).includes('hold_moved_target'));
 
   ok(
     'a NON-hold that moves the target is not rejected by rule 1',
-    !rules(input({ actionType: 'rebalance', targetAllocation: { ...REFERENCE, BNB: 11, USDT: 44 }, movements: [movement('BNB')], notes: [note('BNB')] })).includes(
+    !rules(input({ actionType: 'rebalance', effectiveTarget: { ...REFERENCE, BNB: 11, USDT: 44 }, movements: [movement('BNB')], notes: [note('BNB')] })).includes(
       'hold_moved_target',
     ),
   );
@@ -106,17 +106,17 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // No reference at all — the very first decision on record. Nothing to have modified.
   ok(
     'a hold with no reference target at all is not rejected (the first decision ever)',
-    checkCoherence(input({ referenceTarget: null, targetAllocation: { BTC: 30, USDT: 70 } })).ok,
+    checkCoherence(input({ referenceTarget: null, effectiveTarget: { BTC: 30, USDT: 70 } })).ok,
   );
 
   // Float noise must not read as intent. A deliberate move is points, not hundredths.
   ok(
     'a re-emitted target with float noise is the same target',
-    checkCoherence(input({ targetAllocation: { ...REFERENCE, BTC: 25.001 } })).ok,
+    checkCoherence(input({ effectiveTarget: { ...REFERENCE, BTC: 25.001 } })).ok,
   );
   ok(
     'half a point IS a change and is caught',
-    rules(input({ targetAllocation: { ...REFERENCE, BTC: 25.5, USDT: 42.5 } })).includes('hold_moved_target'),
+    rules(input({ effectiveTarget: { ...REFERENCE, BTC: 25.5, USDT: 42.5 } })).includes('hold_moved_target'),
   );
 
   // THE UNIVERSE-CHANGE FALSE POSITIVE. A pair can drop out of the tradable universe
@@ -124,7 +124,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // comparing over the UNION would read the code's own universe change as the model
   // changing its mind — rejecting every hold for as long as the feed stayed down.
   const shrunk = input({
-    targetAllocation: { BTC: 25, ETH: 20, BNB: 12, USDT: 43 }, // XRP (at 0) gone
+    effectiveTarget: { BTC: 25, ETH: 20, BNB: 12, USDT: 43 }, // XRP (at 0) gone
   });
   ok('an asset leaving the universe is not the model changing its mind', checkCoherence(shrunk).ok);
 
@@ -138,7 +138,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   const heldReference = { BTC: 25, ETH: 20, BNB: 12, XRP: 8, USDT: 35 };
   const feedLost = input({
     referenceTarget: heldReference,
-    targetAllocation: { BTC: 25, ETH: 20, BNB: 12, USDT: 43 }, // XRP's 8 parked in cash
+    effectiveTarget: { BTC: 25, ETH: 20, BNB: 12, USDT: 43 }, // XRP's 8 parked in cash
   });
   ok(
     'a dropped feed whose line held real weight still reads as a hold',
@@ -153,7 +153,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
     rules(
       input({
         referenceTarget: heldReference,
-        targetAllocation: { BTC: 33, ETH: 20, BNB: 12, USDT: 35 }, // XRP's 8 → BTC
+        effectiveTarget: { BTC: 33, ETH: 20, BNB: 12, USDT: 35 }, // XRP's 8 → BTC
       }),
     ).includes('hold_moved_target'),
   );
@@ -165,7 +165,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // 946 again, from the other angle: the target moved AND no order can come of it.
   const inexecutable = input({
     actionType: 'rebalance',
-    targetAllocation: { ...REFERENCE, BNB: 11, USDT: 44 },
+    effectiveTarget: { ...REFERENCE, BNB: 11, USDT: 44 },
     movements: [],
     notes: [],
   });
@@ -179,7 +179,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
     !rules(
       input({
         actionType: 'rebalance',
-        targetAllocation: { ...REFERENCE, BNB: 8, USDT: 47 },
+        effectiveTarget: { ...REFERENCE, BNB: 8, USDT: 47 },
         movements: [movement('BNB')],
         notes: [note('BNB')],
       }),
@@ -204,7 +204,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // the decision, trade only BTC, and silently discard the intent.
   const unrelated = input({
     actionType: 'rebalance',
-    targetAllocation: { ...REFERENCE, BNB: 11, USDT: 44 }, // one point — under the floor
+    effectiveTarget: { ...REFERENCE, BNB: 11, USDT: 44 }, // one point — under the floor
     movements: [movement('BTC', 'buy')], // BTC drifted; BTC's target did NOT move
     notes: [note('BTC')],
     assetsWithStoredThesis: new Set(['BTC']),
@@ -220,7 +220,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // reject every legitimate rebalance the bot ever makes.
   const realTrim = input({
     actionType: 'de_risk',
-    targetAllocation: { ...REFERENCE, BNB: 8, USDT: 47 }, // BNB -4, USDT +4
+    effectiveTarget: { ...REFERENCE, BNB: 8, USDT: 47 }, // BNB -4, USDT +4
     movements: [movement('BNB')], // only BNB trades; USDT never does
     notes: [note('BNB')],
     assetsWithStoredThesis: new Set(['BNB']),
@@ -232,7 +232,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // documented, measured residual of the 2% floor, not an incoherence.
   const withResidual = input({
     actionType: 'de_risk',
-    targetAllocation: { ...REFERENCE, BNB: 6, ETH: 19, USDT: 50 },
+    effectiveTarget: { ...REFERENCE, BNB: 6, ETH: 19, USDT: 50 },
     movements: [movement('BNB')], // ETH's one point stays under the floor
     notes: [note('BNB')],
     assetsWithStoredThesis: new Set(['BNB']),
@@ -273,7 +273,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
     checkCoherence(
       input({
         actionType: 'rebalance',
-        targetAllocation: { ...REFERENCE, BNB: 8, USDT: 47 },
+        effectiveTarget: { ...REFERENCE, BNB: 8, USDT: 47 },
         movements: [movement('BNB')],
         notes: [note('BNB')],
         assetsWithStoredThesis: new Set(['BNB']),
@@ -287,7 +287,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
 {
   const silent = input({
     actionType: 'rebalance',
-    targetAllocation: { ...REFERENCE, BNB: 8, USDT: 47 },
+    effectiveTarget: { ...REFERENCE, BNB: 8, USDT: 47 },
     movements: [movement('BNB')],
     notes: [],
     assetsWithStoredThesis: new Set(['BNB']),
@@ -299,7 +299,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // contractually about to discard.
   const exit = input({
     actionType: 'rotate',
-    targetAllocation: { ...REFERENCE, XRP: 0 },
+    effectiveTarget: { ...REFERENCE, XRP: 0 },
     movements: [movement('XRP', 'sell', true)],
     notes: [],
   });
@@ -328,7 +328,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   const v4Move = input({
     strategy: 'v4',
     actionType: 'rebalance',
-    targetAllocation: { ...REFERENCE, BNB: 8, USDT: 47 },
+    effectiveTarget: { ...REFERENCE, BNB: 8, USDT: 47 },
     movements: [movement('BNB')],
     notes: [], // v4 CANNOT produce notes — the schema has no such field
     assetsWithStoredThesis: new Set(['BNB']),
@@ -343,7 +343,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
         // A buy: the line whose target moved is the line that trades. (Moving BNB's
         // target while BTC is what trades is a DIFFERENT decision, and rule 2 rejects
         // it under v4 exactly as it does under v5 — that rule is strategy-agnostic.)
-        targetAllocation: { ...REFERENCE, BTC: 31, USDT: 37 },
+        effectiveTarget: { ...REFERENCE, BTC: 31, USDT: 37 },
         movements: [movement('BTC', 'buy')],
       }).ok,
   );
@@ -352,7 +352,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // target that cannot produce an order, are incoherent under any mandate.
   ok(
     'v4: rule 1 stays armed',
-    rules(input({ strategy: 'v4', targetAllocation: { ...REFERENCE, BNB: 11, USDT: 44 } })).includes(
+    rules(input({ strategy: 'v4', effectiveTarget: { ...REFERENCE, BNB: 11, USDT: 44 } })).includes(
       'hold_moved_target',
     ),
   );
@@ -362,7 +362,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
       input({
         strategy: 'v4',
         actionType: 'rebalance',
-        targetAllocation: { ...REFERENCE, BNB: 11, USDT: 44 },
+        effectiveTarget: { ...REFERENCE, BNB: 11, USDT: 44 },
         movements: [],
       }),
     ).includes('target_not_executable'),
@@ -373,7 +373,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
 
 {
   const both = input({
-    targetAllocation: { ...REFERENCE, BNB: 11, USDT: 44 },
+    effectiveTarget: { ...REFERENCE, BNB: 11, USDT: 44 },
     notes: [note('ETH')],
     assetsWithStoredThesis: new Set(['ETH']),
   });

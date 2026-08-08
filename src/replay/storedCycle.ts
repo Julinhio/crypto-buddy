@@ -10,6 +10,7 @@ import {
   type ValidatedDecision,
 } from '../decision/schema.js';
 import { checkCoherence, type CoherenceViolation } from '../decision/coherence.js';
+import { resolveEffectiveTarget } from '../decision/effectiveTarget.js';
 
 /**
  * Rebuilding one journaled cycle into the exact inputs the guard would have seen.
@@ -60,6 +61,18 @@ export interface StoredCycle {
   created_at: string;
   raw_response: string;
   market_context: StoredContext;
+  /**
+   * The two allocation columns AS PERSISTED, carried so the reference chain can advance on
+   * the value production actually wrote rather than on one recomputed here.
+   *
+   * The distinction is empty today and will not stay that way. Re-running `clampAllocation`
+   * applies TODAY's caps to a historical target: change a cap, or let another deterministic
+   * gate adjust the target, and the recomputed value stops being what the row holds — every
+   * later verdict in the chain would then diverge from the guard chain that actually ran.
+   * The row is the fact; the recomputation is a guess that happens to be right for now.
+   */
+  target_allocation: unknown;
+  applied_allocation: unknown;
 }
 
 /** The virtual book EXACTLY as that cycle saw it. */
@@ -129,7 +142,18 @@ export function thesesOf(ctx: StoredContext): Set<string> {
 }
 
 export type CycleVerdict =
-  | { kind: 'accepted'; decision: ValidatedDecision }
+  | {
+      kind: 'accepted';
+      decision: ValidatedDecision;
+      /**
+       * What production would have written to `applied_allocation` for this cycle — the
+       * risk-clamped target. Carried so the reference chain can be established from the
+       * EFFECTIVE target rather than from the raw proposal, exactly as production reads it
+       * back. Identical to `decision.targetAllocation` on the whole corpus (the clamp has
+       * never fired), which is what makes this change provably inert.
+       */
+      appliedAllocation: Record<string, number>;
+    }
   | { kind: 'rejected'; decision: ValidatedDecision; violations: CoherenceViolation[] }
   | { kind: 'unusable'; reason: string };
 
@@ -172,27 +196,53 @@ export function judge(
   decision: ValidatedDecision,
   ctx: StoredContext,
   referenceTarget: Record<string, number> | null,
-): { ok: boolean; violations: CoherenceViolation[] } {
+  /**
+   * That cycle's PERSISTED `applied_allocation`, when the decision being judged is the one
+   * the row actually recorded.
+   *
+   * Passed by `replayCycle` and deliberately NOT by the retry proof, which judges a freshly
+   * generated response: that decision was never persisted, so it has no stored applied
+   * allocation and re-clamping is the only honest answer for it.
+   *
+   * Without it the replay judges the CURRENT cycle against a clamp recomputed with today's
+   * caps while comparing it to a reference taken from history — the same asymmetry as
+   * raw-versus-applied, one level down. Tighten a cap and a historical hold whose 40% was
+   * applied at 35% against a 35% reference gets replayed at 30% and rejected for moving a
+   * target it never moved, with its movements resized to match.
+   */
+  storedApplied?: unknown,
+): { ok: boolean; violations: CoherenceViolation[]; appliedAllocation: Record<string, number> } {
   const book = bookOf(ctx);
   const clamp = clampAllocation(decision.targetAllocation, book.reserveAsset, config);
+  // The row is the fact; the recomputation is a guess that happens to be right today. The
+  // resolver doubles as the validator — an unusable stored value falls back to the clamp
+  // rather than poisoning the judgement.
+  const stored = resolveEffectiveTarget({ applied_allocation: storedApplied });
+  const effective = stored.source === 'applied' ? stored.allocation! : clamp.applied;
   const movements = computeMovements(
     book,
-    clamp.applied,
+    effective,
     pricesOf(ctx),
     config.execution.feePercent,
     config.execution.minMovementPercent,
   );
-  return checkCoherence({
+  const verdict = checkCoherence({
     // The corpus is v5 by construction (`loadCorpus` filters on prompt_version).
     strategy: 'v5',
     actionType: decision.actionType,
-    targetAllocation: decision.targetAllocation,
+    // The same operand production feeds the guard, and the same one the movements were
+    // sized from — so the replay cannot judge on a different basis from the live path.
+    effectiveTarget: effective,
     referenceTarget,
     movements,
     reserveAsset: book.reserveAsset,
     notes: decision.positionNotes,
     assetsWithStoredThesis: thesesOf(ctx),
   });
+  // Returned rather than discarded: this is the value production would have written to
+  // `applied_allocation`, so `replayInOrder` establishes the next reference from it — one
+  // resolution point for the whole chain instead of one per caller.
+  return { ...verdict, appliedAllocation: effective };
 }
 
 /** One journaled cycle, decoded and judged. */
@@ -204,9 +254,15 @@ export function replayCycle(
   const decoded = decodeResponse(cycle.raw_response, assets);
   if (!decoded.ok) return { kind: 'unusable', reason: decoded.reason };
 
-  const verdict = judge(decoded.decision, cycle.market_context, referenceTarget);
+  const verdict = judge(
+    decoded.decision,
+    cycle.market_context,
+    referenceTarget,
+    // This IS the response the row recorded, so its persisted applied allocation applies.
+    cycle.applied_allocation,
+  );
   return verdict.ok
-    ? { kind: 'accepted', decision: decoded.decision }
+    ? { kind: 'accepted', decision: decoded.decision, appliedAllocation: verdict.appliedAllocation }
     : { kind: 'rejected', decision: decoded.decision, violations: verdict.violations };
 }
 
@@ -223,9 +279,16 @@ export interface ReplayStep {
  * The ordering is load-bearing and is the correction the brief's §4.2 needed: the
  * reference is the last target the guard ACCEPTED, not the previous cycle's target. A
  * rejected cycle books nothing and establishes nothing, so it must not move the
- * reference — which is exactly what production does, where the reference is read as the
- * `target_allocation` of the last `decided` row and a rejected cycle is journaled
- * `guard_failed`.
+ * reference — which is exactly what production does, where the reference is read from the
+ * last `decided` row and a rejected cycle is journaled `guard_failed`.
+ *
+ * And it is the EFFECTIVE target that carries forward, not the raw proposal — the same
+ * definition `loadReferenceTarget` now resolves in production, so the two cannot drift.
+ * Production writes `applied_allocation = clamp.applied` and reads that column back; the
+ * replay rebuilds the same value from the same clamp and feeds it through the same
+ * `resolveEffectiveTarget`. On this corpus the clamp has never fired, so the reference is
+ * unchanged cycle for cycle — which is exactly why the change can be made now and proven
+ * inert, instead of on the day the transition gate makes the two columns diverge.
  *
  * Read the difference on the real corpus: 946/948/957 propose BNB at 11% against a
  * standing 12% and are rejected; 947/949/958 re-emit 12% and pass. Under "compare to the
@@ -238,7 +301,12 @@ export function replayInOrder(cycles: StoredCycle[]): ReplayStep[] {
     const referenceTarget = reference;
     const verdict = replayCycle(cycle, referenceTarget);
     steps.push({ cycle, verdict, referenceTarget });
-    if (verdict.kind === 'accepted') reference = verdict.decision.targetAllocation;
+    // `judge` already resolved this cycle's effective target from the persisted column
+    // (falling back to the recomputed clamp only when the row has none), and judged it
+    // against that same value. Reading it back here keeps ONE resolution point for the
+    // whole chain: the candidate the guard saw and the reference the next cycle gets are
+    // the same object, so they cannot drift apart through a second fallback written twice.
+    if (verdict.kind === 'accepted') reference = verdict.appliedAllocation;
   }
   return steps;
 }
@@ -253,7 +321,7 @@ export async function loadCorpus(
   for (let from = 0; ; from += PAGE) {
     let query = supabase
       .from('decisions')
-      .select('id, created_at, raw_response, market_context')
+      .select('id, created_at, raw_response, market_context, target_allocation, applied_allocation')
       .eq('status', 'decided')
       .eq('prompt_version', 'v5')
       .not('raw_response', 'is', null)

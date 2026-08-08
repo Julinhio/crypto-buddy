@@ -1,6 +1,7 @@
 import { config, tradableBaseAssets, type AppConfig } from '../config/index.js';
 import type { DecisionContext } from './context.js';
 import type { DecisionSummary } from '../persistence/decisions.js';
+import { resolveEffectiveTarget } from './effectiveTarget.js';
 import type { RegimeJournal } from '../market/regime.js';
 import type { MarketState } from './schema.js';
 
@@ -121,7 +122,12 @@ function summarizeDecision(d: DecisionSummary): Record<string, unknown> {
   // labelled "applied"/"held". The takeaway: proposing past a cap is futile; the
   // code trims the excess to the cap every time.
   if (d.clamped) {
-    summary.risk_bounded_target = d.applied_allocation ?? d.target_allocation;
+    // Resolved, never `applied ?? target`: the fallback to the raw proposal is an
+    // exception for rows written before `applied_allocation` existed, and spelling it as
+    // a `??` here made it invisible — this line would hand back the model's own ask as
+    // though the chain had endorsed it. Identical value today (no decided row lacks an
+    // applied allocation), explicit from now on.
+    summary.risk_bounded_target = resolveEffectiveTarget(d).allocation;
     summary.clamped = true;
     summary.clamp_reason = d.clamp_reason ?? null;
   }
