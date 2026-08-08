@@ -15,6 +15,7 @@
     "replay:coherence": "tsx src/replay/coherence.ts",
     "replay:transition": "tsx src/replay/transitionContract.ts",
     "replay:transition-layer": "tsx src/replay/transitionLayerProof.ts",
+    "replay:risk-off": "tsx src/replay/riskOffCounterfactual.ts",
     "replay:retry-1000": "tsx src/replay/retry1000.ts",
     "backfill:position-state": "tsx src/migrations/backfillPositionState.ts",
     "probe:v5": "tsx src/probes/v5Behaviour.ts",

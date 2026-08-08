@@ -1,23 +1,18 @@
 import 'dotenv/config';
-import { config, tradableBaseAssets } from '../config/index.js';
-import { publicMainnetClient } from '../exchanges/binance.js';
-import type { Candle } from '../market/klines.js';
+import { config } from '../config/index.js';
 import { timeframeMs } from '../market/klines.js';
-import { regimeTimeline } from '../market/regime.js';
-import { stickyAt, stickyTimelines, type StickyPoint } from '../market/transition.js';
+import { stickyAt, type StickyPoint } from '../market/transition.js';
 import { ZERO, type Decimal } from '../money.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
 import { evaluateTransition, judgeOrder, type TransitionVerdict } from '../transition/gate.js';
-import { fetchCandlesSince } from './klines.js';
 import {
   expectsObservation,
-  loadCycleStream,
   missingObservationBatches,
-  replayPeaks,
   type Booking,
   type Cycle,
 } from './transitionCycles.js';
-import { fmtBar, loadObservationWindow, replayRegimeOptions } from './window.js';
+import { loadTransitionTape } from './transitionSetup.js';
+import { fmtBar, loadObservationWindow } from './window.js';
 
 /**
  * TRANSITION LAYER PROOF — does the LIVE layer compute what the measurement measured?
@@ -144,36 +139,7 @@ async function main(): Promise<number> {
   console.log('Mode: OBSERVE — the layer journals its verdict and blocks nothing.');
   console.log('Supabase access: READ-ONLY.');
 
-  // Candles, with enough history before the window for the indicators and the sticky walk
-  // to have converged well before the first measured bar.
-  const client = publicMainnetClient();
-  const DAY_MS = 24 * 3_600_000;
-  const universe: Record<string, { daily: Candle[]; h4: Candle[] }> = {};
-  for (const symbol of [...config.tradablePairs, ...config.referencePairs]) {
-    const base = symbol.split('/')[0];
-    if (!base) continue;
-    const [daily, h4] = await Promise.all([
-      fetchCandlesSince(client, symbol, config.primaryTimeframe, window.fromMs - 260 * DAY_MS),
-      fetchCandlesSince(client, symbol, config.regime.timeframe, window.fromMs - 60 * DAY_MS),
-    ]);
-    universe[base] = { daily, h4 };
-  }
-
-  const timeline = regimeTimeline(universe, config.regime.thresholds, replayRegimeOptions());
-  // Capped at the observation window, warm-up prefix kept: the same two-sided discipline
-  // the measurement harness uses. Past the cap we would be resolving cycles with bars the
-  // bot never saw; without the prefix the earliest cycles would resolve to nothing.
-  const analysed = timeline.filter((p) => p.timestamp + barMs <= window.toMs);
-  const sticky = stickyTimelines(analysed, confirmations, barMs);
-
-  const { cycles, bookings, arrivedDuringTheRun } = await loadCycleStream(supabase, window.toMs);
-  const { snapshots } = replayPeaks(cycles);
-  console.log(
-    `[proof] ${cycles.length} cycles, ${bookings.length} sovereign bookings, ` +
-      `${arrivedDuringTheRun} row(s) committed by the live bot after the window was captured (excluded).`,
-  );
-
-  const tradable = tradableBaseAssets(config).filter((a) => sticky[a] != null);
+  const { sticky, cycles, bookings, snapshots, tradable } = await loadTransitionTape(window, '[proof]');
 
   /* ── P1 — the live layer reproduces the replay ───────────────────────────── */
   section('P1 — the live layer reproduces the replay');
