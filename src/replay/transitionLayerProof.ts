@@ -360,7 +360,11 @@ async function main(): Promise<number> {
     for (let i = 0; i < observedIds.length; i += 500) {
       const { data, error } = await supabase
         .from('transition_observations')
-        .select('decision_id, asset, gate, actionable, run_length, stop_would_fire, order_verdict')
+        // Every column the comparison below reads. `order_side` in particular: comparing a
+        // column that was never selected reads `undefined`, normalises to null, and drifts
+        // against every correctly persisted order row — a check that fails loudest exactly
+        // when the thing it watches is working.
+        .select('decision_id, asset, gate, actionable, run_length, stop_would_fire, order_side, order_verdict')
         .in('decision_id', observedIds.slice(i, i + 500));
       if (error) throw new Error(error.message);
       for (const row of (data ?? []) as Array<Record<string, unknown>>) {
@@ -395,13 +399,38 @@ async function main(): Promise<number> {
     const observedCycles = new Set<number>();
     for (const key of persisted.keys()) observedCycles.add(Number(key.split(':')[0]));
 
+    // THE DEPLOYMENT CUTOFF. Requiring completeness only of cycles that already wrote
+    // something leaves the worst failure invisible: a cycle that wrote NOTHING at all — a
+    // whole batch lost to the writer's 5s deadline, or a return path where the call was
+    // never added — looks exactly like a cycle that predates the deployment. So the cutoff
+    // is the FIRST observed cycle, and every eligible cycle from there on must carry a
+    // full batch.
+    //
+    // "Eligible" excludes `skipped`, and only that: the edge-case-0 path (the lifecycle
+    // inputs could not be read) journals a skipped row and deliberately returns before
+    // both `persistLifecycle` and `observeTransition`, so a skipped cycle with no
+    // observation is correct behaviour rather than a lost one. Every other status reaches
+    // the closure.
+    const cutoff = Math.min(...observedCycles);
+
     let compared = 0;
     const drift: string[] = [];
     const incomplete: string[] = [];
+    const missingBatches: string[] = [];
+    let eligible = 0;
 
     for (const [cycleId, perAsset] of verdicts) {
-      if (!observedCycles.has(cycleId)) continue;
       const cycle = cycles.find((c) => c.id === cycleId);
+      if (cycleId < cutoff) continue; // genuinely predates the deployment
+      if (cycle?.status === 'skipped' && !observedCycles.has(cycleId)) continue;
+
+      eligible += 1;
+      if (!observedCycles.has(cycleId)) {
+        if (missingBatches.length < 5) {
+          missingBatches.push(`#${cycleId} (${cycle?.status ?? 'unknown'}): no observation at all`);
+        }
+        continue;
+      }
 
       for (const [asset, verdict] of perAsset) {
         const row = persisted.get(`${cycleId}:${asset}`);
@@ -445,13 +474,16 @@ async function main(): Promise<number> {
     check(
       'P1d',
       'the LIVE layer persisted what the gate computes, in full',
-      drift.length === 0 && incomplete.length === 0 && compared > 0,
+      drift.length === 0 && incomplete.length === 0 && missingBatches.length === 0 && compared > 0,
       [
         `${persisted.size} observation rows over ${observedCycles.size} cycles; ${compared} compared against the gate`,
-        `each observed cycle is required to carry all ${tradable.length} tradable assets — ` +
+        `deployment cutoff: cycle ${cutoff} — ${eligible} eligible cycles from there on (skipped ones excluded)`,
+        `cycles with NO observation at all after the cutoff: ` +
+          `${missingBatches.length === 0 ? 'none' : `LOST: ${missingBatches.join(' | ')}`}`,
+        `each observed cycle must carry all ${tradable.length} tradable assets — ` +
           `${incomplete.length === 0 ? 'none is short' : `INCOMPLETE: ${incomplete.join(' | ')}`}`,
         drift.length === 0
-          ? 'every persisted verdict matches, order verdicts included — the layer is wired, not merely correct'
+          ? 'every persisted verdict matches, order side and verdict included — the layer is wired, not merely correct'
           : `drift: ${drift.join(' | ')}`,
       ],
     );
@@ -515,16 +547,22 @@ async function main(): Promise<number> {
     );
   }
 
+  // The corpus has a KNOWN SIZE, so the check asserts it rather than settling for "more
+  // than none". Without the exact count, anything that silently dropped cases — a paging
+  // bug, a parse failure, a classification change — would leave P3a green while validating
+  // a smaller set, and the report would be certified against a corpus it never saw.
+  const REFERENCE_CORPUS_SIZE = 13;
   check(
     'P3a',
     'the divergent orders of 1-8 August are all refused, cycle 1163 included',
-    weekDiverging.length === weekDivergingBlocked.length &&
-      weekDiverging.length > 0 &&
+    weekDiverging.length === REFERENCE_CORPUS_SIZE &&
+      weekDiverging.length === weekDivergingBlocked.length &&
       c1163.length > 0 &&
       c1163.every((j) => j.order.verdict !== 'allowed'),
     [
       `orders placed while raw ≠ shown, over the PINNED corpus ` +
-        `[2026-08-01, cycle ${REFERENCE_CORPUS_LAST_CYCLE}]: ${weekDiverging.length}`,
+        `[2026-08-01, cycle ${REFERENCE_CORPUS_LAST_CYCLE}]: ${weekDiverging.length} ` +
+        `(the corpus has exactly ${REFERENCE_CORPUS_SIZE} — asserted, not assumed)`,
       `refused by the layer: ${weekDivergingBlocked.length}/${weekDiverging.length}`,
       `cycle 1163 (BNB sold on a \`range\` label while raw was already trend_up): ` +
         `${c1163.map((j) => `${j.booking.asset} ${j.order.verdict}`).join(', ')}`,
