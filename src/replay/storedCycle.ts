@@ -196,12 +196,32 @@ export function judge(
   decision: ValidatedDecision,
   ctx: StoredContext,
   referenceTarget: Record<string, number> | null,
+  /**
+   * That cycle's PERSISTED `applied_allocation`, when the decision being judged is the one
+   * the row actually recorded.
+   *
+   * Passed by `replayCycle` and deliberately NOT by the retry proof, which judges a freshly
+   * generated response: that decision was never persisted, so it has no stored applied
+   * allocation and re-clamping is the only honest answer for it.
+   *
+   * Without it the replay judges the CURRENT cycle against a clamp recomputed with today's
+   * caps while comparing it to a reference taken from history — the same asymmetry as
+   * raw-versus-applied, one level down. Tighten a cap and a historical hold whose 40% was
+   * applied at 35% against a 35% reference gets replayed at 30% and rejected for moving a
+   * target it never moved, with its movements resized to match.
+   */
+  storedApplied?: unknown,
 ): { ok: boolean; violations: CoherenceViolation[]; appliedAllocation: Record<string, number> } {
   const book = bookOf(ctx);
   const clamp = clampAllocation(decision.targetAllocation, book.reserveAsset, config);
+  // The row is the fact; the recomputation is a guess that happens to be right today. The
+  // resolver doubles as the validator — an unusable stored value falls back to the clamp
+  // rather than poisoning the judgement.
+  const stored = resolveEffectiveTarget({ applied_allocation: storedApplied });
+  const effective = stored.source === 'applied' ? stored.allocation! : clamp.applied;
   const movements = computeMovements(
     book,
-    clamp.applied,
+    effective,
     pricesOf(ctx),
     config.execution.feePercent,
     config.execution.minMovementPercent,
@@ -210,19 +230,19 @@ export function judge(
     // The corpus is v5 by construction (`loadCorpus` filters on prompt_version).
     strategy: 'v5',
     actionType: decision.actionType,
-    // The clamped target — the same operand production now feeds the guard, so the replay
-    // cannot judge on a different basis from the live path.
-    effectiveTarget: clamp.applied,
+    // The same operand production feeds the guard, and the same one the movements were
+    // sized from — so the replay cannot judge on a different basis from the live path.
+    effectiveTarget: effective,
     referenceTarget,
     movements,
     reserveAsset: book.reserveAsset,
     notes: decision.positionNotes,
     assetsWithStoredThesis: thesesOf(ctx),
   });
-  // The clamp result is what production writes to `applied_allocation`, so it is returned
-  // rather than discarded: `replayInOrder` needs it to establish the next reference the
-  // same way production does. See the note there.
-  return { ...verdict, appliedAllocation: clamp.applied };
+  // Returned rather than discarded: this is the value production would have written to
+  // `applied_allocation`, so `replayInOrder` establishes the next reference from it — one
+  // resolution point for the whole chain instead of one per caller.
+  return { ...verdict, appliedAllocation: effective };
 }
 
 /** One journaled cycle, decoded and judged. */
@@ -234,7 +254,13 @@ export function replayCycle(
   const decoded = decodeResponse(cycle.raw_response, assets);
   if (!decoded.ok) return { kind: 'unusable', reason: decoded.reason };
 
-  const verdict = judge(decoded.decision, cycle.market_context, referenceTarget);
+  const verdict = judge(
+    decoded.decision,
+    cycle.market_context,
+    referenceTarget,
+    // This IS the response the row recorded, so its persisted applied allocation applies.
+    cycle.applied_allocation,
+  );
   return verdict.ok
     ? { kind: 'accepted', decision: decoded.decision, appliedAllocation: verdict.appliedAllocation }
     : { kind: 'rejected', decision: decoded.decision, violations: verdict.violations };
@@ -275,20 +301,12 @@ export function replayInOrder(cycles: StoredCycle[]): ReplayStep[] {
     const referenceTarget = reference;
     const verdict = replayCycle(cycle, referenceTarget);
     steps.push({ cycle, verdict, referenceTarget });
-    if (verdict.kind === 'accepted') {
-      // Through the SAME resolver production uses, on the row AS PERSISTED — production
-      // reads `applied_allocation` back out of the table, so the replay must read the same
-      // column rather than recompute an equivalent.
-      //
-      // The recomputed clamp is the fallback for a row that carries no applied allocation
-      // (none does today). It is a genuine fallback, not a preference: re-clamping applies
-      // today's caps to a historical target, so it answers a different question the moment
-      // a cap changes.
-      reference = resolveEffectiveTarget({
-        target_allocation: cycle.target_allocation ?? verdict.decision.targetAllocation,
-        applied_allocation: cycle.applied_allocation ?? verdict.appliedAllocation,
-      }).allocation;
-    }
+    // `judge` already resolved this cycle's effective target from the persisted column
+    // (falling back to the recomputed clamp only when the row has none), and judged it
+    // against that same value. Reading it back here keeps ONE resolution point for the
+    // whole chain: the candidate the guard saw and the reference the next cycle gets are
+    // the same object, so they cannot drift apart through a second fallback written twice.
+    if (verdict.kind === 'accepted') reference = verdict.appliedAllocation;
   }
   return steps;
 }
