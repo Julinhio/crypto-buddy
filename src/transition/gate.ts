@@ -44,9 +44,17 @@ const DUST = new Decimal('1e-12');
  *  3. `frozen`             — individual transition: no strategic order.
  *  4. `actionable`         — normal playbook, the model decides.
  *
- * `no_regime` is the honest fifth outcome, not a rung: no 4h bar had closed for this
+ * `no_regime` is the honest fifth outcome, NOT a rung: no 4h bar had closed for this
  * asset, so the layer has nothing to judge on and says so instead of defaulting to either
  * permissive or restrictive.
+ *
+ * It used to be evaluated first, which made it a rung in everything but name — and the
+ * worst-placed one, above `risk_off_reduction`. A line the layer could not judge was
+ * therefore untouchable even under a confirmed global risk_off, which inverts the one
+ * guarantee the ladder is built around: reducing must always stay possible. Absence of
+ * individual information is not a reason to hold. It is now evaluated after the
+ * deterministic exits, so a confirmed override reduces a line whether the asset is frozen
+ * or simply unreadable.
  */
 export type TransitionGate =
   | 'stop_exit'
@@ -206,13 +214,12 @@ export function evaluateTransition(input: TransitionInputs): TransitionVerdict {
   };
 
   // ── The ladder, in the fixed order ────────────────────────────────────────────
-  if (sticky == null) {
-    return {
-      ...base,
-      gate: 'no_regime',
-      gateReason: 'no 4h bar had closed for this asset — the layer abstains rather than guessing',
-    };
-  }
+  //
+  // The stop is evaluated before the `sticky == null` check rather than after it, and that
+  // reordering is INERT rather than a judgement call: `evaluateStop` only arms on
+  // `sticky?.frozen === true`, so with no sticky state it cannot fire and the branch below
+  // is unreachable in that case. It is written this way so the two deterministic exits sit
+  // together, above everything that can abstain.
   if (stop.wouldFire) {
     return {
       ...base,
@@ -222,13 +229,26 @@ export function evaluateTransition(input: TransitionInputs): TransitionVerdict {
         `(threshold ${input.stopThresholdPercent}%) — full exit of the line`,
     };
   }
-  if (sticky.frozen && input.riskOffConfirmed) {
+  // Rung 2 lifts the freeze for reductions — and it lifts the SILENCE too. `sticky == null`
+  // is not a reason to hold: it is the absence of an individual reading, and a confirmed
+  // global risk_off is a reading of the whole market that does not need one.
+  if ((sticky == null || sticky.frozen) && input.riskOffConfirmed) {
     return {
       ...base,
       gate: 'risk_off_reduction',
       gateReason:
-        'confirmed global risk_off — reductions stay allowed despite the individual transition; ' +
-        'increases do not',
+        sticky == null
+          ? 'confirmed global risk_off — reductions stay allowed on an asset with no usable 4h bar; ' +
+            'increases do not'
+          : 'confirmed global risk_off — reductions stay allowed despite the individual transition; ' +
+            'increases do not',
+    };
+  }
+  if (sticky == null) {
+    return {
+      ...base,
+      gate: 'no_regime',
+      gateReason: 'no 4h bar had closed for this asset — the layer abstains rather than guessing',
     };
   }
   if (sticky.frozen) {

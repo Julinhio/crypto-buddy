@@ -335,14 +335,16 @@ async function main(): Promise<number> {
     for (const row of orderRows) console.log(row);
   }
 
-  /* ── The no_regime edge, measured and NOT corrected ───────────────────────── */
-  section('THE no_regime EDGE — measured here, corrected in the blocking PR');
+  /* ── The no_regime edge, measured here and now closed in the ladder ───────── */
+  section('THE no_regime EDGE — measured here, closed in the ladder');
 
   console.log('');
-  console.log('   `evaluateTransition` returns `no_regime` BEFORE it looks at risk_off, so an asset with no');
-  console.log('   usable 4h bar is untouchable even under a confirmed override — the wrong default for a');
-  console.log('   ladder whose whole point is that reducing must always stay possible. Not corrected here.');
-  console.log('   What follows is the size of the hole, so the fix can be prioritised on evidence.');
+  console.log('   `evaluateTransition` USED TO return `no_regime` before it looked at risk_off, so an asset');
+  console.log('   with no usable 4h bar was untouchable even under a confirmed override — the wrong default');
+  console.log('   for a ladder whose whole point is that reducing must always stay possible. Rung 2 now');
+  console.log('   lifts the silence as well as the freeze, and `no_regime` is evaluated below the');
+  console.log('   deterministic exits. What follows is the size of the hole that was closed — and the');
+  console.log('   reason the correction is proven synthetically, in src/test/transitionVector.ts.');
 
   const noRegime = pairs.filter((p) => p.actual.gate === 'no_regime');
   // The ones that would actually matter: a line that is HELD, where a reduction is a real
@@ -363,8 +365,9 @@ async function main(): Promise<number> {
   console.log('');
   if (noRegime.length === 0) {
     console.log('   The edge is THEORETICAL on this tape: no asset-cycle ever reaches it, so correcting it');
-    console.log('   changes nothing that has happened. It stays worth fixing for the shape of the ladder,');
-    console.log('   but it does not compete for priority with anything measurable.');
+    console.log('   changed nothing that has happened. It was worth fixing for the shape of the ladder —');
+    console.log('   an ordering that puts "I abstain" above "I reduce" is wrong whether or not it has cost');
+    console.log('   anything yet — and that is exactly why the fix had to be provably inert.');
   } else if (noRegimeWithOrder.length === 0) {
     console.log(`   The edge is REACHED (${noRegime.length} asset-cycles) but never coincides with a reduction:`);
     console.log('   no sell was booked on an asset while it was in this state. Real, not yet costly.');

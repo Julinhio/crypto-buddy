@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { toNumericString } from '../money.js';
 import type { OrderVerdict, TransitionVerdict } from '../transition/gate.js';
+import type { JudgedLeg, VectorJudgement } from '../transition/vector.js';
 
 const TABLE = 'transition_observations';
 
@@ -49,14 +50,39 @@ export interface TransitionObservationInsert {
   order_notional: string | null;
   order_verdict: OrderVerdict | null;
   order_reason: string | null;
+
+  /**
+   * The MODEL'S VECTOR — the movement computed on this asset before execution, and the
+   * population the blocking gate will act on. Kept apart from `order_*`, which stays what
+   * actually booked: the two coincide on nearly every cycle and diverge exactly where it
+   * matters (a venue filter, a failed booking), and a column whose meaning changes
+   * halfway through a series is worse than a missing one.
+   */
+  leg_side: 'buy' | 'sell' | null;
+  leg_notional: string | null;
+  leg_verdict: JudgedLeg['verdict'] | null;
+  leg_reason: string | null;
+
+  /** Cycle-level, repeated on every row of the cycle. Null when no vector was computed. */
+  atomic_refusal: boolean | null;
+  atomic_trigger_asset: string | null;
 }
 
-/** Shapes one verdict (plus the order it judged, if any) into its row. */
+/**
+ * Shapes one verdict into its row.
+ *
+ * `order` is what BOOKED on this asset (null on the vast majority of rows). `vector` is
+ * this cycle's judged vector — passed on every cycle that computed one, including the
+ * empty vectors of the skip paths, since "examined and nothing refused" and "not examined"
+ * are different facts and only the second one deserves a null.
+ */
 export function toObservationRow(
   decisionId: number,
   verdict: TransitionVerdict,
   order: TransitionOrderJudgement | null,
+  vector: VectorJudgement | null,
 ): TransitionObservationInsert {
+  const leg = vector?.legs.find((l) => l.asset === verdict.asset) ?? null;
   return {
     decision_id: decisionId,
     asset: verdict.asset,
@@ -81,6 +107,16 @@ export function toObservationRow(
     order_notional: order?.notional ?? null,
     order_verdict: order?.verdict ?? null,
     order_reason: order?.reason ?? null,
+
+    leg_side: leg?.side ?? null,
+    leg_notional: leg == null ? null : toNumericString(leg.notional),
+    leg_verdict: leg?.verdict ?? null,
+    leg_reason: leg?.reason ?? null,
+
+    // Repeated on every row of the cycle so "was this cycle's vector refused" is one
+    // column read, not a join back onto the cycle's other rows.
+    atomic_refusal: vector == null ? null : vector.refused,
+    atomic_trigger_asset: vector?.trigger?.asset ?? null,
   };
 }
 

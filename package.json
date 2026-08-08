@@ -16,11 +16,12 @@
     "replay:transition": "tsx src/replay/transitionContract.ts",
     "replay:transition-layer": "tsx src/replay/transitionLayerProof.ts",
     "replay:risk-off": "tsx src/replay/riskOffCounterfactual.ts",
+    "replay:atomic-vector": "tsx src/replay/atomicVector.ts",
     "replay:retry-1000": "tsx src/replay/retry1000.ts",
     "backfill:position-state": "tsx src/migrations/backfillPositionState.ts",
     "probe:v5": "tsx src/probes/v5Behaviour.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/test/invariants.ts && tsx src/test/scheduler.ts && tsx src/test/regime.ts && tsx src/test/lifecycle.ts && tsx src/test/strategyVersion.ts && tsx src/test/coherence.ts && tsx src/test/stickyTransition.ts && tsx src/test/transitionLayer.ts && tsx src/test/effectiveTarget.ts"
+    "test": "tsx src/test/invariants.ts && tsx src/test/scheduler.ts && tsx src/test/regime.ts && tsx src/test/lifecycle.ts && tsx src/test/strategyVersion.ts && tsx src/test/coherence.ts && tsx src/test/stickyTransition.ts && tsx src/test/transitionLayer.ts && tsx src/test/effectiveTarget.ts && tsx src/test/transitionVector.ts"
   },
   "engines": {
     "node": ">=22"

@@ -93,6 +93,55 @@ function inputs(over: Partial<TransitionInputs> = {}): TransitionInputs {
 }
 
 {
+  // THE no_regime EDGE — the ladder must not encode "I abstain" above "I reduce".
+  //
+  // `no_regime` used to be evaluated first, which made it a rung in everything but name,
+  // and the worst-placed one: an asset with no usable 4h bar was UNTOUCHABLE even under a
+  // confirmed global risk_off, inverting the one guarantee the ladder is built around.
+  // Zero real asset-cycles reach it (0/4336, measured by `npm run replay:risk-off`), so
+  // the case is built here rather than found — an edge nothing exercises is still an edge
+  // the ladder has to get right, and this is the only test that can say so.
+  const blindUnderRiskOff = evaluateTransition(
+    inputs({ sticky: null, riskOffConfirmed: true, qty: dec(1), price: dec(100) }),
+  );
+  assert.equal(
+    blindUnderRiskOff.gate,
+    'risk_off_reduction',
+    'a confirmed global risk_off reduces a line the layer cannot read individually',
+  );
+  assert.equal(judgeOrder(blindUnderRiskOff, 'sell').verdict, 'allowed', 'the reduction is allowed');
+  assert.equal(judgeOrder(blindUnderRiskOff, 'buy').verdict, 'forbidden', 'the increase is not');
+  assert.match(
+    blindUnderRiskOff.gateReason,
+    /no usable 4h bar/,
+    'and the reason says which of the two rung-2 cases this is',
+  );
+  // The fields keep telling the truth about what was known: rung 2 fired on the GLOBAL
+  // posture, and nothing individual was invented to justify it.
+  assert.equal(blindUnderRiskOff.actionable, false, 'still not actionable — nothing was read');
+  assert.equal(blindUnderRiskOff.confirmedRegime, null, 'and no regime is fabricated');
+  assert.equal(blindUnderRiskOff.runLength, 0);
+
+  // NEUTRALITY, which is the other half of the fix. Without a confirmed override the
+  // outcome is exactly what it was before: abstention. The correction adds one branch,
+  // gated on a boolean that is false on every cycle of the recorded history.
+  const blind = evaluateTransition(inputs({ sticky: null, riskOffConfirmed: false }));
+  assert.equal(blind.gate, 'no_regime', 'no override, no change — the layer still abstains');
+  assert.equal(judgeOrder(blind, 'sell').verdict, 'unjudged', 'and abstaining is neither verdict');
+
+  // A stop cannot fire without a sticky state (it only arms on `frozen`), so moving the
+  // null check below the stop is inert rather than a re-ordering of the ladder. Asserted
+  // on the case that would expose it: deeply underwater, no regime.
+  const blindAndUnderwater = evaluateTransition(
+    inputs({ sticky: null, price: dec(10), peakPriceSinceEntry: dec(100) }),
+  );
+  assert.equal(blindAndUnderwater.stopArmed, false, 'no sticky state, no armed stop');
+  assert.equal(blindAndUnderwater.gate, 'no_regime', 'so the reordering changes nothing here');
+  console.log('  ok: no_regime abstains, but a confirmed risk_off still reduces through it');
+  passed += 1;
+}
+
+{
   // THE STOP IS ARMED ONLY DURING A TRANSITION, and only on a line that exists. Outside
   // those two conditions it must not even look at the price — the model owns the line.
   const deepUnderwaterButActionable = inputs({ price: dec(50), peakPriceSinceEntry: dec(100) });
@@ -274,11 +323,12 @@ function inputs(over: Partial<TransitionInputs> = {}): TransitionInputs {
   const verdict = evaluateTransition(
     inputs({ sticky: FROZEN, price: dec('0.123456789012345'), peakPriceSinceEntry: dec('0.2') }),
   );
-  const row = toObservationRow(42, verdict, {
-    side: 'sell',
-    notional: '12.34',
-    ...judgeOrder(verdict, 'sell'),
-  });
+  const row = toObservationRow(
+    42,
+    verdict,
+    { side: 'sell', notional: '12.34', ...judgeOrder(verdict, 'sell') },
+    null,
+  );
   assert.equal(row.decision_id, 42);
   assert.equal(row.asset, 'BTC');
   assert.equal(typeof row.price, 'string', 'the price is a string, not a float');
@@ -291,10 +341,19 @@ function inputs(over: Partial<TransitionInputs> = {}): TransitionInputs {
 
   // A cycle with no order on this asset — the common case — leaves the order columns null
   // rather than defaulting them to something a query would have to filter out.
-  const quiet = toObservationRow(42, evaluateTransition(inputs()), null);
+  const quiet = toObservationRow(42, evaluateTransition(inputs()), null, null);
   assert.equal(quiet.order_side, null);
   assert.equal(quiet.order_verdict, null);
   assert.equal(quiet.order_notional, null);
+
+  // No vector computed at all — the atomicity columns are NULL, not `false`. "This cycle's
+  // vector was examined and cleared" and "no vector was ever examined" are different facts,
+  // and the second one is what every row written before migration 0023 carries.
+  assert.equal(quiet.atomic_refusal, null, 'no vector means not computed, not "not refused"');
+  assert.equal(quiet.atomic_trigger_asset, null);
+  assert.equal(quiet.leg_verdict, null);
+  assert.equal(quiet.leg_side, null);
+  assert.equal(quiet.leg_notional, null);
   console.log('  ok: the observation row keeps money exact and says nothing it was not told');
   passed += 1;
 }
@@ -303,7 +362,7 @@ function inputs(over: Partial<TransitionInputs> = {}): TransitionInputs {
   // THE WRITER CANNOT FAIL A CYCLE. This is the safety property of observe mode: a purely
   // observational component must never acquire the power to stop a trade. It is asserted
   // on the two ways it can go wrong — the client rejecting, and the client throwing.
-  const rows = [toObservationRow(1, evaluateTransition(inputs()), null)];
+  const rows = [toObservationRow(1, evaluateTransition(inputs()), null, null)];
 
   const rejecting = {
     from: () => ({
@@ -362,7 +421,7 @@ function inputs(over: Partial<TransitionInputs> = {}): TransitionInputs {
     }),
   } as unknown as SupabaseClient;
 
-  const rows = [toObservationRow(1, evaluateTransition(inputs()), null)];
+  const rows = [toObservationRow(1, evaluateTransition(inputs()), null, null)];
   const started = Date.now();
   const landed = await saveTransitionObservations(hanging, rows);
   const elapsed = Date.now() - started;

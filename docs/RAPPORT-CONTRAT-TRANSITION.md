@@ -533,14 +533,13 @@ Sur les **16 ordres réels que la porte interdit aujourd'hui** :
 Autrement dit, dans un marché qui casse, la porte laisserait sortir tout ce qui réduit et
 continuerait de bloquer tout ce qui ajoute. C'est exactement le contrat, vérifié plutôt que supposé.
 
-### Le bord `no_regime` — mesuré, non corrigé
+### Le bord `no_regime` — mesuré ici, corrigé en §9
 
-`evaluateTransition` retourne `no_regime` **avant** d'examiner `risk_off`, donc un actif sans bougie
-4h exploitable reste intouchable même sous override confirmé. C'est le mauvais défaut pour une
-échelle dont tout l'objet est que réduire reste toujours possible.
+`evaluateTransition` retournait `no_regime` **avant** d'examiner `risk_off`, donc un actif sans
+bougie 4h exploitable restait intouchable même sous override confirmé. C'est le mauvais défaut pour
+une échelle dont tout l'objet est que réduire reste toujours possible.
 
-Non corrigé ici — il part avec la PR bloquante. Mais mesuré, pour que la correction soit priorisée
-sur des faits :
+Mesuré ici, pour que la correction soit priorisée sur des faits — et corrigée en §9 :
 
 | | |
 |---|---|
@@ -549,11 +548,131 @@ sur des faits :
 | dont une vente réelle a été passée ce cycle-là | 0 |
 
 **Le bord est théorique sur cette bande.** Aucun asset-cycle ne l'atteint, donc le corriger ne change
-rien à ce qui s'est produit. Ça reste à faire pour la forme de l'échelle, mais ça ne concurrence en
-priorité rien de mesurable.
+rien à ce qui s'est produit. Ça restait à faire pour la forme de l'échelle — un ordre qui place
+« je m'abstiens » au-dessus de « je réduis » est faux qu'il ait coûté quelque chose ou non — et c'est
+précisément pour ça que le correctif devait être **prouvablement inerte**. Voir §9.
 
 ### Ce que ce contrefactuel ne dit pas
 
 Il ne dit rien de ce que le bot aurait gagné. Forcer l'override change ce que la porte **permet** ;
 il ne dit rien de ce que le modèle aurait décidé, et aucun ordre n'est rejoué. Les comptes ci-dessus
 portent sur l'échelle, pas sur la performance.
+
+---
+
+## 9. Atomicité du vecteur, provenance du refus, et le bord `no_regime` refermé
+
+Rejouable : `npx tsx src/replay/atomicVector.ts` (lecture seule, fenêtre bornée à la capture).
+Toujours en **mode observation** — la couche calcule davantage, elle ne bloque toujours rien.
+
+### Pourquoi une jambe refusée ne se lit pas dans sa propre ligne
+
+La cible du modèle est une **décision de portefeuille unique**. Les jambes ne sont pas des ordres
+qu'il aurait listés : c'est ce que le code dérive de la distance entre son vecteur et le livre.
+Supprimer la vente qui finançait un achat laisse l'achat financé par la réserve ; supprimer l'achat
+laisse le produit en cash. Dans les deux cas le livre résultant est un livre que **personne n'a
+demandé**, et c'est la porte qui l'a fabriqué.
+
+D'où le contrat, arbitré :
+
+1. Les **sorties déterministes** sont évaluées d'abord et sont **exemptes**. `stop_exit` produit sa
+   sortie complète ; un `risk_off` confirmé produit ses réductions, sur un actif gelé **comme sur un
+   actif sans régime exploitable**. Elles ne sont pas annulées par l'atomicité, et elles ne la
+   déclenchent pas.
+2. Hors de celles-là, **une seule jambe stratégique interdite refuse toutes les jambes stratégiques
+   du cycle**.
+3. Aucun rééquilibrage de dérive n'est généré pendant ce refus ; le cycle conserve le dernier vecteur
+   appliqué accepté. *(Rien à calculer en observation — voir la conséquence hors périmètre ci-dessous.)*
+4. Un vecteur entièrement autorisé passe normalement.
+
+Le journal doit donc distinguer **cinq** provenances par jambe, et pas un vague « refusé » :
+
+| `leg_verdict` | ce que ça veut dire |
+|---|---|
+| `allowed` | la porte la laisse passer |
+| `forbidden` | **son propre** actif la refuse |
+| `cancelled_atomic` | son actif allait bien, une **autre** jambe du même vecteur était interdite |
+| `superseded` | une sortie déterministe prenait la ligne entière de toute façon |
+| `unjudged` | pas de régime exploitable |
+
+Plus, par cycle et répété sur chaque ligne : `atomic_refusal` et `atomic_trigger_asset`. Sans la
+troisième valeur, une jambe refusée à cause d'un **voisin** est indiscernable d'une jambe refusée
+pour elle-même — et sa ligne, elle, montre un actif parfaitement actionnable. Aucune relecture
+ultérieure ne peut rattraper ça.
+
+### Ce que l'atomicité coûte sur le corpus réel : **rien**
+
+| | |
+|---|---|
+| jambes souveraines jugées | **43** |
+| autorisées / interdites après la passe vectorielle | **27 / 16** |
+| **annulées par atomicité** | **0** |
+| cycles portant au moins une jambe stratégique interdite | 11 |
+| dont plusieurs jambes interdites | 4 — **#1035, #1054, #1061, #1067** |
+| cycles mélangeant une jambe autorisée et une interdite | **0** |
+| exposition annulée par la seule atomicité | **0,00 $** |
+
+Le zéro n'est pas de la chance, et ce n'est pas non plus une règle qui ne s'applique jamais : c'est
+une propriété de la bande. Dans les quatre cycles multi-jambes, **toutes** les jambes étaient déjà
+interdites individuellement, donc il n'y avait rien à annuler en plus. Le harnais vérifie les deux
+faits séparément — A1 compare les verdicts *avant* et *après* la passe vectorielle, A2 re-dérive la
+prémisse — pour qu'un changement de bande fasse rougir la mesure au lieu de passer inaperçu.
+
+> **Écart avec le brief, signalé.** Le brief pinne 42 jambes / 26 autorisées / 16 interdites, chiffres
+> de §3. Le corpus en compte **43 / 27 / 16** aujourd'hui : un ordre souverain autorisé de plus est
+> tombé depuis la rédaction du rapport. La fenêtre d'observation est l'**histoire entière** et ne fait
+> que croître, donc rien n'est sorti par l'arrière. Dérive du bot en production, antérieure à cette
+> PR et vérifiée telle : la même mesure sur `main` non modifié donne déjà 27/16. Les deux nombres sur
+> lesquels l'atomicité a été choisie — **16 interdites** et les **quatre cycles multi-jambes** — sont
+> inchangés au chiffre près.
+
+`A3` (les sorties déterministes sont exemptes) **n'est pas exercée par cette bande** : aucun ordre
+n'a jamais atterri sur un actif en `stop_exit` ni sous `risk_off` confirmé. Elle est donc reportée
+comme non exercée plutôt que verte, et prouvée en synthétique dans `src/test/transitionVector.ts`.
+
+### Deux populations, gardées séparées
+
+Ce harnais juge ce qui a **booké** — le seul registre par jambe que le passé possède. La couche
+**live** juge les **mouvements calculés**, c'est-à-dire le vecteur *avant* exécution, qui est la
+population sur laquelle la porte agira le jour où elle bloque. Les deux coïncident sauf là où un
+filtre de la place ou une réservation échouée a raboté un mouvement.
+
+Les colonnes le reflètent et ne sont pas fusionnées : `order_*` continue de vouloir dire « ce qui a
+booké » — une colonne dont le sens change en cours de série est pire qu'une colonne absente, et cette
+table est la base de preuve du passage en bloquant — et les nouvelles `leg_*` veulent dire « ce que
+le vecteur demandait ». Les chiffres ci-dessus sont donc une **borne basse** de ce que `leg_verdict`
+rapportera désormais.
+
+### Le bord `no_regime`, refermé
+
+L'échelle n'a plus `no_regime` comme premier cran. Le nouvel ordre :
+
+```
+stop_exit  >  risk_off_reduction  >  no_regime  >  frozen  >  actionable
+                (gelé OU illisible)     (abstention)
+```
+
+Un `risk_off` confirmé autorise désormais une réduction sur un actif **gelé ou sans régime
+exploitable**, sauf si une sortie déterministe l'a déjà supplanté. `no_regime` redevient ce qu'il
+est : une absence d'information individuelle, pas une raison de tenir.
+
+Le correctif tient en une branche, et son inertie est démontrable plutôt que plaidée :
+
+- le déplacement du test `sticky == null` **sous** le stop est inerte par construction — `evaluateStop`
+  ne s'arme que sur `sticky?.frozen === true`, donc sans état collant il ne peut pas tirer ;
+- la seule branche ajoutée est gardée par `riskOffConfirmed`, **faux sur chaque cycle de l'histoire
+  enregistrée** ;
+- **0 / 4336** asset-cycles atteignent le bord (§8), donc la bande ne peut pas le tester : la
+  correction est prouvée en synthétique — vente autorisée, achat refusé, sur un actif sans régime.
+
+A/B à fenêtre identique : `transitionLayerProof` (7/7), `riskOffCounterfactual` (4 invariants) et
+`replay:transition` rendent **exactement les mêmes chiffres**. Le seul écart textuel est la prose du
+§8 du contrefactuel, corrigée parce qu'elle décrivait le bord comme non corrigé.
+
+### Une conséquence hors périmètre, énoncée
+
+La clause 3 — « le cycle conserve le dernier vecteur appliqué accepté » — a un effet **en dehors de
+la porte**, le jour du passage en bloquant. La référence que lit le garde de cohérence est
+`applied_allocation` (PR #27, #28). Une implémentation bloquante doit donc y conserver le vecteur
+précédent **aussi**, sinon les règles 1 et 2 compareraient la prochaine cible à un vecteur que le
+livre n'a jamais poursuivi. Reconnu, non traité ici : le garde n'est pas touché par cette PR.
