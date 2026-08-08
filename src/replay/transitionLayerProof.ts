@@ -46,15 +46,33 @@ interface Check {
   id: string;
   title: string;
   passed: boolean;
+  /** Could not be evaluated yet — neither a pass nor a divergence. See `skip`. */
+  skipped: boolean;
   detail: string[];
 }
 
 const checks: Check[] = [];
 
 function check(id: string, title: string, passed: boolean, detail: string[]): void {
-  checks.push({ id, title, passed, detail });
+  checks.push({ id, title, passed, skipped: false, detail });
   console.log('');
   console.log(`${passed ? 'PASS' : 'FAIL'}  ${id} — ${title}`);
+  for (const line of detail) console.log(`      ${line}`);
+}
+
+/**
+ * A check that could not be EVALUATED, which is a third thing and must look like one.
+ *
+ * Reporting it as PASS would claim a proof that was never run; reporting it as FAIL would
+ * make the harness red for a reason that is not a defect — before the migration is applied
+ * and the first cycle has run, there is simply nothing yet to compare. So it prints
+ * distinctly, leaves the exit code alone, and is counted separately in the summary so a
+ * green run can never be mistaken for a complete one.
+ */
+function skip(id: string, title: string, detail: string[]): void {
+  checks.push({ id, title, passed: false, skipped: true, detail });
+  console.log('');
+  console.log(`SKIP  ${id} — ${title}`);
   for (const line of detail) console.log(`      ${line}`);
 }
 
@@ -153,9 +171,14 @@ async function main(): Promise<number> {
   /* ── P1 — the live layer reproduces the replay ───────────────────────────── */
   section('P1 — the live layer reproduces the replay');
 
-  // (a) Every asset-cycle. The replay's notion of "may act" is `stickyAt(...).actionable`;
-  //     production's is the ladder's `actionable` field. They must agree everywhere, or
-  //     the report describes a gate the bot does not have.
+  // (a) The LADDER's consistency with the rule, over every asset-cycle.
+  //
+  //     Deliberately NOT "does verdict.actionable equal state.actionable" — the gate
+  //     copies that field straight from the sticky state it was handed, so comparing the
+  //     two would be comparing a value with its own source and would pass on any ladder
+  //     whatsoever. What is worth asserting is that the RUNGS never contradict the rule:
+  //     an actionable asset must never come out frozen, a frozen one must never come out
+  //     actionable, and the stop must never appear outside a transition.
   let assetCycles = 0;
   const actionabilityMismatches: string[] = [];
   const gateCounts = new Map<string, number>();
@@ -185,11 +208,23 @@ async function main(): Promise<number> {
       }
 
       assetCycles += 1;
-      const replayActionable = state?.actionable === true;
-      if (verdict.actionable !== replayActionable && actionabilityMismatches.length < 5) {
-        actionabilityMismatches.push(
-          `#${cycle.id} ${asset}: production ${verdict.actionable} vs replay ${replayActionable}`,
-        );
+      const frozen = state?.frozen === true;
+      const problem =
+        state == null
+          ? verdict.gate !== 'no_regime'
+            ? `no bar closed but the gate returned ${verdict.gate}`
+            : null
+          : verdict.gate === 'actionable' && frozen
+            ? 'a frozen asset came out actionable'
+            : (verdict.gate === 'frozen' || verdict.gate === 'risk_off_reduction') && !frozen
+              ? `an actionable asset came out ${verdict.gate}`
+              : verdict.gate === 'stop_exit' && !frozen
+                ? 'the stop fired outside a transition'
+                : verdict.stopArmed && !frozen
+                  ? 'the stop was armed outside a transition'
+                  : null;
+      if (problem != null && actionabilityMismatches.length < 5) {
+        actionabilityMismatches.push(`#${cycle.id} ${asset}: ${problem}`);
       }
     }
     verdicts.set(cycle.id, perAsset);
@@ -197,13 +232,14 @@ async function main(): Promise<number> {
 
   check(
     'P1a',
-    'the production gate and the replay agree on actionability, at every asset-cycle',
+    'the ladder never contradicts the rule, at any asset-cycle',
     actionabilityMismatches.length === 0 && assetCycles > 0,
     [
       `${assetCycles} asset-cycles evaluated through the LIVE evaluateTransition()`,
       actionabilityMismatches.length === 0
-        ? 'no divergence — the live layer and the measurement read the same tape'
-        : `mismatches: ${actionabilityMismatches.join(' | ')}`,
+        ? 'no contradiction: nothing frozen came out actionable, nothing actionable came out frozen, ' +
+          'and the stop never armed outside a transition'
+        : `contradictions: ${actionabilityMismatches.join(' | ')}`,
       `ladder outcomes, in asset-cycles: ${[...gateCounts.entries()]
         .sort((a, b) => b[1] - a[1])
         .map(([gate, n]) => `${gate} ×${n}`)
@@ -278,9 +314,19 @@ async function main(): Promise<number> {
 
   // The measurement's own count, recomputed here from the same walk, so "26 allowed / 16
   // forbidden" is verified rather than quoted from a document.
-  const replayAllowed = judged.filter(
-    (j) => stickyAt(sticky[j.booking.asset] ?? [], j.cycle.generatedAtMs, barMs)?.actionable === true,
-  ).length;
+  //
+  // The risk_off exception has to be carried here too. The measurement judged an order on
+  // actionability alone, because the override never armed over that window; production's
+  // ladder additionally allows a SELL on a frozen asset under a confirmed global risk_off.
+  // The two therefore coincide today and would diverge the first time the override arms —
+  // which would be the ladder working as designed, not a defect, and a check that reported
+  // it as a mismatch would cry wolf on the one episode we most want to observe.
+  const riskOffOrders = judged.filter((j) => j.cycle.riskOff === true).length;
+  const replayAllowed = judged.filter((j) => {
+    const state = stickyAt(sticky[j.booking.asset] ?? [], j.cycle.generatedAtMs, barMs);
+    if (state?.actionable === true) return true;
+    return state?.frozen === true && j.cycle.riskOff === true && j.booking.side === 'sell';
+  }).length;
 
   check(
     'P1c',
@@ -289,11 +335,88 @@ async function main(): Promise<number> {
     [
       `${judged.length} real orders judged (journal holds ${bookings.length})`,
       `allowed ${allowed.length} · forbidden ${forbidden.length} · superseded ${superseded.length} · unjudged ${unjudged.length}`,
-      `the replay's actionability walk allows ${replayAllowed} — ` +
+      `the replay's own walk (actionability + the risk_off reduction exception) allows ${replayAllowed} — ` +
         `${allowed.length === replayAllowed ? 'identical' : 'DIVERGENT'}`,
+      `orders placed while the global risk_off was confirmed: ${riskOffOrders} ` +
+        `— the exception is inert on this window, which is why the measurement's simpler rule matched it`,
       'the report measured 26 allowed / 16 forbidden over this window (RAPPORT §3).',
     ],
   );
+
+  // (d) THE LIVE PATH ITSELF. Everything above re-runs the pure function offline, which
+  //     proves the gate computes the right thing — and nothing at all about whether the
+  //     bot is actually running it. If `observeTransition` stopped being called, mapped
+  //     the wrong asset, or persisted a different verdict, every check above would still
+  //     pass. So the rows the LIVE cycles wrote are read back and compared against what
+  //     the gate says they should contain.
+  //
+  //     Before the migration is applied and the code deployed there are no rows, and that
+  //     is reported as SKIPPED rather than passed: an empty table proving nothing must not
+  //     look like a green check.
+  const observedIds = cycles.map((c) => c.id);
+  const persisted = new Map<string, Record<string, unknown>>();
+  let observationsReadable = true;
+  try {
+    for (let i = 0; i < observedIds.length; i += 500) {
+      const { data, error } = await supabase
+        .from('transition_observations')
+        .select('decision_id, asset, gate, actionable, run_length, stop_would_fire, order_verdict')
+        .in('decision_id', observedIds.slice(i, i + 500));
+      if (error) throw new Error(error.message);
+      for (const row of (data ?? []) as Array<Record<string, unknown>>) {
+        persisted.set(`${String(row.decision_id)}:${String(row.asset)}`, row);
+      }
+    }
+  } catch (err) {
+    observationsReadable = false;
+    console.warn(
+      `[proof] transition_observations could not be read (${err instanceof Error ? err.message : String(err)}) — ` +
+        'the migration is probably not applied yet.',
+    );
+  }
+
+  if (persisted.size === 0) {
+    skip('P1d', 'the LIVE layer persisted what the gate computes', [
+      observationsReadable
+        ? 'the table exists but holds no row for this window.'
+        : 'the table could not be read — migration 0022 is not applied yet.',
+      'This can only be evaluated once migration 0022 is applied AND the code has run at least',
+      'one cycle. Until then the checks above show the gate is CORRECT, not that it is WIRED —',
+      'two different claims, so this one is reported as unevaluated rather than passed.',
+      'Re-run `npm run replay:transition-layer` after the first deployed cycle.',
+    ]);
+  } else {
+    let compared = 0;
+    const drift: string[] = [];
+    for (const [cycleId, perAsset] of verdicts) {
+      for (const [asset, verdict] of perAsset) {
+        const row = persisted.get(`${cycleId}:${asset}`);
+        if (row == null) continue; // cycles that predate the deployment
+        compared += 1;
+        const expected = {
+          gate: verdict.gate,
+          actionable: verdict.actionable,
+          run_length: verdict.runLength,
+          stop_would_fire: verdict.stopWouldFire,
+        };
+        const actual = {
+          gate: row.gate,
+          actionable: row.actionable,
+          run_length: Number(row.run_length),
+          stop_would_fire: row.stop_would_fire,
+        };
+        if (JSON.stringify(expected) !== JSON.stringify(actual) && drift.length < 5) {
+          drift.push(`#${cycleId} ${asset}: wrote ${JSON.stringify(actual)}, gate says ${JSON.stringify(expected)}`);
+        }
+      }
+    }
+    check('P1d', 'the LIVE layer persisted what the gate computes', drift.length === 0 && compared > 0, [
+      `${persisted.size} observation rows found for this window; ${compared} compared against the gate`,
+      drift.length === 0
+        ? 'every persisted verdict matches — the layer is wired, not merely correct'
+        : `drift: ${drift.join(' | ')}`,
+    ]);
+  }
 
   /* ── P2 — no real order was modified ──────────────────────────────────────── */
   section('P2 — no real order was modified');
@@ -370,14 +493,18 @@ async function main(): Promise<number> {
     ],
   );
 
-  const failed = checks.filter((c) => !c.passed);
+  const failed = checks.filter((c) => !c.passed && !c.skipped);
+  const skipped = checks.filter((c) => c.skipped);
   console.log('');
   console.log('═'.repeat(100));
   console.log(
-    `${checks.length - failed.length}/${checks.length} checks passed` +
+    `${checks.length - failed.length - skipped.length}/${checks.length} checks passed` +
+      (skipped.length > 0 ? `, ${skipped.length} not yet evaluable (${skipped.map((s) => s.id).join(', ')})` : '') +
       (failed.length > 0
         ? ` — FAILED: ${failed.map((f) => f.id).join(', ')}`
-        : ' — the live layer computes what the measurement measured.'),
+        : skipped.length > 0
+          ? ' — the gate is correct; whether it is WIRED cannot be checked before the first deployed cycle.'
+          : ' — the live layer computes what the measurement measured, and persists it.'),
   );
   console.log('═'.repeat(100));
   return failed.length === 0 ? 0 : 1;

@@ -305,18 +305,31 @@ function inputs(over: Partial<TransitionInputs> = {}): TransitionInputs {
   const rows = [toObservationRow(1, evaluateTransition(inputs()), null)];
 
   const rejecting = {
-    from: () => ({ upsert: async () => ({ error: { message: 'permission denied' } }) }),
+    from: () => ({
+      upsert: () => ({ abortSignal: async () => ({ error: { message: 'permission denied' } }) }),
+    }),
   } as unknown as SupabaseClient;
   assert.equal(await saveTransitionObservations(rejecting, rows), false, 'a rejected write returns false');
 
   const throwing = {
     from: () => ({
-      upsert: async () => {
-        throw new Error('connection reset');
-      },
+      upsert: () => ({
+        abortSignal: async () => {
+          throw new Error('connection reset');
+        },
+      }),
     }),
   } as unknown as SupabaseClient;
   assert.equal(await saveTransitionObservations(throwing, rows), false, 'a thrown write returns false');
+
+  // And a client that blows up before the query is even built — a shape change in
+  // supabase-js, a missing table helper — must be caught too, not escape into the cycle.
+  const broken = {
+    from: () => {
+      throw new Error('client is not what we think it is');
+    },
+  } as unknown as SupabaseClient;
+  assert.equal(await saveTransitionObservations(broken, rows), false, 'a broken client returns false');
 
   // No Supabase at all is a local run, not a failure to propagate.
   assert.equal(await saveTransitionObservations(null, rows), false, 'no client, no throw');
@@ -324,10 +337,41 @@ function inputs(over: Partial<TransitionInputs> = {}): TransitionInputs {
   assert.equal(await saveTransitionObservations(null, []), true, 'nothing to write is not a failure');
 
   const accepting = {
-    from: () => ({ upsert: async () => ({ error: null }) }),
+    from: () => ({ upsert: () => ({ abortSignal: async () => ({ error: null }) }) }),
   } as unknown as SupabaseClient;
   assert.equal(await saveTransitionObservations(accepting, rows), true, 'the happy path still reports true');
   console.log('  ok: the observation writer never throws — it cannot fail a cycle');
+  passed += 1;
+}
+
+{
+  // A WRITE THAT NEVER SETTLES MUST NOT HANG THE CYCLE, and this is the property a
+  // try/catch cannot provide — it only handles the writes that finish. An accepted but
+  // never-resolving request would burn the cycle budget and let the watchdog force-exit
+  // the process AFTER the orders were placed, turning a successful cycle into a recorded
+  // failure. A purely observational layer changing operational behaviour is precisely
+  // what this brick promises it cannot do.
+  const hanging = {
+    from: () => ({
+      upsert: () => ({
+        // Never settles, and ignores the abort signal — so the guarantee is tested on the
+        // backstop rather than on the client's good behaviour.
+        abortSignal: () => new Promise(() => {}),
+      }),
+    }),
+  } as unknown as SupabaseClient;
+
+  const rows = [toObservationRow(1, evaluateTransition(inputs()), null)];
+  const started = Date.now();
+  const landed = await saveTransitionObservations(hanging, rows);
+  const elapsed = Date.now() - started;
+
+  assert.equal(landed, false, 'a write that never settles is reported as a miss');
+  assert.ok(
+    elapsed < 30_000,
+    `the writer must return on its own deadline, not hang the cycle (took ${elapsed}ms)`,
+  );
+  console.log(`  ok: a hung write returns on its deadline (${elapsed}ms) instead of burning the cycle`);
   passed += 1;
 }
 
