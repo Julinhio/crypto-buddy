@@ -131,6 +131,29 @@ export interface StopRun {
 }
 
 /**
+ * Drops the candles that had not CLOSED by `cutoffMs` — in particular ccxt's last,
+ * still-FORMING candle, which `fetchCandlesSince` returns like any other.
+ *
+ * Same predicate as the production regime path, which filters its 4h series with
+ * `c.timestamp + opts.barMs <= opts.nowMs` (regime.ts, the grid construction). The
+ * cutoff here is the observation window's upper bound, already captured at the start of
+ * the run — never a fresh `Date.now()`, which would be a second, drifting notion of
+ * "now" inside a harness whose whole claim is that it replays one fixed window.
+ *
+ * Applied HERE and not inside `fetchCandlesSince`, deliberately: that loader is shared
+ * with the regime replay, whose C5 criterion needs the forming candle present in order
+ * to reproduce a live fetch exactly.
+ *
+ * Without it, `closeAt`'s range guard reads the forming candle's SCHEDULED end as
+ * observed coverage: a 24h/72h target landing inside that candle passes the guard and
+ * gets answered with the preceding close — a fabricated rebound, on a horizon the replay
+ * had not reached.
+ */
+export function closedBy(candles: Candle[], cutoffMs: number, barMs: number): Candle[] {
+  return candles.filter((c) => c.timestamp + barMs <= cutoffMs);
+}
+
+/**
  * The close of the last candle that had CLOSED at or before `atMs` — or null when the
  * series does not reach that far.
  *

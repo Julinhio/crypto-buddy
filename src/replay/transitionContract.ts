@@ -8,7 +8,14 @@ import { Decimal, dec } from '../money.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
 import { tradableBaseAssets } from '../config/index.js';
 import { fetchCandlesSince } from './klines.js';
-import { PEAK_STOP_THRESHOLDS, closeAt, runPeakStop, type StopEpisode, type StopRun } from './peakStop.js';
+import {
+  PEAK_STOP_THRESHOLDS,
+  closeAt,
+  closedBy,
+  runPeakStop,
+  type StopEpisode,
+  type StopRun,
+} from './peakStop.js';
 import {
   freezeRuns,
   gridGaps,
@@ -875,7 +882,8 @@ async function main(): Promise<number> {
       fetchCandlesSince(client, symbol, '1h', window.fromMs - DAY_MS),
     ]);
     universe[base] = { daily, h4 };
-    priceSeries[base] = h1;
+    // Bounded to the captured observation window, forming candle included: see closedBy.
+    priceSeries[base] = closedBy(h1, window.toMs, priceBarMs);
     console.log(
       `[replay] ${symbol}: ${daily.length} × ${config.primaryTimeframe}, ` +
         `${h4.length} × ${config.regime.timeframe}, ${h1.length} × 1h (price path)`,

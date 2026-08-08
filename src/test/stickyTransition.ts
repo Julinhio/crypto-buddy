@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import type { Candle } from '../market/klines.js';
 import { Hysteresis, type AssetRegime } from '../market/regime.js';
-import { closeAt, lowestBetween } from '../replay/peakStop.js';
+import { closeAt, closedBy, lowestBetween } from '../replay/peakStop.js';
 import { freezeRuns, stickyAt, stickyTimeline } from '../replay/stickyTransition.js';
 
 /**
@@ -374,6 +374,51 @@ const D: AssetRegime = 'trend_down';
   );
   assert.equal(closeAt(whole, 3 * H4_MS, H4_MS)!.toNumber(), 100, 'and resolves when the bar is there');
   console.log('  ok: interval coverage is verified at both ends and through the middle');
+  passed += 1;
+}
+
+{
+  // THE STILL-FORMING CANDLE. `fetchCandlesSince` returns ccxt's last candle even when
+  // its interval has not ended, and `closeAt`'s range guard reads that candle's
+  // SCHEDULED end as observed coverage. A 24h/72h target landing inside it therefore
+  // passes the guard and gets answered with the PRECEDING close — a rebound reported for
+  // a horizon the replay never reached.
+  const HOUR = 3_600_000;
+  const series: Candle[] = [0, 1, 2, 3].map((i) => ({
+    timestamp: i * HOUR,
+    open: 100,
+    high: 110,
+    low: 90,
+    close: 100 + i,
+    volume: 1,
+  }));
+  // The run's observation cutoff falls INSIDE the last candle: bars 0-2 have closed,
+  // bar 3 (03:00-04:00) is still forming.
+  const cutoff = 3 * HOUR + 30 * 60_000;
+  const target = 3 * HOUR + 45 * 60_000; // inside the forming candle, past the cutoff
+
+  // Unfiltered — the defect. The guard passes because 03:45 < the forming candle's
+  // scheduled end of 04:00, and the last CLOSED bar's close is handed back.
+  assert.equal(
+    closeAt(series, target, HOUR)!.toNumber(),
+    102,
+    'without the filter, a target inside the forming candle silently resolves to the previous close',
+  );
+
+  // Filtered at the captured cutoff — the fix. The series now ends at the last candle
+  // that actually closed, so the target is genuinely out of range.
+  const closed = closedBy(series, cutoff, HOUR);
+  assert.equal(closed.length, 3, 'the still-forming candle is dropped');
+  assert.equal(closed[closed.length - 1]!.timestamp, 2 * HOUR, 'the series ends on the last closed bar');
+  assert.equal(
+    closeAt(closed, target, HOUR),
+    null,
+    'a horizon the replay had not reached must read as missing, not as a fabricated rebound',
+  );
+
+  // A target inside the covered span still resolves normally.
+  assert.equal(closeAt(closed, 3 * HOUR, HOUR)!.toNumber(), 102, 'a reachable horizon is unaffected');
+  console.log('  ok: the still-forming candle cannot answer a horizon the replay never reached');
   passed += 1;
 }
 

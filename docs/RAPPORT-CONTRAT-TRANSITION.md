@@ -16,6 +16,12 @@ Le harness sort en code 0 si les quatre validations passent. Les trois blocs de 
 échouer : ils rapportent. Les invariants de la règle elle-même sont dans `npm test`
 (`src/test/stickyTransition.ts`).
 
+**Ce rapport est épinglé au run ci-dessus.** Le bot tourne en continu et la fenêtre d'observation est
+lue dans `decisions` à chaque exécution, donc un run ultérieur portera sur un corpus plus long et
+quelques comptes bougeront mécaniquement — d'abord ceux qui s'incrémentent par cycle, comme les
+asset-cycles gelés du §4. Les chiffres ci-dessous décrivent la fenêtre nommée en tête, pas « l'état
+actuel ».
+
 ---
 
 ## 0. Ce que le code dit du diagnostic
@@ -77,9 +83,9 @@ Deux ont été trouvés en construisant la mesure, et **ont réellement mordu** 
 - une ligne à plat est absente du tableau `positions`, donc le cycle qui l'**ouvre** n'y trouve aucun
   prix pour amorcer son pic. L'union avec les actifs négociables est nécessaire.
 
-Neuf ont été trouvés en revue. Sept étaient **latents** — vérifié à chaque tour : après correction,
-chaque chiffre publié dans ce rapport est inchangé au caractère près, à l'exception des trois colonnes
-de chemin de prix, qui gagnent en précision (voir §4).
+Les autres ont été trouvés en revue, et tous sauf un étaient **latents** — vérifié à chaque tour, en
+diffant la sortie complète du harness avant/après : chaque chiffre publié ici est inchangé au caractère
+près, à l'exception des trois colonnes de chemin de prix, qui gagnent en précision (voir §4).
 
 - la vue « fenêtre » du gel était découpée en **comptant** les bougies de préchauffage
   (`fullTimeline.length − points.length`). Dès que le harness tourne après coup et qu'une bougie 4h
@@ -120,7 +126,22 @@ de chemin de prix, qui gagnent en précision (voir §4).
   chez un seul actif retire la barre pour tous. Deux lectures distantes de 8 h auraient compté comme
   des confirmations consécutives, dégelant un actif jamais observé trois bougies de suite. Un trou
   **remet le compteur à 1**, et les durées de gel sont mesurées en **temps écoulé** plutôt qu'en
-  `bougies × barMs`. La validation T3 publie le nombre de trous par actif (0 sur ce run).
+  `bougies × barMs` — histogramme, quantiles et sélection du plus long épisode compris. La validation
+  T3 publie le nombre de trous par actif (0 sur ce run).
+- rendre ce compteur sensible aux trous a produit la conséquence **inverse** : il empêchait aussi
+  l'étiquette confirmée de changer sur la première observation après un trou. Or la `Hysteresis` de
+  production ne voit jamais d'horodatage — elle confirme à la troisième étiquette identique, trou ou
+  pas. Les deux marches auraient donc divergé dès qu'une barre manque, et **T0 serait devenu faux**,
+  c'est-à-dire que la règle ne serait plus la simple porte qu'elle prétend être. Deux compteurs
+  désormais : `labelRun` (égalité d'étiquettes seule, miroir de production) pilote l'étiquette,
+  `runLength` (sensible aux trous) pilote l'actionnabilité.
+- `fetchCandlesSince` conserve la dernière bougie **en formation** renvoyée par ccxt, et le garde de
+  portée de `closeAt` lisait la fin *programmée* de cette bougie comme une couverture observée. Une
+  cible à 24 h ou 72 h tombant à l'intérieur d'elle passait donc le garde et recevait le close
+  précédent — un rebond fabriqué, sur un horizon que le replay n'avait pas atteint. La série de prix
+  est filtrée à la source sur la borne d'observation déjà capturée, avec le prédicat du chemin de
+  régime de production (`c.timestamp + barMs <= cutoff`). Filtré ici et non dans `fetchCandlesSince`,
+  qui est partagé avec le replay de régime dont le critère C5 a besoin de la bougie en formation.
 
 Et deux corrigés en revue qui, eux, **ont mordu** — le harness tourne pendant que le bot écrit :
 
