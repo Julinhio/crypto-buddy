@@ -234,6 +234,8 @@ export function judge(
     // sized from — so the replay cannot judge on a different basis from the live path.
     effectiveTarget: effective,
     referenceTarget,
+    // The same policy the clamp above used, so both operands land in one frame.
+    riskPolicy: config,
     movements,
     reserveAsset: book.reserveAsset,
     notes: decision.positionNotes,

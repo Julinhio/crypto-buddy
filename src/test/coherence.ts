@@ -4,9 +4,11 @@ import {
   resolveCoherenceGuard,
   validateDecisionTimingConfig,
   config,
+  type AppConfig,
   type DecisionConfig,
   type SchedulerConfig,
 } from '../config/index.js';
+import { clampAllocation } from '../risk/clamp.js';
 import {
   buildDecisionSchema,
   outputOrderViolation,
@@ -63,6 +65,8 @@ const input = (over: Partial<CoherenceInput> = {}): CoherenceInput => ({
   actionType: 'hold',
   effectiveTarget: { ...REFERENCE },
   referenceTarget: { ...REFERENCE },
+  // The shipped policy by default; the cap-change cases override it with a synthetic one.
+  riskPolicy: config,
   movements: [],
   reserveAsset: 'USDT',
   notes: [],
@@ -509,6 +513,168 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
     'a shrunk cycle budget must fail the boot too',
   );
   console.log('  ok: the decision timing is asserted against the cycle budget at startup');
+  passed += 1;
+}
+
+/* ── The reference, normalised under the CURRENT risk policy ──────────────────
+ *
+ * The reference is a stored `applied_allocation`, bounded by the caps of its day. The
+ * candidate is bounded by today's. Let a deployment tighten a cap and the two stop living
+ * in the same coordinate system — and the failure is not a bad verdict, it is an
+ * INTERLOCK: every hold is rejected for "moving" the target, no `decided` row is written,
+ * the reference never advances, and the risk-mandated reduction never executes.
+ *
+ * So the bar these cases hold is deliberately higher than "does not crash": the cycle must
+ * be ACCEPTED, and the chain must keep advancing over several cycles.
+ *
+ * The synthetic policies below never touch the real configuration — they are spreads over
+ * it, built per case.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** The shipped config with some caps replaced. Never mutates the real one. */
+const withCaps = (perAsset: Record<string, number>, minCashPercent?: number): AppConfig => ({
+  ...config,
+  execution: {
+    ...config.execution,
+    caps: {
+      ...config.execution.caps,
+      perAsset: { ...config.execution.caps.perAsset, ...perAsset },
+      minCashPercent: minCashPercent ?? config.execution.caps.minCashPercent,
+    },
+  },
+});
+
+{
+  // A CAP TIGHTENED BELOW THE LAST APPLIED TARGET. The stored reference held BTC at 35%,
+  // which was that day's cap; today's cap is 30%. The model re-emits its unchanged
+  // proposal, the clamp bounds it to 30%, and the guard must accept the hold — the book
+  // pursued the same bounded allocation, and the 35% it is compared against is a number
+  // the policy no longer permits anyone to hold.
+  const policy = withCaps({ BTC: 30 });
+  const storedReference = { BTC: 35, ETH: 20, BNB: 12, XRP: 0, USDT: 33 };
+  const candidate = clampAllocation({ BTC: 40, ETH: 20, BNB: 12, XRP: 0, USDT: 28 }, 'USDT', policy).applied;
+
+  assert.equal(candidate.BTC, 30, 'the candidate is bounded by the new cap');
+  const verdict = checkCoherence(
+    input({ actionType: 'hold', effectiveTarget: candidate, referenceTarget: storedReference, riskPolicy: policy }),
+  );
+  ok('a hold under a tightened cap is ACCEPTED, not merely non-fatal', verdict.ok);
+  ok('and it reports no violation at all', verdict.violations.length === 0);
+
+  // The proof that this is the normalisation and not an accident: with the OLD policy in
+  // force, the very same operands are a genuine move and are correctly rejected.
+  const underOldPolicy = checkCoherence(
+    input({
+      actionType: 'hold',
+      effectiveTarget: candidate,
+      referenceTarget: storedReference,
+      riskPolicy: config,
+    }),
+  );
+  ok(
+    'under the unchanged policy the same 35 → 30 IS a moved target, and is rejected',
+    !underOldPolicy.ok && rules(input({
+      actionType: 'hold',
+      effectiveTarget: candidate,
+      referenceTarget: storedReference,
+      riskPolicy: config,
+    })).includes('hold_moved_target'),
+  );
+  passed += 1;
+}
+
+{
+  // THE CASH FLOOR DOES IT TOO. Raising the sacred reserve rescales every coin, so a
+  // reference written under a 30% floor is unreachable under a 50% one — the same
+  // interlock through a different door, which is why normalisation goes through the real
+  // clamp rather than re-implementing "cap each asset".
+  const policy = withCaps({}, 50);
+  const candidate = clampAllocation({ ...REFERENCE }, 'USDT', policy).applied;
+
+  assert.equal(candidate.USDT, 50, 'the floor was raised and the coins rescaled');
+  assert.ok((candidate.BTC ?? 0) < 25, 'BTC no longer fits at its old weight');
+  ok(
+    'a hold under a raised cash floor is accepted',
+    checkCoherence(
+      input({ actionType: 'hold', effectiveTarget: candidate, referenceTarget: { ...REFERENCE }, riskPolicy: policy }),
+    ).ok,
+  );
+  passed += 1;
+}
+
+{
+  // THE CHAIN KEEPS ADVANCING. One accepted cycle proves the rejection is gone; it does
+  // not prove the reference moves. So the chain is walked: each accepted cycle writes its
+  // applied allocation, the next cycle reads it back as the reference, and all of them
+  // must pass. If normalisation were not idempotent, cycle 2 or 3 would fail here.
+  const policy = withCaps({ BTC: 30 });
+  const rawProposal = { BTC: 40, ETH: 20, BNB: 12, XRP: 0, USDT: 28 };
+  let reference: Record<string, number> = { BTC: 35, ETH: 20, BNB: 12, XRP: 0, USDT: 33 };
+  const accepted: boolean[] = [];
+  const references: string[] = [];
+
+  for (let cycle = 0; cycle < 4; cycle += 1) {
+    const candidate = clampAllocation(rawProposal, 'USDT', policy).applied;
+    const verdict = checkCoherence(
+      input({ actionType: 'hold', effectiveTarget: candidate, referenceTarget: reference, riskPolicy: policy }),
+    );
+    accepted.push(verdict.ok);
+    references.push(JSON.stringify(reference));
+    // What production does with an accepted cycle: the applied allocation becomes the
+    // next reference.
+    if (verdict.ok) reference = candidate;
+  }
+
+  ok('four consecutive cycles under the tightened cap are all accepted', accepted.every(Boolean));
+  ok(
+    'and the reference actually ADVANCED off the stale value rather than standing still',
+    references[0] !== references[1] && references[1] === references[3],
+  );
+  passed += 1;
+}
+
+{
+  // EVERY RULE READS THE NORMALISED REFERENCE, rule 2 included.
+  //
+  // `referenceTarget` has exactly one consumer inside `checkCoherence` — the `reference`
+  // derivation — and rules 1 and 2 both read it from there (rules 3 and 4 are about theses
+  // and never touch it). This case demonstrates rule 2 specifically, because it is the one
+  // the brief asked about: `rebalance` keeps rule 1 out of the way, and a candidate that
+  // produces NO movement would trip `target_not_executable` if the reference were still
+  // the un-normalised 35%.
+  const policy = withCaps({ BTC: 30 });
+  const storedReference = { BTC: 35, ETH: 20, BNB: 12, XRP: 0, USDT: 33 };
+  const candidate = clampAllocation({ BTC: 40, ETH: 20, BNB: 12, XRP: 0, USDT: 28 }, 'USDT', policy).applied;
+
+  const normalised = rules(
+    input({ actionType: 'rebalance', effectiveTarget: candidate, referenceTarget: storedReference, riskPolicy: policy, movements: [] }),
+  );
+  ok('rule 2 sees the normalised reference — no phantom move to be executable about', !normalised.includes('target_not_executable'));
+
+  // The mirror, under the unchanged policy: the same inputs DO trip rule 2, which is what
+  // makes the assertion above meaningful rather than vacuous.
+  const unnormalised = rules(
+    input({ actionType: 'rebalance', effectiveTarget: candidate, referenceTarget: storedReference, riskPolicy: config, movements: [] }),
+  );
+  ok('and it does fire when the reference genuinely is in another frame', unnormalised.includes('target_not_executable'));
+  passed += 1;
+}
+
+{
+  // NEUTRAL WHILE THE POLICY HOLDS STILL — the property the corpus proof rests on.
+  // Clamping an already-bounded allocation under the same caps returns it unchanged, so
+  // normalisation cannot move a verdict on any of the 1083 recorded cycles.
+  const alreadyBounded = clampAllocation({ ...REFERENCE }, 'USDT', config);
+  assert.equal(alreadyBounded.clamped, false, 'the corpus reference is within the shipped caps');
+  assert.deepEqual(
+    clampAllocation(alreadyBounded.applied, 'USDT', config).applied,
+    alreadyBounded.applied,
+    'clamping is idempotent under an unchanged policy',
+  );
+  ok(
+    'an unchanged hold is still accepted, exactly as before',
+    checkCoherence(input({ actionType: 'hold' })).ok,
+  );
   passed += 1;
 }
 

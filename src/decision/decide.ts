@@ -589,6 +589,10 @@ export async function decide(): Promise<DecideResult> {
           // book pursued the same bounded allocation both times.
           effectiveTarget: clamp.applied,
           referenceTarget: referenceRead.target,
+          // Today's caps. The guard normalises the stored reference under them before any
+          // rule sees it, so tightening a cap cannot deadlock the chain — see
+          // CoherenceInput.riskPolicy.
+          riskPolicy: config,
           movements,
           reserveAsset: reserveStable,
           notes: decision.positionNotes,
