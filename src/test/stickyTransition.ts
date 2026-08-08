@@ -1,0 +1,230 @@
+import assert from 'node:assert/strict';
+import { Hysteresis, type AssetRegime } from '../market/regime.js';
+import { freezeRuns, stickyAt, stickyTimeline } from '../replay/stickyTransition.js';
+
+/**
+ * Invariants of the STICKY TRANSITION rule — run with `npm test` (tsx). No framework.
+ *
+ * The harness measures what the rule COSTS on the real tape; these tests prove it is
+ * the rule the brief specifies, whatever the tape does. Four properties carry the
+ * whole thing, and each maps to one numbered point of the contract:
+ *
+ *   1. raw leaving the active regime freezes the asset;
+ *   2. any change of raw — a return to the old label included — resets the counter to 1;
+ *   3. the third identical raw bar confirms AND unfreezes, on that bar, not later;
+ *   4. a short reappearance of the old regime never reopens actionability.
+ *
+ * Plus the two that make the measurement trustworthy at all: CAUSALITY (a bar's verdict
+ * cannot move when a later bar is appended) and LABEL EQUIVALENCE (the rule gates, it
+ * does not relabel — the confirmed regime matches production's `Hysteresis` bar for bar).
+ */
+
+const H4_MS = 4 * 60 * 60 * 1000;
+const CONFIRMATIONS = 3;
+let passed = 0;
+
+/** Turns a shorthand series into the bar-stamped input the rule reads. */
+function bars(raws: AssetRegime[]): Array<{ timestamp: number; raw: AssetRegime }> {
+  return raws.map((raw, i) => ({ timestamp: i * H4_MS, raw }));
+}
+
+const U: AssetRegime = 'trend_up';
+const R: AssetRegime = 'range';
+const D: AssetRegime = 'trend_down';
+
+{
+  // Point 1 — the moment raw leaves the active regime, the asset stops being actionable.
+  // Bars 0-2 confirm trend_up (actionable from bar 2); bar 3 prints `range` and freezes it.
+  const t = stickyTimeline(bars([U, U, U, R]), CONFIRMATIONS);
+  assert.deepEqual(
+    t.map((p) => p.actionable),
+    [false, false, true, false],
+    'the third identical bar unfreezes; the first divergent bar re-freezes immediately',
+  );
+  assert.equal(t[3]!.active, U, 'the active regime does NOT follow the single divergent bar');
+  assert.equal(t[3]!.runLength, 1, 'a divergent bar starts a run of 1');
+  console.log('  ok: point 1 — raw leaving the active regime freezes the asset at once');
+  passed += 1;
+}
+
+{
+  // Point 2 — ANY change of raw resets the counter to 1, INCLUDING a return to the old
+  // label. This is the case a naive "count bars since the active regime changed" gets
+  // wrong: the two `range` bars are not allowed to keep their credit across the
+  // trend_up that interrupts them.
+  const t = stickyTimeline(bars([U, U, U, R, R, U, R, R, R]), CONFIRMATIONS);
+  assert.deepEqual(
+    t.map((p) => p.runLength),
+    [1, 2, 3, 1, 2, 1, 1, 2, 3],
+    'the interrupting trend_up resets the range run to 1 — the two earlier range bars expire',
+  );
+  assert.deepEqual(
+    t.map((p) => p.actionable),
+    [false, false, true, false, false, false, false, false, true],
+    'nothing is actionable between the two confirmations',
+  );
+  assert.equal(t[8]!.active, R, 'range is confirmed only by its own three consecutive bars');
+  console.log('  ok: point 2 — any change of raw resets the counter to 1');
+  passed += 1;
+}
+
+{
+  // Point 3 — confirmation happens ON the third bar, not three bars after it. Getting
+  // this wrong would double the freeze and quietly make the whole rule look far more
+  // expensive than it is.
+  const t = stickyTimeline(bars([U, U, U, R, R, R, R]), CONFIRMATIONS);
+  assert.equal(t[5]!.actionable, true, 'the third consecutive range bar is itself actionable');
+  assert.equal(t[5]!.active, R, 'and it is the bar on which range becomes the active regime');
+  assert.equal(t[4]!.actionable, false, 'the bar before it is still frozen');
+  console.log('  ok: point 3 — the third identical bar confirms and unfreezes, on that bar');
+  passed += 1;
+}
+
+{
+  // Point 4 — a reappearance of the old regime for fewer than three consecutive bars
+  // never reopens actionability. Two `trend_up` bars in the middle of a transition are
+  // a flicker, not a return, and the asset stays frozen across them.
+  const t = stickyTimeline(bars([U, U, U, R, U, U, R, R, R]), CONFIRMATIONS);
+  assert.deepEqual(
+    t.slice(3).map((p) => p.actionable),
+    [false, false, false, false, false, true],
+    'the two-bar trend_up flicker does not reopen actionability',
+  );
+  assert.equal(t[5]!.active, U, 'the active label is unchanged throughout the flicker');
+  assert.equal(t[5]!.frozen, true, 'and the asset is frozen on it anyway — that is the point');
+
+  // The mirror: a THREE-bar reappearance is a genuine return and does reopen it.
+  const returned = stickyTimeline(bars([U, U, U, R, U, U, U, R]), CONFIRMATIONS);
+  assert.equal(returned[6]!.actionable, true, 'three consecutive old-regime bars are a real return');
+  assert.equal(returned[6]!.active, U, 'and the regime is trend_up again');
+  console.log('  ok: point 4 — a short reappearance never reopens actionability; a three-bar one does');
+  passed += 1;
+}
+
+{
+  // CAUSALITY. The verdict for bar `t` is a function of bars 0..t only. Proven by
+  // construction rather than by inspection: replay every prefix of a jagged series and
+  // check the last point of each prefix equals the same point in the full walk. If any
+  // look-ahead existed — "was this flicker followed by a return" — this test fails.
+  const series = bars([U, R, U, U, R, R, D, D, D, R, D, D, U, U, U, R, U, R, R, R]);
+  const full = stickyTimeline(series, CONFIRMATIONS);
+  for (let n = 1; n <= series.length; n += 1) {
+    const prefix = stickyTimeline(series.slice(0, n), CONFIRMATIONS);
+    assert.deepEqual(
+      prefix[n - 1],
+      full[n - 1],
+      `bar ${n - 1} decided differently when the future was unknown — the rule is not causal`,
+    );
+  }
+  console.log(`  ok: causality — all ${series.length} bars decide identically on every prefix`);
+  passed += 1;
+}
+
+{
+  // LABEL EQUIVALENCE — the claim the whole measurement rests on: the sticky walk
+  // GATES, it does not relabel. If the confirmed regime ever diverged from production's
+  // `Hysteresis`, the harness would be measuring a different tape and could not
+  // attribute any of its numbers to the actionability gate alone.
+  //
+  // Checked on an exhaustive enumeration rather than on a sample: every series of 10
+  // bars over a 3-label alphabet is 59 049 walks, which runs in well under a second and
+  // leaves no corner uncovered.
+  const alphabet: AssetRegime[] = [U, R, D];
+  const LENGTH = 10;
+  let walks = 0;
+  const series = new Array<AssetRegime>(LENGTH);
+
+  const walk = (i: number): void => {
+    if (i === LENGTH) {
+      const sticky = stickyTimeline(bars(series), CONFIRMATIONS);
+      const hysteresis = new Hysteresis<AssetRegime>(series[0]!, CONFIRMATIONS);
+      for (let k = 0; k < LENGTH; k += 1) {
+        const production = hysteresis.push(series[k]!);
+        assert.equal(
+          sticky[k]!.active,
+          production.value,
+          `relabelled at bar ${k} of [${series.join(',')}]: sticky ${sticky[k]!.active} vs production ${production.value}`,
+        );
+      }
+      walks += 1;
+      return;
+    }
+    for (const label of alphabet) {
+      series[i] = label;
+      walk(i + 1);
+    }
+  };
+  walk(0);
+
+  assert.equal(walks, alphabet.length ** LENGTH, 'the enumeration must be exhaustive');
+  console.log(`  ok: label equivalence — ${walks.toLocaleString('en-US')} exhaustive walks, zero relabelling`);
+  passed += 1;
+}
+
+{
+  // Freeze runs: boundaries, and the honesty of an unterminated one. The series ends
+  // mid-transition, so the last run's duration is a LOWER bound and must say so —
+  // closing it silently would understate the very statistic (longest freeze) the
+  // measurement exists to bound.
+  const t = stickyTimeline(bars([U, U, U, R, R, U, R, R]), CONFIRMATIONS);
+  const runs = freezeRuns('BTC', t, H4_MS);
+
+  assert.equal(runs.length, 2, 'the warm-up freeze and the trailing one');
+  assert.equal(runs[0]!.bars, 2, 'bars 0-1, before trend_up is first confirmed');
+  assert.equal(runs[0]!.openEnded, false, 'it was resolved by bar 2');
+
+  const trailing = runs[1]!;
+  assert.equal(trailing.fromMs, 3 * H4_MS, 'the freeze starts on the first non-actionable bar');
+  assert.equal(trailing.toMs, 7 * H4_MS, 'and ends on the LAST one, not on the bar that thawed it');
+  assert.equal(trailing.bars, 5, 'bars 3-7');
+  assert.equal(trailing.hours, 20, 'five 4h bars is 20 hours');
+  assert.equal(trailing.openEnded, true, 'still frozen at the last bar — the duration is a lower bound');
+  assert.equal(trailing.leftRegime, U, 'it left trend_up');
+  assert.equal(trailing.enteredRegime, R, 'and had not settled back into it');
+  assert.equal(trailing.abortedReturn, false, 'so it is not an aborted return');
+  assert.equal(trailing.rawLabelsSeen, 2, 'range and trend_up printed during it');
+
+  // An ABORTED RETURN: the tape wobbles into `range` and settles back on trend_up. The
+  // asset was frozen throughout, which is exactly the episode point 4 exists for.
+  const aborted = freezeRuns('BTC', stickyTimeline(bars([U, U, U, R, R, U, U, U]), CONFIRMATIONS), H4_MS);
+  const wobble = aborted[aborted.length - 1]!;
+  assert.equal(wobble.abortedReturn, true, 'the freeze resolved back into the regime it left');
+  assert.equal(wobble.enteredRegime, U, 'trend_up was re-confirmed, not replaced');
+  assert.equal(wobble.bars, 4, 'bars 3-6: two range bars plus the first two of the return');
+  console.log('  ok: freeze runs — boundaries, open-ended honesty, aborted returns');
+  passed += 1;
+}
+
+{
+  // A cycle reads the last bar that had CLOSED by its wall clock — production's own
+  // rule. A cycle running one millisecond into a bar must read the PREVIOUS one.
+  const t = stickyTimeline(bars([U, U, U, R]), CONFIRMATIONS);
+  assert.equal(stickyAt(t, 0, H4_MS), null, 'at the very first open, no bar has closed yet');
+  assert.equal(stickyAt(t, H4_MS, H4_MS)!.timestamp, 0, 'bar 0 becomes readable exactly when it closes');
+  assert.equal(
+    stickyAt(t, 3 * H4_MS + 1, H4_MS)!.timestamp,
+    2 * H4_MS,
+    'a cycle 1ms into bar 3 reads bar 2 — the forming bar is never read',
+  );
+  assert.equal(stickyAt(t, 3 * H4_MS + 1, H4_MS)!.actionable, true, 'and bar 2 was actionable');
+  console.log('  ok: a cycle only ever reads a bar that had already closed');
+  passed += 1;
+}
+
+{
+  // The guard on `confirmations`. A zero or fractional value would make the rule a
+  // no-op (everything actionable) while still producing plausible-looking output —
+  // the worst kind of failure for a measurement harness.
+  for (const bad of [0, -1, 1.5, Number.NaN]) {
+    assert.throws(
+      () => stickyTimeline(bars([U]), bad),
+      /confirmations must be an integer >= 1/,
+      `confirmations=${bad} must be refused`,
+    );
+  }
+  assert.equal(stickyTimeline(bars([U]), 1)[0]!.actionable, true, 'confirmations=1 is a valid no-op');
+  console.log('  ok: a nonsensical confirmations count is refused, not silently tolerated');
+  passed += 1;
+}
+
+console.log(`\n${passed} sticky-transition invariant checks passed.`);
