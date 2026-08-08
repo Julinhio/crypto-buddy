@@ -481,3 +481,79 @@ seuil, ce qui n'est plus une mesure. À refaire quand le corpus aura doublé.
    confirmée ». Une fois confirmée, c'est le modèle qui décide de rentrer ou non. La mesure ci-dessus
    suppose une réentrée automatique au même notionnel, ce qui est le contrefactuel neutre, pas le
    comportement proposé.
+
+---
+
+## 8. Le cran `risk_off_reduction`, exercé en contrefactuel
+
+Ajouté après coup. L'échelle de priorité a quatre crans ; trois sont usés par les données
+réelles (`stop_exit`, `frozen`, `actionable`). Le quatrième, `risk_off_reduction`, **n'a jamais été
+observé** : sur les 61 jours, zéro ordre a été passé pendant qu'un `risk_off` global était confirmé.
+
+C'est pourtant lui qui porte la responsabilité la plus lourde — garantir qu'un gel individuel ne
+piège pas l'exposition dans un marché qui casse. Le passer en mode bloquant sur la foi d'une branche
+que rien n'a jamais exercée n'était pas acceptable, donc on l'exerce sans attendre un krach.
+
+Reproduction :
+
+```bash
+npx tsx src/replay/riskOffCounterfactual.ts
+```
+
+Le harness rejoue l'historique en forçant `riskOffConfirmed = true` sur chaque cycle portant au moins
+un actif gelé — 687 des 1084 cycles — et juge 4336 asset-cycles **deux fois**. Les verdicts viennent
+des vraies fonctions de production, `evaluateTransition` et `judgeOrder` : rien de l'échelle n'est
+réimplémenté, le seul écart injecté est le booléen.
+
+### Les quatre invariants
+
+| | invariant | résultat | contrôle miroir |
+|---|-----------|----------|-----------------|
+| I1 | le stop garde la priorité | **312/312** restent `stop_exit` | les 312 sont gelés, donc le cran 2 était bien en concurrence |
+| I2 | les réductions sont autorisées | **1025/1025** ventes autorisées | les mêmes ventes sont **refusées sans** l'injection |
+| I3 | les achats restent interdits | **1025/1025** achats refusés | face aux 1025 ventes autorisées — l'asymétrie *est* le cran |
+| I4 | aucune étiquette ne bouge | **0/4336** ont bougé | la porte, elle, a changé sur **1025** d'entre eux |
+
+Chaque miroir compte autant que l'assertion. Sans lui, I2 passerait si le gel se levait tout seul, et
+I4 passerait si l'injection ne faisait rien du tout.
+
+### L'ampleur
+
+Un seul type de transition se produit — **1025 asset-cycles passent de `frozen` à
+`risk_off_reduction`**, et aucun autre verdict ne bouge. C'est ce qu'on veut : le cran ne fait qu'une
+chose.
+
+Sur les **16 ordres réels que la porte interdit aujourd'hui** :
+
+- **11 deviendraient autorisés** sous un `risk_off` confirmé — les 11 ventes, dont les six ventes
+  BTC/ETH des cycles 1035, 1054 et 1067, et la vente BNB du cycle 1163
+- **5 restent interdits** — les 5 achats (cycles 252, 1020, et les trois du cycle 1061), refusés pour
+  une raison unique : *l'override ne lève jamais une augmentation*
+
+Autrement dit, dans un marché qui casse, la porte laisserait sortir tout ce qui réduit et
+continuerait de bloquer tout ce qui ajoute. C'est exactement le contrat, vérifié plutôt que supposé.
+
+### Le bord `no_regime` — mesuré, non corrigé
+
+`evaluateTransition` retourne `no_regime` **avant** d'examiner `risk_off`, donc un actif sans bougie
+4h exploitable reste intouchable même sous override confirmé. C'est le mauvais défaut pour une
+échelle dont tout l'objet est que réduire reste toujours possible.
+
+Non corrigé ici — il part avec la PR bloquante. Mais mesuré, pour que la correction soit priorisée
+sur des faits :
+
+| | |
+|---|---|
+| asset-cycles retournant `no_regime` | **0 / 4336** |
+| dont la ligne était réellement détenue | 0 |
+| dont une vente réelle a été passée ce cycle-là | 0 |
+
+**Le bord est théorique sur cette bande.** Aucun asset-cycle ne l'atteint, donc le corriger ne change
+rien à ce qui s'est produit. Ça reste à faire pour la forme de l'échelle, mais ça ne concurrence en
+priorité rien de mesurable.
+
+### Ce que ce contrefactuel ne dit pas
+
+Il ne dit rien de ce que le bot aurait gagné. Forcer l'override change ce que la porte **permet** ;
+il ne dit rien de ce que le modèle aurait décidé, et aucun ordre n'est rejoué. Les comptes ci-dessus
+portent sur l'échelle, pas sur la performance.
