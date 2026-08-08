@@ -77,8 +77,8 @@ Deux ont été trouvés en construisant la mesure, et **ont réellement mordu** 
 - une ligne à plat est absente du tableau `positions`, donc le cycle qui l'**ouvre** n'y trouve aucun
   prix pour amorcer son pic. L'union avec les actifs négociables est nécessaire.
 
-Trois autres ont été trouvés en revue et étaient **latents** — vérifié : après correction, chaque
-chiffre publié dans ce rapport est inchangé au caractère près.
+Cinq ont été trouvés en revue. Trois étaient **latents** — vérifié : après correction, chaque chiffre
+publié dans ce rapport est inchangé au caractère près.
 
 - la vue « fenêtre » du gel était découpée en **comptant** les bougies de préchauffage
   (`fullTimeline.length − points.length`). Dès que le harness tourne après coup et qu'une bougie 4h
@@ -91,7 +91,29 @@ chiffre publié dans ce rapport est inchangé au caractère près.
 - `closeAt` et `lowestBetween` renvoyaient la **dernière valeur disponible** au lieu de `null` quand
   l'horizon demandé dépassait la série. Un flux s'arrêtant court aurait répondu à « quel était le prix
   72 h après la sortie » avec un prix antérieur à la sortie. Les deux sortent maintenant `null` hors
-  couverture, conformément à la règle « pas de donnée synthétique ».
+  couverture, conformément à la règle « pas de donnée synthétique » — et la couverture est vérifiée
+  **aux deux bouts et au milieu** (début de série, fin de série, continuité des bougies), parce que
+  garder uniquement la borne droite laisse un flux qui commence tard, ou qui perd une bougie, renvoyer
+  un minimum sur un sous-ensemble inconnu.
+- les durées de gel étaient extraites de la vue **déjà découpée** à la fenêtre. Un gel déjà en cours à
+  l'ouverture voyait donc sa première bougie retenue passer pour son début, et sa durée tronquée
+  alimentait la médiane, la queue et le maximum comme si elle était exacte — le défaut symétrique du
+  gel non terminé à l'autre bord. Les durées sont désormais extraites de la marche complète
+  (préchauffage inclus, où vit le vrai début) puis filtrées aux épisodes qui recoupent la fenêtre.
+  Un seul épisode était concerné ; le bloc A publie ce compte.
+
+Et deux corrigés en revue qui, eux, **ont mordu** — le harness tourne pendant que le bot écrit :
+
+- le flux de cycles n'était **pas borné** à la fenêtre capturée au début du run. Un réveil commis entre
+  `loadObservationWindow()` et le chargement atterrissait dans les blocs B et C pendant que le bloc A,
+  l'en-tête et `window.toMs` décrivaient l'instantané antérieur — et T1 ignore silencieusement un cycle
+  dont la bougie 4h est absente, donc toutes les validations seraient passées sur deux populations
+  différentes. Le chargement est borné, et le nombre de lignes exclues est publié.
+- deux pièges dans la borne elle-même, trouvés en la vérifiant : `timestamptz` garde les
+  **microsecondes** alors qu'un `Date` JS s'arrête aux millisecondes, donc `<= toISOString()` tronquait
+  `.691152` en `.691` et jetait la dernière décision ; et les ordres sont écrits **après** la ligne de
+  décision qui les produit (cycle 1163 : décision à 08:41:02,691, vente BNB à 08:41:03,544), donc les
+  borner par horodatage supprimait le cas de référence C6. Les ordres sont bornés par `decision_id`.
 
 ---
 
@@ -313,14 +335,24 @@ sort sur la moitié des gels**, c'est-à-dire sur des retracements parfaitement 
 
 | seuil | sorties | résolues | net | frais | baisse évitée | rebond 24 h | rebond 72 h | max hors marché | moy. hors marché | ordres échoués |
 |-------|---------|----------|-----|-------|---------------|-------------|-------------|-----------------|------------------|----------------|
-| 5 % | 17 | 17 | +10,75 $ | 5,18 $ | −1,9 % | −0,5 % | −0,3 % | 22,3 h | 9,6 h | 1 |
-| 8 % | 8 | 8 | +5,43 $ | 2,14 $ | −1,4 % | −0,6 % | 0,0 % | 11,9 h | 8,6 h | 1 |
-| **10 %** | **5** | **5** | **+11,83 $** | **1,42 $** | **−2,8 %** | −0,7 % | −1,0 % | 11,9 h | 9,2 h | 1 |
-| 12 % | 3 | 3 | +0,68 $ | 0,77 $ | −1,0 % | −0,6 % | −0,5 % | 10,3 h | 7,8 h | 0 |
+| 5 % | 17 | 17 | +10,75 $ | 5,18 $ | −2,1 % | −0,3 % | −0,1 % | 22,3 h | 9,6 h | 1 |
+| 8 % | 8 | 8 | +5,43 $ | 2,14 $ | −1,8 % | −0,7 % | 0,0 % | 11,9 h | 8,6 h | 1 |
+| **10 %** | **5** | **5** | **+11,83 $** | **1,42 $** | **−3,1 %** | −0,9 % | −1,0 % | 11,9 h | 9,2 h | 1 |
+| 12 % | 3 | 3 | +0,68 $ | 0,77 $ | −2,0 % | −1,1 % | −0,4 % | 10,3 h | 7,8 h | 0 |
 
 *baisse évitée* = plus bas coté entre la sortie et la réentrée, en % du prix de sortie (plus négatif =
 plus de baisse esquivée). *rebond 24 h / 72 h* = prix 24 h / 72 h après la sortie, en % du prix de
 sortie (positif = un rebond que le stop a manqué). Équité au dernier cycle : 1025,87 $.
+
+**Granularité du chemin de prix.** Ces trois colonnes sont mesurées sur des bougies **1 h**, pas sur
+les bougies 4 h du régime. Les bornes d'un épisode sont des horodatages de cycle et ne tombent jamais
+sur une frontière de bougie : une bougie à cheval sur la sortie ou la réentrée est **exclue** du calcul
+du plus-bas, parce que son plus-bas a pu s'imprimer hors de l'épisode et le compter créditerait le stop
+d'une baisse qu'il n'a pas évitée. À 4 h cette exclusion pouvait retirer huit heures d'un épisode qui
+en dure onze ; à 1 h le résidu non résolu est d'une heure à chaque bout. Le biais restant **joue contre
+le stop, jamais pour lui** — la baisse évitée est sous-estimée — ce qui est la bonne direction pour un
+chiffre qui sert à défendre un seuil. Le régime, lui, reste sur 4 h : c'est ce que production calcule,
+et il ne bouge pas.
 
 ### Robustesse — le total est-il porté par un seul épisode ?
 
@@ -351,9 +383,10 @@ Argumentée sur quatre points, dans l'ordre de leur poids.
    jamais le déclencheur (0 asset-cycle gelé sur 337). À 10 %, les quatre actifs sont couverts
    (BTC 13, ETH 63, BNB 95, XRP 141 asset-cycles gelés atteignant le seuil).
 3. **Il attrape ce qu'il faut attraper et rien d'autre.** 5 sorties en 61 jours contre 17 à 5 %, pour
-   1,42 $ de frais contre 5,18 $, et une baisse moyenne évitée nettement supérieure (−2,8 % contre
-   −1,9 %). À 5 % le stop sort sur des retracements ordinaires : la médiane du drawdown gelé est
-   de −4,5 % sur BTC et −5,0 % sur ETH, donc il déclencherait sur la moitié des gels.
+   1,42 $ de frais contre 5,18 $, et la baisse moyenne évitée la plus profonde des quatre seuils
+   (−3,1 %, contre −2,1 % à 5 % et −2,0 % à 12 %). À 5 % le stop sort sur des retracements
+   ordinaires : la médiane du drawdown gelé est de −4,5 % sur BTC et −5,0 % sur ETH, donc il
+   déclencherait sur la moitié des gels.
 4. **Le coût d'exposition est faible et borné.** 0,50 % d'équité·cycles non portée, contre 1,87 % à
    5 %. Durée maximale hors marché 11,9 h, moyenne 9,2 h — bien en deçà des 44 h du plus long gel,
    parce que le stop ne s'arme que tard dans un gel et que la réentrée suit la confirmation.

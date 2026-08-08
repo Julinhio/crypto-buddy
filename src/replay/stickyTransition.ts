@@ -166,6 +166,11 @@ export interface FreezeRun {
   openEnded: boolean;
 }
 
+/** True when this run began before `fromMs` — i.e. it was already running at the boundary. */
+export function startedBefore(run: FreezeRun, fromMs: number): boolean {
+  return run.fromMs < fromMs;
+}
+
 /**
  * Extracts the freeze runs of one asset. A run that is still open at the end of the
  * series is reported with `openEnded: true` rather than silently closed: its true

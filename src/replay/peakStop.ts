@@ -148,22 +148,51 @@ export function closeAt(candles: Candle[], atMs: number, barMs: number): Decimal
     if (c.timestamp + barMs > atMs) break;
     found = c;
   }
-  return found == null ? null : dec(found.close);
+  if (found == null) return null;
+  // The bar we landed on must be the one that closed MOST RECENTLY before `atMs`, i.e.
+  // within one bar of it. A hole in the feed would otherwise hand back a close from the
+  // far side of the gap and present it as the price at this horizon — the same silent
+  // substitution the range guard above exists to stop, arriving through the middle of
+  // the series instead of past its end.
+  if (atMs - (found.timestamp + barMs) >= barMs) return null;
+  return dec(found.close);
 }
 
 /**
- * Lowest traded low over [fromMs, toMs]. Null when the series does not cover the whole
- * interval, for the same reason as `closeAt`: a low taken over a truncated window is not
- * the lowest price of the episode, it is the lowest price of the part we happened to
- * have — and it would be reported as though it were the former.
+ * Lowest traded low over the bars FULLY INSIDE [fromMs, toMs]. Null when the series does
+ * not cover the whole interval, or has a hole in it.
+ *
+ * ── Two properties worth stating plainly, because the report quotes this number ──
+ *
+ * COVERAGE IS CHECKED AT BOTH ENDS AND IN THE MIDDLE. Guarding only the right end still
+ * lets a feed that starts late, or that drops a bar somewhere inside, return a minimum
+ * over an unknown subset — the plausible partial-window value this guard exists to
+ * reject, reached from a different direction. So: the series must begin at or before
+ * `fromMs`, must reach `toMs`, and the bars inside must be consecutive.
+ *
+ * IT IS A CONSERVATIVE BOUND, and deliberately the conservative one. Episode boundaries
+ * are cycle timestamps and do not land on bar boundaries, so a bar straddling the exit
+ * or the re-entry is excluded rather than counted: its low may have printed outside the
+ * episode, and claiming it would credit the stop with a drawdown it never avoided. The
+ * consequence is that the reported avoided drawdown UNDERSTATES the true one by up to
+ * one bar at each end — an error that runs against the stop's case, never for it, which
+ * is the correct direction for a number used to argue a threshold. The harness feeds
+ * this 1h bars rather than the 4h regime bars precisely to shrink that residue.
  */
 export function lowestBetween(candles: Candle[], fromMs: number, toMs: number, barMs: number): Decimal | null {
+  const first = candles[0];
   const last = candles[candles.length - 1];
-  if (last == null || toMs > last.timestamp + barMs) return null;
+  if (first == null || last == null) return null;
+  if (first.timestamp > fromMs || toMs > last.timestamp + barMs) return null;
+
+  const inside = candles.filter((c) => c.timestamp >= fromMs && c.timestamp + barMs <= toMs);
+  if (inside.length === 0) return null;
+  for (let i = 1; i < inside.length; i += 1) {
+    if (inside[i]!.timestamp - inside[i - 1]!.timestamp !== barMs) return null;
+  }
+
   let low: Decimal | null = null;
-  for (const c of candles) {
-    if (c.timestamp < fromMs) continue;
-    if (c.timestamp + barMs > toMs) break;
+  for (const c of inside) {
     const candidate = dec(c.low);
     if (low == null || candidate.lt(low)) low = candidate;
   }
@@ -185,11 +214,21 @@ export function runPeakStop(params: {
   cycles: Cycle[];
   snapshots: LifecycleSnapshot[];
   sticky: Record<string, StickyPoint[]>;
+  /** Fine-grained price series — 1h, NOT the 4h regime bars. See `priceBarMs`. */
   series: Record<string, Candle[]>;
   assets: string[];
+  /** The regime bar (4h): decides which sticky bar a cycle reads. */
   barMs: number;
+  /**
+   * The PRICE series bar. Kept separate from `barMs` on purpose: the regime is a 4h
+   * object and must stay one, but the price path around an episode is measured on 1h
+   * bars so the unresolvable residue at each boundary is an hour rather than four. Two
+   * different questions, two granularities, and conflating them would either coarsen
+   * the measurement or silently change what production computes.
+   */
+  priceBarMs: number;
 }): StopRun {
-  const { threshold, cycles, snapshots, sticky, series, assets, barMs } = params;
+  const { threshold, cycles, snapshots, sticky, series, assets, barMs, priceBarMs } = params;
   const feeRate = dec(config.execution.feePercent).div(100);
 
   const episodes: StopEpisode[] = [];
@@ -226,7 +265,7 @@ export function runPeakStop(params: {
         const heldValue = episode.qty.times(reentry.price);
         episode.netEffect = stoppedValue.minus(heldValue);
         episode.extraDrawdownAvoidedPercent = (() => {
-          const low = lowestBetween(candles, episode.exitAtMs, reentry.cycle.generatedAtMs, barMs);
+          const low = lowestBetween(candles, episode.exitAtMs, reentry.cycle.generatedAtMs, priceBarMs);
           return low == null ? null : pctOf(low, episode.exitPrice);
         })();
       } else {
@@ -318,11 +357,11 @@ export function runPeakStop(params: {
         hoursOut: null,
         extraDrawdownAvoidedPercent: null,
         rebound24hPercent: (() => {
-          const p = closeAt(candles, cycle.generatedAtMs + 24 * HOUR_MS, barMs);
+          const p = closeAt(candles, cycle.generatedAtMs + 24 * HOUR_MS, priceBarMs);
           return p == null ? null : pctOf(p, price);
         })(),
         rebound72hPercent: (() => {
-          const p = closeAt(candles, cycle.generatedAtMs + 72 * HOUR_MS, barMs);
+          const p = closeAt(candles, cycle.generatedAtMs + 72 * HOUR_MS, priceBarMs);
           return p == null ? null : pctOf(p, price);
         })(),
         feesPaid: new Decimal(0),

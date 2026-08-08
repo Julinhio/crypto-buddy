@@ -126,12 +126,13 @@ function num(value: unknown): number | null {
  * property of the MARKET, not of whether the model answered. Replaying only the decided
  * rows would quietly lose highs and understate every drawdown measured against them.
  */
-async function loadDecisions(supabase: SupabaseClient): Promise<RawDecision[]> {
+async function loadDecisions(supabase: SupabaseClient, beforeIso: string): Promise<RawDecision[]> {
   const rows: RawDecision[] = [];
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await supabase
       .from('decisions')
       .select('id, created_at, status, prompt_version, market_context, regime')
+      .lt('created_at', beforeIso)
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw new Error(`transition replay: could not read decisions (${error.message}).`);
@@ -150,13 +151,24 @@ async function loadDecisions(supabase: SupabaseClient): Promise<RawDecision[]> {
  * plumbing), so the intent row is the order, and counting both would double every
  * figure in bloc B.
  */
-async function loadBookings(supabase: SupabaseClient): Promise<Booking[]> {
+/**
+ * Bookings are bounded by `decision_id`, NOT by timestamp.
+ *
+ * A booking is written after the decision row that produced it — cycle 1163's decision
+ * lands at 08:41:02.691 and its BNB sell at 08:41:03.544, a second later. Bounding the
+ * journal by the window's upper edge (which IS a decision timestamp) therefore drops the
+ * last cycle's own orders while keeping the cycle: bloc B would lose the C6 reference
+ * case and quietly report 41 orders instead of 42. A booking belongs to its cycle, so
+ * the cycle set is what bounds it.
+ */
+async function loadBookings(supabase: SupabaseClient, maxDecisionId: number): Promise<Booking[]> {
   const out: Booking[] = [];
   for (let from = 0; ; from += PAGE * 5) {
     const { data, error } = await supabase
       .from('executions')
       .select('id, created_at, decision_id, symbol, side, ledger_base_delta, ledger_quote_delta, valuation_price')
       .eq('validation_status', 'executed')
+      .lte('decision_id', maxDecisionId)
       .order('id', { ascending: true })
       .range(from, from + PAGE * 5 - 1);
     if (error) throw new Error(`transition replay: could not read executions (${error.message}).`);
@@ -313,12 +325,47 @@ export function toCycles(
   return { cycles, skippedNoBook };
 }
 
+/**
+ * The whole cycle stream, BOUNDED to the observation window that was captured earlier in
+ * the run.
+ *
+ * The bound is not defensive tidiness, it is required by the working conditions. The bot
+ * is running while this harness executes — that is deliberate, it keeps producing corpus
+ * — so a wake-up committed between `loadObservationWindow()` and this call would land in
+ * blocs B and C while bloc A, the header count and `window.toMs` all describe the earlier
+ * snapshot. The validations would not catch it either: T1 simply skips a cycle whose 4h
+ * bar is absent from the replayed timeline, so every check would pass on two populations
+ * that do not describe the same period.
+ *
+ * `arrivedDuringTheRun` reports how many rows the bound excluded, so the reader can see
+ * the race happen rather than infer it.
+ */
 export async function loadCycleStream(
   supabase: SupabaseClient,
-): Promise<{ cycles: Cycle[]; bookings: Booking[]; skippedNoBook: number }> {
-  const [decisions, bookings] = await Promise.all([loadDecisions(supabase), loadBookings(supabase)]);
+  untilMs: number,
+): Promise<{
+  cycles: Cycle[];
+  bookings: Booking[];
+  skippedNoBook: number;
+  arrivedDuringTheRun: number;
+}> {
+  // Postgres `timestamptz` keeps MICROSECONDS; a JS Date keeps milliseconds. Bounding
+  // with `<= new Date(untilMs).toISOString()` therefore truncates .691152 to .691 and
+  // drops the very row the window's upper bound was read from — silently losing the last
+  // cycle and its bookings. So the bound is exclusive at the next whole millisecond,
+  // which admits every sub-millisecond instant inside `untilMs` and nothing after it.
+  const beforeIso = new Date(untilMs + 1).toISOString();
+  const decisions = await loadDecisions(supabase, beforeIso);
+  const maxDecisionId = decisions.reduce((m, d) => (d.id > m ? d.id : m), 0);
+  const bookings = await loadBookings(supabase, maxDecisionId);
   const { cycles, skippedNoBook } = toCycles(decisions, bookings);
-  return { cycles, bookings, skippedNoBook };
+
+  const { count } = await supabase
+    .from('decisions')
+    .select('*', { count: 'exact', head: true })
+    .gte('created_at', beforeIso);
+
+  return { cycles, bookings, skippedNoBook, arrivedDuringTheRun: count ?? 0 };
 }
 
 /* ── The peak, replayed ───────────────────────────────────────────────────── */

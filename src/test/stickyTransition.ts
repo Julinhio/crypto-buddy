@@ -282,4 +282,47 @@ const D: AssetRegime = 'trend_down';
   passed += 1;
 }
 
+{
+  // Coverage is checked at BOTH ends and in the MIDDLE. Guarding only the right end
+  // still lets a feed that starts late, or that drops a bar somewhere inside, return a
+  // minimum over an unknown subset — the same plausible-partial-window value, reached
+  // from a different direction.
+  const bar = (i: number, low: number): Candle => ({
+    timestamp: i * H4_MS,
+    open: 100,
+    high: 110,
+    low,
+    close: 100,
+    volume: 1,
+  });
+
+  const late = [bar(2, 80), bar(3, 81)];
+  assert.equal(
+    lowestBetween(late, 0, 4 * H4_MS, H4_MS),
+    null,
+    'a series that starts after fromMs cannot claim to cover the interval',
+  );
+
+  const holed = [bar(0, 90), bar(1, 91), /* bar 2 missing */ bar(3, 70)];
+  assert.equal(
+    lowestBetween(holed, 0, 4 * H4_MS, H4_MS),
+    null,
+    'a hole inside the interval is refused, not silently skipped over',
+  );
+
+  const whole = [bar(0, 90), bar(1, 91), bar(2, 85), bar(3, 70)];
+  assert.equal(lowestBetween(whole, 0, 4 * H4_MS, H4_MS)!.toNumber(), 70, 'a complete interval resolves');
+
+  // The same middle-of-the-series hole must not let `closeAt` answer with a price from
+  // the far side of the gap.
+  assert.equal(
+    closeAt(holed, 3 * H4_MS, H4_MS),
+    null,
+    'a close requested inside a gap is null, not the last bar before the gap',
+  );
+  assert.equal(closeAt(whole, 3 * H4_MS, H4_MS)!.toNumber(), 100, 'and resolves when the bar is there');
+  console.log('  ok: interval coverage is verified at both ends and through the middle');
+  passed += 1;
+}
+
 console.log(`\n${passed} sticky-transition invariant checks passed.`);

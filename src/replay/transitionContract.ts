@@ -11,6 +11,7 @@ import { fetchCandlesSince } from './klines.js';
 import { PEAK_STOP_THRESHOLDS, closeAt, runPeakStop, type StopEpisode, type StopRun } from './peakStop.js';
 import {
   freezeRuns,
+  startedBefore,
   stickyAt,
   stickyTimelines,
   type FreezeRun,
@@ -107,13 +108,37 @@ interface FreezeStats {
   longestHours: number;
   longestOpenEnded: boolean;
   abortedReturns: number;
+  /** Runs that were already frozen when the window opened — measured whole, not truncated. */
+  startedBeforeWindow: number;
 }
 
-function blocA(sticky: Record<string, StickyPoint[]>, assets: string[]): FreezeStats[] {
+/**
+ * Bloc A's two statistics come from two different views, and mixing them up censors the
+ * data at the window's left edge.
+ *
+ * The freeze RATE is a property of the observation window, so it is counted on the bars
+ * inside it. But a freeze that was already running when the window opened is a real
+ * episode with a real duration, and slicing first would make its first retained bar look
+ * like its start — reporting a truncated length as exact, and feeding it to the median,
+ * the tail and the maximum. That is the same defect as an open-ended run at the other
+ * edge, which the module already refuses to close silently.
+ *
+ * So DURATIONS are extracted from the full walk (warm-up included, where the true start
+ * lives) and then filtered to the runs that overlap the window. Nothing is censored, and
+ * `startedBeforeWindow` marks the ones that reach back past the opening bar.
+ */
+function blocA(
+  sticky: Record<string, StickyPoint[]>,
+  stickyFull: Record<string, StickyPoint[]>,
+  assets: string[],
+  window: { fromMs: number; toMs: number },
+): FreezeStats[] {
   const stats: FreezeStats[] = [];
   for (const asset of assets) {
     const timeline = sticky[asset] ?? [];
-    const runs = freezeRuns(asset, timeline, barMs);
+    const runs = freezeRuns(asset, stickyFull[asset] ?? [], barMs).filter(
+      (r) => r.toMs + barMs >= window.fromMs && r.fromMs + barMs <= window.toMs,
+    );
     const frozenBars = timeline.filter((p) => p.frozen).length;
     const longest = runs.reduce<FreezeRun | null>((best, r) => (best == null || r.bars > best.bars ? r : best), null);
     stats.push({
@@ -126,6 +151,7 @@ function blocA(sticky: Record<string, StickyPoint[]>, assets: string[]): FreezeS
       longestHours: longest?.hours ?? 0,
       longestOpenEnded: longest?.openEnded ?? false,
       abortedReturns: runs.filter((r) => r.abortedReturn).length,
+      startedBeforeWindow: runs.filter((r) => startedBefore(r, window.fromMs)).length,
     });
   }
   return stats;
@@ -156,6 +182,10 @@ function printBlocA(stats: FreezeStats[]): void {
       `${String(stats.reduce((s, a) => s + a.abortedReturns, 0)).padStart(18)}`,
   );
   console.log('   (≥ marks a run still open at the window\'s last bar — its duration is a lower bound)');
+  console.log(
+    `   runs already frozen when the window opened: ${stats.reduce((s, a) => s + a.startedBeforeWindow, 0)} ` +
+      `— measured whole from the warm-up walk, never truncated at the boundary`,
+  );
 
   subsection('distribution of freeze durations (all assets, in 4h bars)');
   const histogram = new Map<number, number>();
@@ -226,6 +256,7 @@ function blocB(
   cycles: Cycle[],
   sticky: Record<string, StickyPoint[]>,
   series: Record<string, Candle[]>,
+  priceBarMs: number,
 ): OrderVerdict[] {
   const byId = new Map(cycles.map((c) => [c.id, c]));
   const verdicts: OrderVerdict[] = [];
@@ -247,7 +278,7 @@ function blocB(
         if (thaw != null) {
           const actionableAtMs = thaw.timestamp + barMs;
           delayHours = (actionableAtMs - host.generatedAtMs) / HOUR_MS;
-          const later = closeAt(series[booking.asset] ?? [], actionableAtMs, barMs);
+          const later = closeAt(series[booking.asset] ?? [], actionableAtMs, priceBarMs);
           if (later != null && booking.valuationPrice.gt(0)) {
             const move = later.minus(booking.valuationPrice).div(booking.valuationPrice).times(100).toNumber();
             delayImprovementPercent = booking.side === 'sell' ? move : -move;
@@ -800,15 +831,28 @@ async function main(): Promise<number> {
   const dailyFrom = window.fromMs - 260 * DAY_MS;
   const h4From = window.fromMs - 60 * DAY_MS;
   const universe: Record<string, { daily: Candle[]; h4: Candle[] }> = {};
+  // A SEPARATE 1h series, used only to measure the price path around a stop episode.
+  // Episode boundaries are cycle timestamps and never land on bar boundaries, so a bar
+  // straddling the exit or the re-entry cannot be counted (its low may have printed
+  // outside the episode) — at 4h that discards up to eight hours of an episode that may
+  // itself be eleven hours long. At 1h the unresolvable residue is an hour at each end.
+  // The REGIME stays on 4h: that is what production computes, and it does not move.
+  const priceSeries: Record<string, Candle[]> = {};
+  const priceBarMs = timeframeMs('1h');
   for (const symbol of [...config.tradablePairs, ...config.referencePairs]) {
     const base = symbol.split('/')[0];
     if (!base) continue;
-    const [daily, h4] = await Promise.all([
+    const [daily, h4, h1] = await Promise.all([
       fetchCandlesSince(client, symbol, config.primaryTimeframe, dailyFrom),
       fetchCandlesSince(client, symbol, config.regime.timeframe, h4From),
+      fetchCandlesSince(client, symbol, '1h', window.fromMs - DAY_MS),
     ]);
     universe[base] = { daily, h4 };
-    console.log(`[replay] ${symbol}: ${daily.length} × ${config.primaryTimeframe}, ${h4.length} × ${config.regime.timeframe}`);
+    priceSeries[base] = h1;
+    console.log(
+      `[replay] ${symbol}: ${daily.length} × ${config.primaryTimeframe}, ` +
+        `${h4.length} × ${config.regime.timeframe}, ${h1.length} × 1h (price path)`,
+    );
   }
 
   const fullTimeline = regimeTimeline(universe, config.regime.thresholds, replayRegimeOptions());
@@ -845,11 +889,16 @@ async function main(): Promise<number> {
   const tradable = tradableBaseAssets(config).filter((a) => sticky[a] != null);
   const allAssets = Object.keys(sticky);
 
-  const { cycles, bookings, skippedNoBook } = await loadCycleStream(supabase);
+  // Bounded to the window captured above — the bot is live and keeps committing rows.
+  const { cycles, bookings, skippedNoBook, arrivedDuringTheRun } = await loadCycleStream(
+    supabase,
+    window.toMs,
+  );
   const { snapshots } = replayPeaks(cycles);
   console.log(
     `[replay] ${cycles.length} cycles, ${bookings.length} sovereign bookings, ` +
-      `${skippedNoBook} row(s) without a valued book (excluded).`,
+      `${skippedNoBook} row(s) without a valued book (excluded), ` +
+      `${arrivedDuringTheRun} row(s) committed by the live bot after the window was captured (excluded).`,
   );
 
   section('VALIDATIONS — what has to be true before any number below means anything');
@@ -858,13 +907,19 @@ async function main(): Promise<number> {
   validatePeaks(cycles, snapshots);
   validateWarmUp(stickyFull, allAssets, warmUpBars, fullTimeline.length - warmUpBars - points.length);
 
-  const series: Record<string, Candle[]> = {};
-  for (const [asset, s] of Object.entries(universe)) series[asset] = s.h4;
-
-  printBlocA(blocA(sticky, allAssets));
-  printBlocB(blocB(cycles, stickyFull, series), stickyFull);
+  printBlocA(blocA(sticky, stickyFull, allAssets, window));
+  printBlocB(blocB(cycles, stickyFull, priceSeries, priceBarMs), stickyFull);
   const runs = PEAK_STOP_THRESHOLDS.map((threshold) =>
-    runPeakStop({ threshold, cycles, snapshots, sticky: stickyFull, series, assets: tradable, barMs }),
+    runPeakStop({
+      threshold,
+      cycles,
+      snapshots,
+      sticky: stickyFull,
+      series: priceSeries,
+      assets: tradable,
+      barMs,
+      priceBarMs,
+    }),
   );
   section('BLOC C — calibrating the peak stop');
   printDrawdownProfile(cycles, snapshots, stickyFull, tradable);
