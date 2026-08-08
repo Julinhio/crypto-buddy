@@ -191,18 +191,41 @@ async function main(): Promise<number> {
       'no frozen asset-cycle survives the stop on this tape — the invariant is not exercised.',
     ]);
   } else {
-    // The mirror, and it is the one that matters: WITHOUT the injection those very same
-    // sells are refused. An invariant that passed both ways would be measuring nothing.
-    const refusedWithout = frozenNotStopped.filter((p) => judgeOrder(p.actual, 'sell').verdict === 'forbidden');
+    // THE MIRROR, and it only makes sense on the pairs the injection actually CHANGES.
+    //
+    // Today `cycle.riskOff` is false everywhere, so "flipped by the injection" and "frozen
+    // and not stopped" are the same set. They stop being the same set the day the real tape
+    // finally carries a confirmed override: on such a pair `p.actual` is ALREADY
+    // `risk_off_reduction` and its sell is already allowed — correct production behaviour,
+    // which a mirror demanding "refused without the injection" over every pair would report
+    // as a failure. The harness would then cry wolf on precisely the episode it was built
+    // to prepare for.
+    //
+    // So the two populations are separated: the injection's effect is measured where it
+    // flips the boolean, and the pairs that already had the override are checked for what
+    // they should independently show — a sell already allowed, with no help from us.
+    const flipped = frozenNotStopped.filter((p) => !p.actual.riskOff && p.forced.riskOff);
+    const alreadyOn = frozenNotStopped.filter((p) => p.actual.riskOff);
+    const refusedWithout = flipped.filter((p) => judgeOrder(p.actual, 'sell').verdict === 'forbidden');
+    const allowedNatively = alreadyOn.filter((p) => judgeOrder(p.actual, 'sell').verdict === 'allowed');
+
     check(
       'I2',
       'a reduction on a frozen asset is allowed under a confirmed risk_off',
-      sellsAllowed.length === frozenNotStopped.length && refusedWithout.length === frozenNotStopped.length,
+      sellsAllowed.length === frozenNotStopped.length &&
+        refusedWithout.length === flipped.length &&
+        allowedNatively.length === alreadyOn.length,
       [
         `${frozenNotStopped.length} frozen asset-cycles not being stopped out`,
         `sells ALLOWED with the override: ${sellsAllowed.length}/${frozenNotStopped.length}`,
-        `the same sells REFUSED without it: ${refusedWithout.length}/${frozenNotStopped.length} ` +
-          '— the rung is doing the work, not the freeze quietly lifting on its own',
+        `of those, ${flipped.length} are flipped false → true by the injection; the same sells are ` +
+          `REFUSED without it: ${refusedWithout.length}/${flipped.length} — the rung is doing the work, ` +
+          'not the freeze quietly lifting on its own',
+        alreadyOn.length === 0
+          ? 'and 0 already carried a confirmed override on the real tape — which is exactly why this ' +
+            'harness exists; the day that count is non-zero, the rung is being exercised for real'
+          : `and ${alreadyOn.length} already carried a confirmed override, whose sells are allowed ` +
+            `without any injection: ${allowedNatively.length}/${alreadyOn.length}`,
       ],
     );
   }
