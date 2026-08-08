@@ -77,12 +77,26 @@ export interface CoherenceInput {
    */
   strategy: StrategyVersion;
   actionType: ActionType;
-  /** The allocation the model emitted this cycle. */
-  targetAllocation: Record<string, number>;
+  /**
+   * This cycle's EFFECTIVE target — the risk-bounded allocation the chain will actually
+   * pursue, not the model's raw emission.
+   *
+   * It must be the same KIND of value as `referenceTarget`, and that symmetry is the
+   * whole point. The reference is read back from `applied_allocation`, so comparing a raw
+   * proposal against it would reject an honest hold the moment the two diverge: a model
+   * that re-emits an over-cap proposal unchanged would see raw 40% measured against
+   * applied 35% and be told its "hold moved the target", when the book pursued 35% both
+   * times. Effective on one side, effective on the other.
+   *
+   * Identical to the raw emission on the whole corpus (the clamp has never fired), which
+   * is why this can be corrected now at zero behavioural cost.
+   */
+  effectiveTarget: Record<string, number>;
   /**
    * The last target the guard ACCEPTED — read from the DB every cycle, never carried
    * in memory (the bot runs one process per wake-up under Cron Schedule, so there is
-   * no memory to carry it in). Null only when no decision has ever been recorded.
+   * no memory to carry it in). Resolved from `applied_allocation` (see
+   * `resolveEffectiveTarget`). Null only when no decision has ever been recorded.
    */
   referenceTarget: Record<string, number> | null;
   /** The movements the real pipeline produced for this target. The 2% floor already applied. */
@@ -179,7 +193,7 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   const {
     strategy,
     actionType,
-    targetAllocation,
+    effectiveTarget,
     referenceTarget,
     movements,
     reserveAsset,
@@ -201,9 +215,9 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   // Restated in this cycle's universe first — a feed that dropped an asset forces its
   // weight to be reassigned, and that reassignment is the code's doing, not the model's.
   const reference = referenceTarget
-    ? referenceInCurrentUniverse(targetAllocation, referenceTarget, reserveAsset)
+    ? referenceInCurrentUniverse(effectiveTarget, referenceTarget, reserveAsset)
     : null;
-  const moved = reference ? movedAssets(targetAllocation, reference) : [];
+  const moved = reference ? movedAssets(effectiveTarget, reference) : [];
   const targetChanged = moved.length > 0;
 
   // ── Rule 1 — a hold cannot modify the reference target ────────────────────────
@@ -221,7 +235,7 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
       assets: moved,
       detail:
         `action_type is "hold" but the target moved on ${moved.join(', ')}: ` +
-        `reference [${fmt(reference)}] → emitted [${fmt(targetAllocation)}]. ` +
+        `reference [${fmt(reference)}] → emitted [${fmt(effectiveTarget)}]. ` +
         'A hold keeps the reference target; a changed target is not a hold.',
     });
   }

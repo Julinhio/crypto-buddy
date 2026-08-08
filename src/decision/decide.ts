@@ -581,7 +581,13 @@ export async function decide(): Promise<DecideResult> {
           // disaster-recovery posture. See CoherenceInput.strategy.
           strategy: STRATEGY_VERSION,
           actionType: decision.actionType,
-          targetAllocation: decision.targetAllocation,
+          // The CLAMPED target, not the raw emission: the reference it is compared against
+          // is resolved from `applied_allocation`, so both operands have to be effective
+          // targets. Feeding the raw one would reject an honest hold the day the clamp (or
+          // the transition gate) makes the two differ — the model would re-emit an
+          // unchanged over-cap proposal and be told its hold moved the target, while the
+          // book pursued the same bounded allocation both times.
+          effectiveTarget: clamp.applied,
           referenceTarget: referenceRead.target,
           movements,
           reserveAsset: reserveStable,

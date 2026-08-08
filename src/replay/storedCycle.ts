@@ -61,6 +61,18 @@ export interface StoredCycle {
   created_at: string;
   raw_response: string;
   market_context: StoredContext;
+  /**
+   * The two allocation columns AS PERSISTED, carried so the reference chain can advance on
+   * the value production actually wrote rather than on one recomputed here.
+   *
+   * The distinction is empty today and will not stay that way. Re-running `clampAllocation`
+   * applies TODAY's caps to a historical target: change a cap, or let another deterministic
+   * gate adjust the target, and the recomputed value stops being what the row holds — every
+   * later verdict in the chain would then diverge from the guard chain that actually ran.
+   * The row is the fact; the recomputation is a guess that happens to be right for now.
+   */
+  target_allocation: unknown;
+  applied_allocation: unknown;
 }
 
 /** The virtual book EXACTLY as that cycle saw it. */
@@ -198,7 +210,9 @@ export function judge(
     // The corpus is v5 by construction (`loadCorpus` filters on prompt_version).
     strategy: 'v5',
     actionType: decision.actionType,
-    targetAllocation: decision.targetAllocation,
+    // The clamped target — the same operand production now feeds the guard, so the replay
+    // cannot judge on a different basis from the live path.
+    effectiveTarget: clamp.applied,
     referenceTarget,
     movements,
     reserveAsset: book.reserveAsset,
@@ -262,12 +276,17 @@ export function replayInOrder(cycles: StoredCycle[]): ReplayStep[] {
     const verdict = replayCycle(cycle, referenceTarget);
     steps.push({ cycle, verdict, referenceTarget });
     if (verdict.kind === 'accepted') {
-      // Through the SAME resolver production uses, on the row this cycle would have
-      // written. Going straight to `verdict.appliedAllocation` would give the identical
-      // value today and would be a second definition tomorrow.
+      // Through the SAME resolver production uses, on the row AS PERSISTED — production
+      // reads `applied_allocation` back out of the table, so the replay must read the same
+      // column rather than recompute an equivalent.
+      //
+      // The recomputed clamp is the fallback for a row that carries no applied allocation
+      // (none does today). It is a genuine fallback, not a preference: re-clamping applies
+      // today's caps to a historical target, so it answers a different question the moment
+      // a cap changes.
       reference = resolveEffectiveTarget({
-        target_allocation: verdict.decision.targetAllocation,
-        applied_allocation: verdict.appliedAllocation,
+        target_allocation: cycle.target_allocation ?? verdict.decision.targetAllocation,
+        applied_allocation: cycle.applied_allocation ?? verdict.appliedAllocation,
       }).allocation;
     }
   }
@@ -284,7 +303,7 @@ export async function loadCorpus(
   for (let from = 0; ; from += PAGE) {
     let query = supabase
       .from('decisions')
-      .select('id, created_at, raw_response, market_context')
+      .select('id, created_at, raw_response, market_context, target_allocation, applied_allocation')
       .eq('status', 'decided')
       .eq('prompt_version', 'v5')
       .not('raw_response', 'is', null)
