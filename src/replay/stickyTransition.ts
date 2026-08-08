@@ -54,12 +54,38 @@ import type { AssetRegime, RegimePoint } from '../market/regime.js';
 /** One asset at one 4h bar, under the sticky rule. */
 export interface StickyPoint {
   timestamp: number;
-  /** The regime confirmed by three identical raw bars — equal to production's. */
+  /**
+   * The regime confirmed by three identical raw bars — equal to production's, ALWAYS.
+   *
+   * It is driven by `labelRun`, not by `runLength`, and that separation is the whole
+   * point. Production's `Hysteresis` never sees timestamps: it consumes a sequence of
+   * labels and confirms on the third identical one, hole or no hole. If the gap-aware
+   * counter also drove this field, a hole would stop the sticky walk from confirming a
+   * label that production DID confirm — the two would disagree, and the claim this
+   * module rests on ("it gates, it never relabels", validated as T0) would simply be
+   * false on any grid with a missing bar.
+   *
+   * So the two questions are answered by two counters: what does production believe the
+   * regime is (`labelRun` → `active`), and have we actually observed three consecutive
+   * bars of it (`runLength` → `actionable`). A hole makes the second answer no while
+   * leaving the first untouched, which is exactly the intended conservatism.
+   */
   active: AssetRegime;
   /** The unsmoothed label at this bar (the input the rule reads). */
   raw: AssetRegime;
-  /** Consecutive bars, this one included, on which `raw` has been unchanged. */
+  /**
+   * Consecutive OBSERVED bars, this one included, on which `raw` has been unchanged. A
+   * hole in the grid restarts it — this is the counter the actionability gate reads.
+   */
   runLength: number;
+  /**
+   * The same count WITHOUT gap awareness: pure label equality, exactly as production's
+   * `Hysteresis` counts. It drives `active` and nothing else.
+   *
+   * Equal to `runLength` on a gap-free grid, which is why the two were one counter until
+   * a hole showed they answer different questions — see the note on `active`.
+   */
+  labelRun: number;
   /** `runLength >= confirmations` — the asset may be traded on this bar. */
   actionable: boolean;
   /**
@@ -97,7 +123,10 @@ export function stickyTimeline(
   const out: StickyPoint[] = [];
   let previousRaw: AssetRegime | null = null;
   let previousTimestamp: number | null = null;
+  // Two counters, deliberately. `runLength` is gap-aware and gates actionability;
+  // `labelRun` ignores holes and mirrors production's Hysteresis, which decides `active`.
   let runLength = 0;
+  let labelRun = 0;
   // Before the first confirmation there is no confirmed regime. The first raw label
   // seeds it, exactly as production's `Hysteresis` is constructed with the first raw
   // reading — otherwise the two walks would start from different states and the
@@ -114,11 +143,16 @@ export function stickyTimeline(
     // back to back, so an unobserved bar restarts the count rather than being assumed
     // unchanged.
     const contiguous = previousTimestamp != null && bar.timestamp - previousTimestamp === barMs;
-    runLength = contiguous && bar.raw === previousRaw ? runLength + 1 : 1;
+    const sameLabel = bar.raw === previousRaw;
+    runLength = contiguous && sameLabel ? runLength + 1 : 1;
+    // NOT gap-aware, on purpose: production's Hysteresis counts labels, not timestamps,
+    // so mirroring it is the only way `active` can stay identical to production's across
+    // a hole. See the note on StickyPoint.active.
+    labelRun = sameLabel ? labelRun + 1 : 1;
     previousRaw = bar.raw;
     previousTimestamp = bar.timestamp;
     active ??= bar.raw;
-    if (runLength >= confirmations) active = bar.raw;
+    if (labelRun >= confirmations) active = bar.raw;
 
     const actionable = runLength >= confirmations;
     out.push({
@@ -126,6 +160,7 @@ export function stickyTimeline(
       active,
       raw: bar.raw,
       runLength,
+      labelRun,
       actionable,
       frozen: !actionable,
     });

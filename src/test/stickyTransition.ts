@@ -256,6 +256,26 @@ const D: AssetRegime = 'trend_down';
   assert.equal(t[2]!.actionable, false, 'the bar after the hole cannot inherit the run before it');
   assert.equal(t[4]!.actionable, true, 'three genuinely consecutive bars still confirm');
 
+  // ...but the CONFIRMED LABEL must not be held back by the hole. Production's
+  // `Hysteresis` counts labels, never timestamps, so it confirms `range` on the third
+  // identical reading whatever the grid did. If the gap-aware counter also drove
+  // `active`, the two walks would disagree and T0 — "the rule gates, it never
+  // relabels" — would be false on any grid with a missing bar.
+  assert.deepEqual(
+    t.map((p) => p.labelRun),
+    [1, 2, 3, 4, 5],
+    'the label run ignores the hole, exactly as production does',
+  );
+  const production = new Hysteresis<AssetRegime>(withHole[0]!.raw, CONFIRMATIONS);
+  for (let i = 0; i < withHole.length; i += 1) {
+    assert.equal(
+      t[i]!.active,
+      production.push(withHole[i]!.raw).value,
+      `the confirmed label diverged from production at index ${i} — across a hole`,
+    );
+  }
+  assert.equal(t[2]!.frozen, true, 'frozen on the post-hole bar, though the label is confirmed');
+
   // And a freeze spanning a hole reports ELAPSED time, not observation count: bars 0-3
   // are frozen, which is four bars of wall clock (16h) even though only three were seen.
   const runs = freezeRuns('BTC', t, H4_MS);
