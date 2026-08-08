@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import type { Candle } from '../market/klines.js';
 import { Hysteresis, type AssetRegime } from '../market/regime.js';
 import { closeAt, closedBy, lowestBetween } from '../replay/peakStop.js';
-import { freezeRuns, stickyAt, stickyTimeline } from '../replay/stickyTransition.js';
+import { stickyAt, stickyTimeline } from '../market/transition.js';
+import { freezeRuns } from '../replay/stickyTransition.js';
 
 /**
  * Invariants of the STICKY TRANSITION rule — run with `npm test` (tsx). No framework.

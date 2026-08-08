@@ -16,15 +16,8 @@ import {
   type StopEpisode,
   type StopRun,
 } from './peakStop.js';
-import {
-  freezeRuns,
-  gridGaps,
-  startedBefore,
-  stickyAt,
-  stickyTimelines,
-  type FreezeRun,
-  type StickyPoint,
-} from './stickyTransition.js';
+import { stickyAt, stickyTimelines, type StickyPoint } from '../market/transition.js';
+import { freezeRuns, gridGaps, startedBefore, type FreezeRun } from './stickyTransition.js';
 import { loadCycleStream, replayPeaks, type Booking, type Cycle } from './transitionCycles.js';
 import { fmtBar, loadObservationWindow, pct, replayRegimeOptions, withinWindow } from './window.js';
 

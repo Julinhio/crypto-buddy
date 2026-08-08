@@ -1,5 +1,10 @@
 import { config, tradableBaseAssets, STRATEGY_VERSION, COHERENCE_GUARD } from '../config/index.js';
-import { dec } from '../money.js';
+import { Decimal, ZERO, dec, toNumericString } from '../money.js';
+import { evaluateTransition, judgeOrder } from '../transition/gate.js';
+import {
+  saveTransitionObservations,
+  toObservationRow,
+} from '../persistence/transitionObservations.js';
 import { buildMarketContext, type MarketContext } from '../context/build.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
 import {
@@ -236,6 +241,84 @@ export async function decide(): Promise<DecideResult> {
       console.error('[CRITICAL] this cycle produced no position-state write — see the payload above.');
     }
   };
+  /**
+   * THE TRANSITION LAYER, IN OBSERVE MODE.
+   *
+   * Computes what the gate WOULD have done with this cycle — actionability, peak stop,
+   * priority ladder — and journals it. It blocks nothing and creates nothing: the return
+   * value is `void`, no caller reads it, and the model's allocation is applied exactly as
+   * it was before this brick existed.
+   *
+   * That inertness is structural, not a promise. This closure runs AFTER the movements
+   * have been computed, judged by the guard, booked and executed; it receives the ledger
+   * they produced as an INPUT. There is no path by which its verdict could reach
+   * `clampAllocation`, `computeMovements` or `executeMovements`, and its writer is
+   * best-effort by contract, so it cannot fail a cycle either.
+   *
+   * Called on every path that reached a valued book, mirroring `persistLifecycle` and for
+   * the same reason: the gate's state is a reading of the MARKET, and a wake-up that
+   * skipped, errored or failed the guard still passed through a transition or did not.
+   * Dropping those cycles would leave holes in exactly the series the blocking decision
+   * will be read from.
+   *
+   * The book it judges is the PRE-TRADE one (`portfolio`), never the résultante: the gate
+   * is a counterfactual about the decision that was taken, and that decision was taken
+   * against the book as it stood at the start of the cycle.
+   */
+  const observeTransition = async (
+    decisionId: number | null,
+    bookedLedger: LedgerEntry[],
+  ): Promise<void> => {
+    // No decision row means no foreign key to hang the observation on. Nothing is lost
+    // that was not already lost: the cycle itself was not journaled either.
+    if (decisionId == null) return;
+
+    const stale = new Map(portfolio.positions.map((p) => [p.asset, p.priceStale]));
+    const held = new Map(portfolio.positions.map((p) => [p.asset, p.qty]));
+
+    // What actually booked on each asset this cycle, netted — the same aggregation the
+    // lifecycle does, so "the order this cycle placed" means one thing in both journals.
+    const booked = new Map<string, { side: 'buy' | 'sell'; notional: Decimal }>();
+    for (const entry of bookedLedger) {
+      const asset = entry.symbol.split('/')[0];
+      if (!asset) continue;
+      const notional = entry.baseDelta.abs().times(entry.valuationPrice);
+      const side: 'buy' | 'sell' = entry.baseDelta.gt(0) ? 'buy' : 'sell';
+      const prior = booked.get(asset);
+      booked.set(
+        asset,
+        prior && prior.side === side ? { side, notional: prior.notional.plus(notional) } : { side, notional },
+      );
+    }
+
+    const rows = tradableBaseAssets(config).map((asset) => {
+      const verdict = evaluateTransition({
+        asset,
+        sticky: context.transition?.perAsset[asset] ?? null,
+        // The CONFIRMED posture, never the raw one: an unconfirmed risk_off must not be
+        // able to lift an individual freeze.
+        riskOffConfirmed: context.regime?.global.riskOff ?? false,
+        qty: held.get(asset) ?? ZERO,
+        price: priceOf(asset),
+        priceStale: stale.get(asset) ?? false,
+        // LAST cycle's stored peak. `evaluateStop` ratchets it with this cycle's price
+        // itself, exactly as `toDecisionContext` does for the model.
+        peakPriceSinceEntry: stateRead.states.get(asset)?.peakPriceSinceEntry ?? null,
+        stopThresholdPercent: config.transition.peakStopPercent,
+      });
+      const order = booked.get(asset);
+      return toObservationRow(
+        decisionId,
+        verdict,
+        order == null
+          ? null
+          : { side: order.side, notional: toNumericString(order.notional), ...judgeOrder(verdict, order.side) },
+      );
+    });
+
+    await saveTransitionObservations(supabase, rows);
+  };
+
   // The AI sees the virtual book, not the testnet balances.
   const decisionContext = toDecisionContext(context, portfolio, STRATEGY_VERSION, stateRead.states);
 
@@ -283,6 +366,7 @@ export async function decide(): Promise<DecideResult> {
     const row = makeRow(decisionContext, context.regime, gitSha, { status: 'skipped', skip_reason: skipReason });
     const { persisted, id } = await insertDecision(supabase, row);
     await persistLifecycle(portfolio, []);
+    await observeTransition(id, []);
     return emptyResult('skipped', persisted, id, row, portfolio);
   }
 
@@ -368,6 +452,7 @@ export async function decide(): Promise<DecideResult> {
     const { persisted, id } = await insertDecision(supabase, row);
     await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
+    await observeTransition(id, []);
     return emptyResult('error', persisted, id, row, portfolio);
   }
 
@@ -407,6 +492,7 @@ export async function decide(): Promise<DecideResult> {
     const { persisted, id } = await insertDecision(supabase, row);
     guardEvents.push(event);
     await persistLifecycle(portfolio, []);
+    await observeTransition(id, []);
     // After persistLifecycle, so anything it queued is written too. It cannot queue a
     // refusal here (it is called with no notes), but the ordering is the same on every
     // path so nobody has to remember which one is the exception.
@@ -463,6 +549,7 @@ export async function decide(): Promise<DecideResult> {
     const { persisted, id } = await insertDecision(supabase, row);
     await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
+    await observeTransition(id, []);
     return emptyResult('parse_failed', persisted, id, row, portfolio);
   }
 
@@ -738,6 +825,10 @@ export async function decide(): Promise<DecideResult> {
   // Written from the POST-trade book, so an entry, a reinforcement and a full exit all
   // land in the cycle that caused them.
   await persistLifecycle(portfolioAfter, bookedLedger, v.positionNotes);
+  // The layer sees what actually BOOKED, so its order verdicts judge the movements that
+  // really happened rather than the ones that were merely computed. Runs after every
+  // order is placed, and its result is discarded — see the closure's header.
+  await observeTransition(id, bookedLedger);
 
   // THE SECOND FLUSH, and it is the one that matters on this path. `persistLifecycle`
   // can queue a `thesis_write_refused` that no earlier flush could have seen: the guard

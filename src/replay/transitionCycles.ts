@@ -92,6 +92,15 @@ export interface Cycle {
   regimeBarAtMs: number | null;
   /** Per-asset regime journal, or null when this cycle journaled none. */
   regime: Map<string, CycleRegimeAsset> | null;
+  /**
+   * The CONFIRMED global risk_off posture this cycle journaled — the one after
+   * hysteresis, never the raw reading. Null when the cycle journaled no regime.
+   *
+   * Read rather than recomputed because it is an INPUT to the transition layer's second
+   * rung, and the point of a replay is to feed the production function the values the bot
+   * actually held.
+   */
+  riskOff: boolean | null;
   /** Sovereign bookings attributed to this cycle, in id order. */
   bookings: Booking[];
 }
@@ -196,12 +205,19 @@ async function loadBookings(supabase: SupabaseClient, maxDecisionId: number): Pr
 
 /* ── Shaping ──────────────────────────────────────────────────────────────── */
 
-function parseRegime(journal: unknown): { barAtMs: number | null; assets: Map<string, CycleRegimeAsset> | null } {
-  if (journal == null || typeof journal !== 'object') return { barAtMs: null, assets: null };
+function parseRegime(journal: unknown): {
+  barAtMs: number | null;
+  assets: Map<string, CycleRegimeAsset> | null;
+  riskOff: boolean | null;
+} {
+  const nothing = { barAtMs: null, assets: null, riskOff: null };
+  if (journal == null || typeof journal !== 'object') return nothing;
   const j = journal as Record<string, unknown>;
   const barAt = typeof j.barAt === 'string' ? Date.parse(j.barAt) : Number.NaN;
+  const global = j.global as Record<string, unknown> | undefined;
+  const riskOff = typeof global?.riskOff === 'boolean' ? global.riskOff : null;
   const raw = j.assets;
-  if (raw == null || typeof raw !== 'object') return { barAtMs: null, assets: null };
+  if (raw == null || typeof raw !== 'object') return nothing;
 
   const assets = new Map<string, CycleRegimeAsset>();
   for (const [asset, entry] of Object.entries(raw as Record<string, Record<string, unknown>>)) {
@@ -216,7 +232,7 @@ function parseRegime(journal: unknown): { barAtMs: number | null; assets: Map<st
       bounceConsumed: typeof signals.bounceConsumed === 'boolean' ? signals.bounceConsumed : null,
     });
   }
-  return { barAtMs: Number.isFinite(barAt) ? barAt : null, assets };
+  return { barAtMs: Number.isFinite(barAt) ? barAt : null, assets, riskOff };
 }
 
 /**
@@ -304,7 +320,7 @@ export function toCycles(
       });
     }
 
-    const { barAtMs, assets: regime } = parseRegime(row.regime);
+    const { barAtMs, assets: regime, riskOff } = parseRegime(row.regime);
 
     cycles.push({
       id: row.id,
@@ -318,6 +334,7 @@ export function toCycles(
       assets,
       regimeBarAtMs: barAtMs,
       regime,
+      riskOff,
       bookings: (byDecision.get(row.id) ?? []).sort((a, b) => a.id - b.id),
     });
   }

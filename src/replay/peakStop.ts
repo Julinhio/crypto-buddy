@@ -1,8 +1,8 @@
 import { config } from '../config/index.js';
 import type { Candle } from '../market/klines.js';
 import { Decimal, dec } from '../money.js';
-import type { StickyPoint } from './stickyTransition.js';
-import { stickyAt } from './stickyTransition.js';
+import type { StickyPoint } from '../market/transition.js';
+import { stickyAt } from '../market/transition.js';
 import type { Cycle, LifecycleSnapshot } from './transitionCycles.js';
 
 /**
