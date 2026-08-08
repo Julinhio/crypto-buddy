@@ -84,6 +84,8 @@ export interface Cycle {
   generatedAtMs: number;
   generatedAt: string;
   status: string;
+  /** `decisions.skip_reason` — null unless the cycle was skipped. See `expectsObservation`. */
+  skipReason: string | null;
   promptVersion: string;
   equity: Decimal;
   reserveAsset: string;
@@ -105,6 +107,59 @@ export interface Cycle {
   bookings: Booking[];
 }
 
+/**
+ * Should this cycle have written transition observations?
+ *
+ * `decide()` has TWO skipped paths and they behave differently, so status alone cannot
+ * answer:
+ *
+ *  - EDGE CASE 0 — the execution journal, the stored position state or the guard's
+ *    reference target could not be read. It journals a `skipped` row and returns BEFORE
+ *    both `persistLifecycle` and `observeTransition`, deliberately: writing anything from
+ *    a fallback book is the very thing that path avoids. No observation is correct.
+ *  - EDGE CASE 1 — no tradable pair returned usable data. It DOES call
+ *    `observeTransition`, so an observation is expected, and its absence means a lost
+ *    write (the writer's deadline firing, say) rather than an intentional abstention.
+ *
+ * Exempting every `skipped` cycle would hide the second case entirely — and the layer's
+ * 5s write deadline makes a lost batch more likely, not less. So the exemption is granted
+ * POSITIVELY, on the recognised edge-case-0 wording, and everything else is expected to
+ * have written. That direction matters: an unrecognised skip reason turns the check RED
+ * and gets looked at, rather than being waved through as "probably fine".
+ *
+ * Matching on the reason text is not elegant, and it is the only discriminator that
+ * exists — the two paths differ by an early `return`, which leaves no other trace in the
+ * row. Kept beside the cycle model so the proof harness and its test share one definition.
+ */
+export function expectsObservation(cycle: Pick<Cycle, 'status' | 'skipReason'>): boolean {
+  if (cycle.status !== 'skipped') return true;
+  // The exact wording of edge case 0 in decide.ts: "<which> could not be read — refusing
+  // to trade on a book and a lifecycle we cannot record the outcome of."
+  return !/could not be read/i.test(cycle.skipReason ?? '');
+}
+
+/**
+ * Cycles at or after the deployment cutoff that SHOULD have written observations and did
+ * not — the whole-batch losses P1d exists to surface.
+ *
+ * Pure, and separated from the proof harness so the property can be regression-tested
+ * without a database: the failure it guards against (a lost batch looking exactly like a
+ * pre-deployment cycle) is invisible by nature, so a test that can construct it is the
+ * only way to know the guard works.
+ */
+export function missingObservationBatches(params: {
+  cycles: Array<Pick<Cycle, 'id' | 'status' | 'skipReason'>>;
+  /** Cycle ids that produced at least one observation row. */
+  observedCycleIds: Set<number>;
+  /** First cycle known to have observed — everything before it predates the deployment. */
+  cutoff: number;
+}): Array<{ id: number; status: string }> {
+  const { cycles, observedCycleIds, cutoff } = params;
+  return cycles
+    .filter((c) => c.id >= cutoff && expectsObservation(c) && !observedCycleIds.has(c.id))
+    .map((c) => ({ id: c.id, status: c.status }));
+}
+
 /* ── Loading ──────────────────────────────────────────────────────────────── */
 
 const PAGE = 200;
@@ -113,6 +168,7 @@ interface RawDecision {
   id: number;
   created_at: string;
   status: string;
+  skip_reason: string | null;
   prompt_version: string;
   market_context: unknown;
   regime: unknown;
@@ -140,7 +196,7 @@ async function loadDecisions(supabase: SupabaseClient, beforeIso: string): Promi
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await supabase
       .from('decisions')
-      .select('id, created_at, status, prompt_version, market_context, regime')
+      .select('id, created_at, status, skip_reason, prompt_version, market_context, regime')
       .lt('created_at', beforeIso)
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
@@ -328,6 +384,7 @@ export function toCycles(
       generatedAtMs: Date.parse(generatedAt),
       generatedAt,
       status: row.status,
+      skipReason: row.skip_reason ?? null,
       promptVersion: row.prompt_version,
       equity: dec(num(portfolio.equity) ?? 0),
       reserveAsset: String(portfolio.reserveAsset ?? 'USDT'),

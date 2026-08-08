@@ -9,7 +9,14 @@ import { ZERO, type Decimal } from '../money.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
 import { evaluateTransition, judgeOrder, type TransitionVerdict } from '../transition/gate.js';
 import { fetchCandlesSince } from './klines.js';
-import { loadCycleStream, replayPeaks, type Booking, type Cycle } from './transitionCycles.js';
+import {
+  expectsObservation,
+  loadCycleStream,
+  missingObservationBatches,
+  replayPeaks,
+  type Booking,
+  type Cycle,
+} from './transitionCycles.js';
 import { fmtBar, loadObservationWindow, replayRegimeOptions } from './window.js';
 
 /**
@@ -406,31 +413,27 @@ async function main(): Promise<number> {
     // is the FIRST observed cycle, and every eligible cycle from there on must carry a
     // full batch.
     //
-    // "Eligible" excludes `skipped`, and only that: the edge-case-0 path (the lifecycle
-    // inputs could not be read) journals a skipped row and deliberately returns before
-    // both `persistLifecycle` and `observeTransition`, so a skipped cycle with no
-    // observation is correct behaviour rather than a lost one. Every other status reaches
-    // the closure.
+    // "Eligible" is decided by `expectsObservation`, on the skip REASON and not on the
+    // status: `decide()` has two skipped paths and only one of them returns before the
+    // closure. A status-only exemption waived both, so a lost batch on the empty-context
+    // path — which does call `observeTransition` — was indistinguishable from the
+    // lifecycle-read path's deliberate abstention.
     const cutoff = Math.min(...observedCycles);
+    const eligibleCycles = cycles.filter((c) => c.id >= cutoff && expectsObservation(c));
+    const lostBatches = missingObservationBatches({ cycles, observedCycleIds: observedCycles, cutoff });
 
     let compared = 0;
     const drift: string[] = [];
     const incomplete: string[] = [];
-    const missingBatches: string[] = [];
-    let eligible = 0;
+    const missingBatches = lostBatches
+      .slice(0, 5)
+      .map((c) => `#${c.id} (${c.status}): no observation at all`);
+    const eligible = eligibleCycles.length;
 
     for (const [cycleId, perAsset] of verdicts) {
       const cycle = cycles.find((c) => c.id === cycleId);
       if (cycleId < cutoff) continue; // genuinely predates the deployment
-      if (cycle?.status === 'skipped' && !observedCycles.has(cycleId)) continue;
-
-      eligible += 1;
-      if (!observedCycles.has(cycleId)) {
-        if (missingBatches.length < 5) {
-          missingBatches.push(`#${cycleId} (${cycle?.status ?? 'unknown'}): no observation at all`);
-        }
-        continue;
-      }
+      if (!observedCycles.has(cycleId)) continue; // already accounted for by `lostBatches`
 
       for (const [asset, verdict] of perAsset) {
         const row = persisted.get(`${cycleId}:${asset}`);
@@ -474,12 +477,13 @@ async function main(): Promise<number> {
     check(
       'P1d',
       'the LIVE layer persisted what the gate computes, in full',
-      drift.length === 0 && incomplete.length === 0 && missingBatches.length === 0 && compared > 0,
+      drift.length === 0 && incomplete.length === 0 && lostBatches.length === 0 && compared > 0,
       [
         `${persisted.size} observation rows over ${observedCycles.size} cycles; ${compared} compared against the gate`,
-        `deployment cutoff: cycle ${cutoff} — ${eligible} eligible cycles from there on (skipped ones excluded)`,
+        `deployment cutoff: cycle ${cutoff} — ${eligible} eligible cycles from there on ` +
+          `(only the lifecycle-read skip, which returns before the closure, is exempt)`,
         `cycles with NO observation at all after the cutoff: ` +
-          `${missingBatches.length === 0 ? 'none' : `LOST: ${missingBatches.join(' | ')}`}`,
+          `${lostBatches.length === 0 ? 'none' : `LOST ${lostBatches.length} — ${missingBatches.join(' | ')}`}`,
         `each observed cycle must carry all ${tradable.length} tradable assets — ` +
           `${incomplete.length === 0 ? 'none is short' : `INCOMPLETE: ${incomplete.join(' | ')}`}`,
         drift.length === 0

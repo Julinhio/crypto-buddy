@@ -10,6 +10,7 @@ import {
   toObservationRow,
 } from '../persistence/transitionObservations.js';
 import { toDecisionContext } from '../decision/context.js';
+import { expectsObservation, missingObservationBatches } from '../replay/transitionCycles.js';
 import { evaluateTransition, judgeOrder, type TransitionInputs } from '../transition/gate.js';
 
 /**
@@ -372,6 +373,79 @@ function inputs(over: Partial<TransitionInputs> = {}): TransitionInputs {
     `the writer must return on its own deadline, not hang the cycle (took ${elapsed}ms)`,
   );
   console.log(`  ok: a hung write returns on its deadline (${elapsed}ms) instead of burning the cycle`);
+  passed += 1;
+}
+
+{
+  // A LOST BATCH MUST NOT LOOK LIKE A PRE-DEPLOYMENT CYCLE.
+  //
+  // `decide()` has two `skipped` paths and only ONE of them returns before the observation
+  // closure. Exempting on the status alone waived both — so a write lost on the
+  // empty-context path (which DOES call `observeTransition`) was indistinguishable from
+  // the lifecycle-read path's deliberate abstention, and P1d stayed green through it. The
+  // writer's 5s deadline makes that loss more likely, not less, which is exactly why the
+  // exemption has to be granted on the REASON.
+  const EDGE_0 =
+    "the execution journal could not be read — refusing to trade on a book and a lifecycle " +
+    'we cannot record the outcome of.';
+  const EDGE_1 =
+    'no tradable pairs returned usable market data — refusing to decide on an empty universe';
+
+  assert.equal(
+    expectsObservation({ status: 'skipped', skipReason: EDGE_0 }),
+    false,
+    'edge case 0 returns before the closure — no observation is correct',
+  );
+  assert.equal(
+    expectsObservation({ status: 'skipped', skipReason: EDGE_1 }),
+    true,
+    'edge case 1 calls the closure — an observation IS expected',
+  );
+  assert.equal(
+    expectsObservation({ status: 'decided', skipReason: null }),
+    true,
+    'every non-skipped path reaches the closure',
+  );
+  // Fail-closed: an unrecognised skip reason is EXPECTED to have written, so it turns the
+  // check red and gets looked at rather than being waved through.
+  assert.equal(
+    expectsObservation({ status: 'skipped', skipReason: 'some future skip nobody has written yet' }),
+    true,
+    'an unknown skip reason is not silently exempted',
+  );
+
+  // And the property P1d actually reads: the empty-context skip, post-cutoff, with no row
+  // written, must be REPORTED — that is the case that used to pass unnoticed.
+  const cycles = [
+    { id: 10, status: 'decided', skipReason: null }, // pre-cutoff, no rows: fine
+    { id: 20, status: 'decided', skipReason: null }, // the cutoff itself, observed
+    { id: 21, status: 'skipped', skipReason: EDGE_0 }, // exempt: returns before the closure
+    { id: 22, status: 'skipped', skipReason: EDGE_1 }, // NOT exempt, and wrote nothing
+    { id: 23, status: 'decided', skipReason: null }, // wrote nothing either
+    { id: 24, status: 'error', skipReason: null }, // observed
+  ];
+  const lost = missingObservationBatches({
+    cycles,
+    observedCycleIds: new Set([20, 24]),
+    cutoff: 20,
+  });
+
+  assert.deepEqual(
+    lost.map((c) => c.id),
+    [22, 23],
+    'the empty-context skip and the silent decided cycle are both reported as lost batches',
+  );
+  assert.equal(
+    lost.some((c) => c.id === 21),
+    false,
+    'the lifecycle-read skip is not counted as a loss',
+  );
+  assert.equal(
+    lost.some((c) => c.id === 10),
+    false,
+    'cycles before the deployment cutoff are not counted either',
+  );
+  console.log('  ok: a batch lost on the empty-context skip is reported, not waived as pre-deployment');
   passed += 1;
 }
 
