@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { config, resolveTransitionMode } from '../config/index.js';
+import { config, resolveTransitionMode, validateTransitionModeConfig } from '../config/index.js';
 import { dec, ZERO } from '../money.js';
 import { applyGate, zeroOutStopped } from '../transition/apply.js';
 import { judgeVector } from '../transition/vector.js';
@@ -89,6 +89,25 @@ console.log('\n§1 — THE SWITCH');
   // from the two siblings rather than an accident.
   ok('surrounding whitespace is trimmed, exactly like the sibling switches',
     resolveTransitionMode('  enforce  ') === 'enforce');
+
+  // ── enforce + v4 must not boot ──────────────────────────────────────────────────
+  // Under v4 the model sees no regime and no `actionable` flag, and its mandate says
+  // nothing about frozen lines — but the gate would still block. It would propose in good
+  // faith and lose its whole vector to atomicity, silently, every frozen cycle.
+  const combo = (mode: 'observe' | 'enforce', strategy: 'v4' | 'v5'): boolean => {
+    try { validateTransitionModeConfig(mode, strategy); return true; } catch { return false; }
+  };
+  ok('enforce + v5 boots — the configuration this PR exists for', combo('enforce', 'v5'));
+  ok('observe + v5 boots', combo('observe', 'v5'));
+  // The one that matters: UNSET STRATEGY_VERSION resolves to v4 by design (the project's
+  // disaster-recovery posture), so losing that variable while keeping TRANSITION_MODE
+  // lands here. The safety net would otherwise have become a silent trading freeze.
+  ok('enforce + v4 FAILS the boot rather than blocking in silence', !combo('enforce', 'v4'));
+  ok('observe + v4 still boots — today\'s behaviour is untouched', combo('observe', 'v4'));
+  let comboMsg = '';
+  try { validateTransitionModeConfig('enforce', 'v4'); } catch (e) { comboMsg = (e as Error).message; }
+  ok('and the error names the unset-resolves-to-v4 trap explicitly',
+    comboMsg.includes('UNSET STRATEGY_VERSION') && comboMsg.includes('disaster-recovery'));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────

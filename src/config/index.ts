@@ -898,6 +898,48 @@ export const COHERENCE_GUARD: boolean = resolveCoherenceGuard();
 export const TRANSITION_MODE: TransitionMode = resolveTransitionMode();
 
 /**
+ * Fails fast on `enforce` + `v4`, a combination that blocks in silence.
+ *
+ * Under v4 the model is shown NOTHING of the transition layer: `toDecisionContext` returns
+ * the base payload with no regime and no `actionable` flag, and `buildSystemPrompt` carries
+ * no mandate about non-actionable lines — both by design, because v4 is the mandate that
+ * predates all of this. But `applyGate` does not consult the strategy: it would keep
+ * blocking. The model would therefore propose a leg on a frozen asset in complete good
+ * faith, having been told nothing, and watch its entire strategic vector cancelled
+ * atomically. Silently, and on every frozen cycle.
+ *
+ * THIS IS NOT A THEORETICAL PATH, and that is the whole reason it fails the boot rather
+ * than warning. The absence of `STRATEGY_VERSION` resolves to `v4` BY DESIGN — it is the
+ * project's disaster-recovery posture, the thing that makes "an environment that lost its
+ * variables comes back safe" true. An environment that loses that variable while KEEPING
+ * `TRANSITION_MODE=enforce` lands in exactly this combination, and the safety net would
+ * have turned into a trading freeze nobody asked for.
+ *
+ * Refusing to boot is the right severity: the two supported configurations are `observe`
+ * with either strategy (today's behaviour), and `enforce` with v5 (the switch this PR
+ * exists for). Exported for the offline test.
+ */
+export function validateTransitionModeConfig(
+  mode: TransitionMode,
+  strategy: StrategyVersion,
+): void {
+  if (mode === 'enforce' && strategy !== 'v5') {
+    throw new Error(
+      `Invalid combination TRANSITION_MODE="enforce" with STRATEGY_VERSION="${strategy}": the ` +
+        `transition gate can only enforce under v5. Under ${strategy} the model is shown no regime ` +
+        'and no `actionable` flag, and its mandate says nothing about frozen lines — yet the gate ' +
+        'would still block, so the model would propose in good faith and have its whole strategic ' +
+        'vector cancelled atomically, on every frozen cycle, with no way to know why. Note that an ' +
+        'UNSET STRATEGY_VERSION resolves to v4 by design (the disaster-recovery posture), so this ' +
+        'is reachable by losing that variable while keeping TRANSITION_MODE. Set STRATEGY_VERSION=v5, ' +
+        'or set TRANSITION_MODE=observe (or unset it) to keep today\'s behaviour.',
+    );
+  }
+}
+
+validateTransitionModeConfig(TRANSITION_MODE, STRATEGY_VERSION);
+
+/**
  * Fails fast on a bad daily-summary config. The timezone is validated by trying to
  * build an Intl formatter in it — an unknown IANA zone throws RangeError, which we
  * catch at STARTUP instead of letting it throw silently inside the 9h best-effort
