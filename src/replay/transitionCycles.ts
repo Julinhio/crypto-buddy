@@ -139,6 +139,31 @@ export function expectsObservation(cycle: Pick<Cycle, 'status' | 'skipReason'>):
 }
 
 /**
+ * A BLIND CYCLE — the wake-up got no usable market data at all, so the layer journaled
+ * `no_regime` for every asset because there was genuinely nothing to read.
+ *
+ * These cycles DO write their observation batch (they reach the closure), so
+ * `expectsObservation` is right to keep them eligible for the completeness check. What
+ * they cannot survive is the DRIFT check, and the reason is structural rather than a bug:
+ * the replay refetches klines TODAY, so it reconstructs a perfectly real regime for a bar
+ * the live cycle could not see. The journal says `no_regime`, the replay says
+ * `actionable`, and they are both correct about different worlds.
+ *
+ * Decisions 1180 and 1185 of the 09/08 outage are exactly this, and they are permanent —
+ * the historical rows will never change. Exempting them is the same family of exemption
+ * `expectsObservation` already makes on the skip reason, and it is stated explicitly here
+ * rather than absorbed by loosening the assertion: a drift check that quietly tolerated
+ * mismatches would stop being a drift check.
+ *
+ * Matches the exact wording of edge case 1 in decide.ts: "no tradable pairs returned
+ * usable market data — refusing to decide on an empty universe".
+ */
+export function isBlindCycle(cycle: Pick<Cycle, 'status' | 'skipReason'>): boolean {
+  if (cycle.status !== 'skipped') return false;
+  return /no tradable pairs returned usable market data/i.test(cycle.skipReason ?? '');
+}
+
+/**
  * Cycles at or after the deployment cutoff that SHOULD have written observations and did
  * not — the whole-batch losses P1d exists to surface.
  *

@@ -1,7 +1,12 @@
-import { config, tradableBaseAssets, STRATEGY_VERSION, COHERENCE_GUARD } from '../config/index.js';
+import { config, tradableBaseAssets, STRATEGY_VERSION, COHERENCE_GUARD, TRANSITION_MODE } from '../config/index.js';
 import { Decimal, ZERO, dec, toNumericString } from '../money.js';
 import { evaluateTransition, judgeOrder, type TransitionVerdict } from '../transition/gate.js';
 import { judgeVector } from '../transition/vector.js';
+import { applyGate } from '../transition/apply.js';
+import {
+  openRefusedEpisodes,
+  resolveRefusedEpisodes,
+} from '../persistence/refusedIntentions.js';
 import {
   saveTransitionObservations,
   toObservationRow,
@@ -369,6 +374,43 @@ export async function decide(): Promise<DecideResult> {
    * is a counterfactual about the decision that was taken, and that decision was taken
    * against the book as it stood at the start of the cycle.
    */
+  /**
+   * THE LAYER'S VERDICTS FOR THIS CYCLE — computed ONCE, here, before anything reads them.
+   *
+   * They used to be computed inside the observation closure, which ran after execution.
+   * That was correct while the layer only watched. Now that it can BLOCK, three different
+   * consumers need them and they must be the same object for all three, or the journal
+   * would document a decision other than the one that was applied:
+   *
+   *   1. the payload — `actionable` per asset, under `enforce` (see toDecisionContext);
+   *   2. the gate — `applyGate`, before the movements execute;
+   *   3. the journal — `observeTransition`, after.
+   *
+   * Every input is already in hand at this point: the market read, the pre-trade book, and
+   * the stored lifecycle. Nothing here depends on the model's answer, which is exactly why
+   * it can be hoisted above the LLM call without changing a single verdict.
+   */
+  const staleByAsset = new Map(portfolio.positions.map((p) => [p.asset, p.priceStale]));
+  const heldByAsset = new Map(portfolio.positions.map((p) => [p.asset, p.qty]));
+  const transitionVerdicts: TransitionVerdict[] = tradableBaseAssets(config).map((asset) =>
+    evaluateTransition({
+      asset,
+      sticky: context.transition?.perAsset[asset] ?? null,
+      // The CONFIRMED posture, never the raw one: an unconfirmed risk_off must not be
+      // able to lift an individual freeze.
+      riskOffConfirmed: context.regime?.global.riskOff ?? false,
+      qty: heldByAsset.get(asset) ?? ZERO,
+      price: priceOf(asset),
+      priceStale: staleByAsset.get(asset) ?? false,
+      // LAST cycle's stored peak. `evaluateStop` ratchets it with this cycle's price
+      // itself, exactly as `toDecisionContext` does for the model.
+      peakPriceSinceEntry: stateRead.states.get(asset)?.peakPriceSinceEntry ?? null,
+      stopThresholdPercent: config.transition.peakStopPercent,
+    }),
+  );
+  const verdictsByAsset = new Map(transitionVerdicts.map((v) => [v.asset, v]));
+  const actionableByAsset = new Map(transitionVerdicts.map((v) => [v.asset, v.actionable]));
+
   const observeTransition = async (
     decisionId: number | null,
     bookedLedger: LedgerEntry[],
@@ -385,9 +427,6 @@ export async function decide(): Promise<DecideResult> {
     // that was not already lost: the cycle itself was not journaled either.
     if (decisionId == null) return;
 
-    const stale = new Map(portfolio.positions.map((p) => [p.asset, p.priceStale]));
-    const held = new Map(portfolio.positions.map((p) => [p.asset, p.qty]));
-
     // What actually booked on each asset this cycle, netted — the same aggregation the
     // lifecycle does, so "the order this cycle placed" means one thing in both journals.
     const booked = new Map<string, { side: 'buy' | 'sell'; notional: Decimal }>();
@@ -403,32 +442,22 @@ export async function decide(): Promise<DecideResult> {
       );
     }
 
-    const verdicts: TransitionVerdict[] = tradableBaseAssets(config).map((asset) =>
-      evaluateTransition({
-        asset,
-        sticky: context.transition?.perAsset[asset] ?? null,
-        // The CONFIRMED posture, never the raw one: an unconfirmed risk_off must not be
-        // able to lift an individual freeze.
-        riskOffConfirmed: context.regime?.global.riskOff ?? false,
-        qty: held.get(asset) ?? ZERO,
-        price: priceOf(asset),
-        priceStale: stale.get(asset) ?? false,
-        // LAST cycle's stored peak. `evaluateStop` ratchets it with this cycle's price
-        // itself, exactly as `toDecisionContext` does for the model.
-        peakPriceSinceEntry: stateRead.states.get(asset)?.peakPriceSinceEntry ?? null,
-        stopThresholdPercent: config.transition.peakStopPercent,
-      }),
-    );
+    // The verdicts are the HOISTED ones — the very objects the gate and the payload used.
+    // Recomputing them here would risk journaling a second opinion that merely looks like
+    // the one that was applied.
+    const verdicts = transitionVerdicts;
 
-    // ATOMICITY, computed and journaled — never applied. `judgeVector` is total, so this
-    // cannot throw and the closure keeps the property that makes observe mode observe-only:
-    // it is incapable of failing a cycle.
+    // ATOMICITY. `judgeVector` is total, so this cannot throw and the closure keeps the
+    // property that makes it incapable of failing a cycle — in BOTH modes.
     const vector = judgeVector(
       vectorLegs.map((m) => ({ asset: m.asset, side: m.side, notional: m.notional })),
-      new Map(verdicts.map((v) => [v.asset, v])),
+      verdictsByAsset,
     );
     if (vector.refused) {
-      console.log(`[transition] would have refused this vector — ${vector.reason} (observe mode: nothing blocked).`);
+      console.log(
+        `[transition] vector refused — ${vector.reason} ` +
+          `(${TRANSITION_MODE === 'enforce' ? 'ENFORCE: the strategic legs were suppressed' : 'observe mode: nothing blocked'}).`,
+      );
     }
     const orphan = vector.legs.filter((l) => l.reason.includes('outside the observed universe'));
     if (orphan.length > 0) {
@@ -454,7 +483,10 @@ export async function decide(): Promise<DecideResult> {
   };
 
   // The AI sees the virtual book, not the testnet balances.
-  const decisionContext = toDecisionContext(context, portfolio, STRATEGY_VERSION, stateRead.states);
+  const decisionContext = toDecisionContext(context, portfolio, STRATEGY_VERSION, stateRead.states, {
+    mode: TRANSITION_MODE,
+    actionableByAsset,
+  });
 
   // Edge case 0 — a lifecycle input could not be read. Skip the WHOLE cycle, not just
   // the state write.
@@ -524,7 +556,7 @@ export async function decide(): Promise<DecideResult> {
   // can only be reached by an explicit, correctly-spelled opt-in — never by omission,
   // and never by an environment that lost its variables.
   const v5 = STRATEGY_VERSION === 'v5';
-  const systemPrompt = v5 ? buildSystemPromptV5() : buildSystemPrompt();
+  const systemPrompt = v5 ? buildSystemPromptV5(config, TRANSITION_MODE) : buildSystemPrompt();
   const userPrompt = v5
     ? buildUserPromptV5({
         allocationAssets: assets,
@@ -897,14 +929,52 @@ export async function decide(): Promise<DecideResult> {
   }
 
   // Decided — bound to the caps, journal the decision, execute the movements.
-  const { clamp, movements } = evaluated;
+  const { clamp, movements: proposedMovements } = evaluated;
+
+  /**
+   * THE GATE, APPLIED. The one place in the cycle where `observe` and `enforce` diverge.
+   *
+   * Judged on the movements the model's target PRODUCES, before any of them executes —
+   * the same population the observation journals afterwards, from the same verdicts. In
+   * `observe` this is a total no-op and `movements === proposedMovements`.
+   *
+   * The coherence guard has already run and passed by this point, and that ordering is
+   * deliberate: the guard judges whether the MODEL was coherent with itself, which is a
+   * question about the proposal and not about what the code will let through. Running the
+   * gate first would let a transition freeze rewrite the proposal the guard then judged,
+   * and the guard would be marking the code's homework instead of the model's.
+   */
+  const gateJudgement = judgeVector(
+    proposedMovements.map((m) => ({ asset: m.asset, side: m.side, notional: m.notional })),
+    verdictsByAsset,
+  );
+  const gateOutcome = applyGate({
+    mode: TRANSITION_MODE,
+    movements: proposedMovements,
+    judgement: gateJudgement,
+    clampedAllocation: clamp.applied,
+    // The last ACCEPTED applied vector — the coherence guard's own reference, read at the
+    // top of this cycle. Using the same source means the value the guard will compare
+    // against next cycle is the value we store now, by construction rather than by luck.
+    previousApplied: referenceRead.target,
+  });
+  const movements = gateOutcome.movements;
+  if (gateOutcome.refused) {
+    console.warn(`[transition] ENFORCE — ${gateOutcome.reason}`);
+  }
 
   const row = makeRow(decisionContext, context.regime, gitSha, {
     status: 'decided',
     target_allocation: v.targetAllocation,
-    applied_allocation: clamp.applied,
+    // The EFFECTIVE target. Normally the clamped proposal; on a refused cycle the PREVIOUS
+    // applied vector, so the guard's reference stays where the book actually is. The row
+    // stays `decided`: the intention advanced, the applied did not.
+    applied_allocation: gateOutcome.appliedAllocation,
     clamped: clamp.clamped,
     clamp_reason: clamp.reason,
+    // Null unless the GATE caused the divergence — `clamped` stays false on that path, so
+    // without this column a reader would see two disagreeing allocations and no cause.
+    applied_divergence_cause: gateOutcome.refused ? gateOutcome.reason : null,
     action_type: v.actionType,
     what_changed: v.whatChanged,
     confidence: v.confidence,
@@ -947,7 +1017,13 @@ export async function decide(): Promise<DecideResult> {
   } else {
     // The reserve the risk wrapper wants kept in cash — used to size buys on the
     // cash REALLY available after the (down-)snapped sells, so the floor holds.
-    const targetReserve = portfolio.equity.times(clamp.applied[reserveStable] ?? 0).div(100);
+    // The EFFECTIVE target's reserve, not the proposal's. Identical in `observe` and on
+    // any accepted cycle; on a refused one the surviving legs are deterministic exits
+    // (sells only), so this cannot size a buy — but reading the effective target keeps the
+    // executor and the journal describing the same allocation.
+    const targetReserve = portfolio.equity
+      .times(gateOutcome.appliedAllocation[reserveStable] ?? 0)
+      .div(100);
     execution = await executeMovements(movements, {
       decisionId: id,
       supabase,
@@ -982,7 +1058,62 @@ export async function decide(): Promise<DecideResult> {
   // booking could thin it — and that is the population the gate will act on the day it
   // blocks, so it is the one the atomicity provenance rehearses. Runs after every order is
   // placed, and its result is discarded — see the closure's header.
-  await observeTransition(id, bookedLedger, movements);
+  await observeTransition(id, bookedLedger, proposedMovements);
+
+  /**
+   * THE REFUSED-INTENTION LEDGER — opened here, resolved here, read by nobody in this file.
+   *
+   * Same tier and same placement as every other observational write: after the orders, so
+   * a stalled insert cannot weigh on the trading verdict, and bounded so it cannot reach
+   * the watchdog. Both calls swallow their own failures.
+   *
+   * `observeTransition` above is deliberately given `proposedMovements`, not the surviving
+   * ones: it journals what the model ASKED for and what the layer said about it. Feeding it
+   * the post-gate list would erase the refused legs from the very journal that exists to
+   * count them.
+   */
+  if (gateOutcome.refused && gateOutcome.droppedLegs.length > 0) {
+    const legVerdicts = new Map(gateJudgement.legs.map((l) => [`${l.asset}:${l.side}`, l]));
+    await openRefusedEpisodes(
+      supabase,
+      id,
+      gateOutcome.droppedLegs.map((m) => {
+        const judged = legVerdicts.get(`${m.asset}:${m.side}`);
+        return {
+          asset: m.asset,
+          side: m.side,
+          notional: toNumericString(m.notional),
+          price: priceOf(m.asset)?.toString() ?? null,
+          targetPercent: v.targetAllocation[m.asset] ?? null,
+          referencePercent: referenceRead.target?.[m.asset] ?? null,
+          legVerdict: judged?.verdict ?? 'unknown',
+          gate: verdictsByAsset.get(m.asset)?.gate ?? 'unknown',
+        };
+      }),
+    );
+  }
+  // Runs on EVERY cycle, refused or not: an episode closes on the cycle the gate REOPENS,
+  // which is by definition one it did not refuse.
+  await resolveRefusedEpisodes(
+    supabase,
+    id,
+    new Set([...actionableByAsset].filter(([, ok]) => ok).map(([asset]) => asset)),
+    new Map(
+      tradableBaseAssets(config).map((asset) => {
+        const movement = proposedMovements.find((m) => m.asset === asset) ?? null;
+        return [
+          asset,
+          {
+            asset,
+            side: movement?.side ?? null,
+            targetPercent: v.targetAllocation[asset] ?? null,
+            price: priceOf(asset)?.toString() ?? null,
+          },
+        ];
+      }),
+    ),
+  );
+
   // A DECIDED cycle can still have lost a market — a reference pair, or a tactical series.
   // Written here, after every order is placed and after the layer's own observation, so it
   // sits in the same best-effort tier as they do and cannot weigh on the trading verdict.
@@ -1045,6 +1176,7 @@ function makeRow(
     applied_allocation: over.applied_allocation ?? null,
     clamped: over.clamped ?? null,
     clamp_reason: over.clamp_reason ?? null,
+    applied_divergence_cause: over.applied_divergence_cause ?? null,
     action_type: over.action_type ?? null,
     what_changed: over.what_changed ?? null,
     confidence: over.confidence ?? null,

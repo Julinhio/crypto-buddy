@@ -7,6 +7,7 @@ import { getSupabaseClient } from '../persistence/supabase.js';
 import { evaluateTransition, judgeOrder, type TransitionVerdict } from '../transition/gate.js';
 import {
   expectsObservation,
+  isBlindCycle,
   missingObservationBatches,
   type Booking,
   type Cycle,
@@ -396,10 +397,19 @@ async function main(): Promise<number> {
       .map((c) => `#${c.id} (${c.status}): no observation at all`);
     const eligible = eligibleCycles.length;
 
+    let blindExempt = 0;
     for (const [cycleId, perAsset] of verdicts) {
       const cycle = cycles.find((c) => c.id === cycleId);
       if (cycleId < cutoff) continue; // genuinely predates the deployment
       if (!observedCycles.has(cycleId)) continue; // already accounted for by `lostBatches`
+      // A BLIND cycle read no market data, so it journaled `no_regime` for every asset.
+      // The replay refetches klines today and reconstructs a real regime for the same bar:
+      // both are correct about different worlds, and comparing them measures the outage,
+      // not the layer. Exempted explicitly and COUNTED — see isBlindCycle.
+      if (cycle != null && isBlindCycle(cycle)) {
+        blindExempt += 1;
+        continue;
+      }
 
       for (const [asset, verdict] of perAsset) {
         const row = persisted.get(`${cycleId}:${asset}`);
@@ -448,6 +458,9 @@ async function main(): Promise<number> {
         `${persisted.size} observation rows over ${observedCycles.size} cycles; ${compared} compared against the gate`,
         `deployment cutoff: cycle ${cutoff} — ${eligible} eligible cycles from there on ` +
           `(only the lifecycle-read skip, which returns before the closure, is exempt)`,
+        `BLIND cycles exempt from the drift comparison: ${blindExempt} ` +
+          `(no market data → journaled no_regime; the replay refetches klines today and ` +
+          `reconstructs a regime the live cycle could not see — see isBlindCycle)`,
         `cycles with NO observation at all after the cutoff: ` +
           `${lostBatches.length === 0 ? 'none' : `LOST ${lostBatches.length} — ${missingBatches.join(' | ')}`}`,
         `each observed cycle must carry all ${tradable.length} tradable assets — ` +

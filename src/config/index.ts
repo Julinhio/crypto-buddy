@@ -377,6 +377,48 @@ export function resolveCoherenceGuard(raw: string | undefined = process.env.COHE
   );
 }
 
+/**
+ * How the transition layer behaves this run.
+ *
+ *   `observe` — it computes and journals, and blocks NOTHING. Byte-for-byte the behaviour
+ *               the bot has had since 08/08: same orders, same payload to the model.
+ *   `enforce` — the ladder it computes becomes effective, and the atomic refusal applies.
+ */
+export type TransitionMode = 'observe' | 'enforce';
+
+/**
+ * Resolves `TRANSITION_MODE`, and FAILS LOUD on anything it does not recognise.
+ *
+ * Same convention as STRATEGY_VERSION and COHERENCE_GUARD, and the same reason:
+ * ABSENCE MEANS SAFE. Here `observe` is the safe mode — the one that changes nothing — so
+ * there is nothing to set on Railway to keep today's behaviour, the blocking mode requires
+ * an explicit opt-in, and an environment that loses its variables comes back observing.
+ *
+ * This is THE ROLLBACK. It is the reason it is an environment variable rather than a code
+ * constant: on Railway the value changes without a code deployment, so returning to
+ * `observe` is a restart, not a revert-and-redeploy. It gates the payload too, so going
+ * back restores what the MODEL sees as well as what the gate does — a mode switch that
+ * left the model reading a different context would not be a rollback, it would be a third
+ * behaviour nobody has measured.
+ *
+ * A PRESENT but unrecognised value is an error, never a silent fallback. `ENFORCE`,
+ * `true` and `on` all fail: someone typing them INTENDED to arm the gate, and silently
+ * observing instead would leave the operator believing the bot is protected.
+ */
+export function resolveTransitionMode(
+  raw: string | undefined = process.env.TRANSITION_MODE,
+): TransitionMode {
+  if (raw == null || raw.trim() === '') return 'observe';
+  const value = raw.trim();
+  if (value === 'observe' || value === 'enforce') return value;
+  throw new Error(
+    `Invalid TRANSITION_MODE="${raw}": expected exactly "observe" or "enforce" (case-sensitive), ` +
+      'or UNSET for the default "observe". A present-but-unrecognised value is refused rather than ' +
+      'defaulted: it means someone intended to change how the transition gate behaves, and silently ' +
+      'running the other mode would be worse than not booting.',
+  );
+}
+
 export const config: AppConfig = {
   // Pairs the bot may take positions on (subject to the risk caps). Add a tradable
   // pair by appending one line AND giving it a cap in execution.caps.perAsset.
@@ -847,6 +889,13 @@ export const STRATEGY_VERSION: StrategyVersion = resolveStrategyVersion();
  * disarm its own guard halfway through.
  */
 export const COHERENCE_GUARD: boolean = resolveCoherenceGuard();
+
+/**
+ * The transition layer's mode for this process, resolved ONCE at startup so a malformed
+ * value fails the boot rather than surfacing mid-cycle — and so a run cannot change what
+ * the gate does, or what the model is shown, under its own feet.
+ */
+export const TRANSITION_MODE: TransitionMode = resolveTransitionMode();
 
 /**
  * Fails fast on a bad daily-summary config. The timezone is validated by trying to
