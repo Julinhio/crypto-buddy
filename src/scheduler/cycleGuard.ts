@@ -22,12 +22,32 @@ import type { CycleStatus } from './policy.js';
  *     by a process that is still alive (the orphan that would double-trade).
  */
 
+/**
+ * THE SECOND HEALTH STATE, at the scheduler's altitude — three-valued, and the third
+ * value is the point.
+ *
+ *   - 'blind'   : the cycle ran and saw NO tradable market (the 09/08 signature);
+ *   - 'sighted' : the cycle ran and saw the market;
+ *   - 'unknown' : the cycle timed out, or threw before `buildMarketContext` returned, so
+ *                 nobody knows whether the market was readable.
+ *
+ * `unknown` exists so it can be treated as what it is. It must NOT increment the blind
+ * counter (a frozen cycle is not evidence of an outage — and it already has its own
+ * alarms: the watchdog, the kept lock, the missing Healthchecks ping), and it must NOT
+ * reset it either (a cycle that never looked is not evidence that the market came back).
+ * Collapsing it into either boolean would make the "données indisponibles" alert fire on
+ * freezes, or silently re-arm mid-outage. It leaves the counter exactly where it was.
+ */
+export type MarketDataState = 'blind' | 'sighted' | 'unknown';
+
 /** The cycle's result, normalized — a timeout or a throw both become a technical error. */
 export interface CycleOutcome {
   status: CycleStatus;
   appliedDelayMinutes: number | null;
   decisionId: number | null;
   detail: string;
+  /** Did this cycle see the market? See MarketDataState — 'unknown' is meaningful. */
+  marketData: MarketDataState;
   /**
    * The equity photo to write best-effort AFTER the verdict is sealed. PREPARED
    * here (pure, no I/O — safe inside the timed wrapper) but WRITTEN outside it, so
@@ -75,6 +95,10 @@ export async function runCycleWithTimeout(
         detail: `cycle exceeded the ${Math.round(timeoutMs / 1000)}s budget — treated as a technical error (backoff)`,
         // Timed out → decide() never returned a valued book; nothing to photograph.
         equitySnapshot: null,
+        // The cycle froze. It may have read the market fine and hung on the LLM, or died
+        // before touching it — we do not know, and saying so leaves the blind counter
+        // untouched rather than guessing in either direction.
+        marketData: 'unknown',
       };
     }
     return {
@@ -82,6 +106,8 @@ export async function runCycleWithTimeout(
       appliedDelayMinutes: raced.row.applied_delay_minutes ?? null,
       decisionId: raced.decisionId,
       detail: `status=${raced.status}`,
+      // decide() returned, so the market read either worked or it didn't — never unknown.
+      marketData: raced.marketData,
       // PURE prepare only (object mapping, no I/O). The WRITE happens outside this
       // raced promise (beat.ts / CLI), so it can never weigh on the verdict above.
       equitySnapshot: prepareEquitySnapshot(raced.status, raced.decisionId, raced.portfolio),
@@ -95,6 +121,9 @@ export async function runCycleWithTimeout(
       detail: `cycle threw: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       // Threw before returning a valued book → nothing to photograph.
       equitySnapshot: null,
+      // A throw can come from anywhere — including from well after a perfectly good market
+      // read. Same reasoning as the timeout above: unknown, so the counter does not move.
+      marketData: 'unknown',
     };
   } finally {
     // Essential: clear the timer on the resolve path, else a pending timer would

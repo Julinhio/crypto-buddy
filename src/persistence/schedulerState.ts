@@ -10,9 +10,21 @@ export interface BotState {
   lastSuccessAt: string | null;
   consecutiveFailures: number;
   floorDelayStreak: number;
+  /**
+   * THE SECOND HEALTH STATE. Consecutive cycles that saw no tradable market, and its
+   * debounce flag. Read from the `record_heartbeat` snapshot rather than from
+   * `claim_due_run` (which is where the other two counters come from) on purpose: the
+   * claim RPC is the safety-critical atomic compare-and-set, and changing its RETURN
+   * TABLE means dropping and recreating it. A pure-observability counter does not justify
+   * that risk, and the snapshot is just as current — `finish_run` is the only writer of
+   * these columns, and it is fenced by our own run token, exactly the argument the alert
+   * flags already rely on.
+   */
+  consecutiveBlindCycles: number;
   /** Debounce flags (one per trigger) — the pre-cycle snapshot the heartbeat reads. */
   floorAlertSent: boolean;
   failureAlertSent: boolean;
+  blindAlertSent: boolean;
 }
 
 /** What `claim_due_run` returns on a successful (atomic) claim. */
@@ -38,6 +50,17 @@ export interface FinishRunParams {
   /** Debounce flags to persist (computed post-cycle by the pure policy). */
   floorAlertSent: boolean;
   failureAlertSent: boolean;
+  /** The second health state's counter + flag (computed post-cycle by the pure policy). */
+  consecutiveBlindCycles: number;
+  blindAlertSent: boolean;
+  /**
+   * Did this cycle SEE the market? Three-valued, and only used by the SQL side to stamp
+   * `last_market_data_ok_at`: true refreshes it, false and null leave it alone. The
+   * counter itself is already computed by the app (a pure, offline-tested function) —
+   * this exists because the timestamp must take the DATABASE's now(), exactly like
+   * `last_success_at`.
+   */
+  sawMarketData: boolean | null;
 }
 
 function toBotState(row: Record<string, unknown>): BotState {
@@ -49,8 +72,10 @@ function toBotState(row: Record<string, unknown>): BotState {
     lastSuccessAt: (row.last_success_at as string | null) ?? null,
     consecutiveFailures: Number(row.consecutive_failures ?? 0),
     floorDelayStreak: Number(row.floor_delay_streak ?? 0),
+    consecutiveBlindCycles: Number(row.consecutive_blind_cycles ?? 0),
     floorAlertSent: Boolean(row.floor_alert_sent ?? false),
     failureAlertSent: Boolean(row.failure_alert_sent ?? false),
+    blindAlertSent: Boolean(row.blind_alert_sent ?? false),
   };
 }
 
@@ -126,6 +151,9 @@ export async function finishRun(supabase: SupabaseClient, p: FinishRunParams): P
     p_detail: p.detail,
     p_floor_alert_sent: p.floorAlertSent,
     p_failure_alert_sent: p.failureAlertSent,
+    p_consecutive_blind_cycles: p.consecutiveBlindCycles,
+    p_blind_alert_sent: p.blindAlertSent,
+    p_saw_market_data: p.sawMarketData,
   });
   if (error) throw new Error(`finish_run RPC failed: ${error.message}`);
   return data === true;

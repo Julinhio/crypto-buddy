@@ -142,6 +142,12 @@ async function main(): Promise<void> {
         detail: `[debounce-proof] ${step.label}`,
         floorAlertSent: floorEval.sent,
         failureAlertSent: failEval.sent,
+        // The market-data trigger is not what this proof exercises — it drives the two
+        // ORIGINAL triggers through the real claim→finish path. Neutral values leave the
+        // new columns untouched so the round-trip assertions stay about those two.
+        consecutiveBlindCycles: 0,
+        blindAlertSent: false,
+        sawMarketData: null,
       });
       ok('finish_run held the lock and wrote state', finalized === true);
 

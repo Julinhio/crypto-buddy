@@ -146,6 +146,7 @@ const fp: FinishRunParams = {
   runToken: 'tok', runId: 1, delayMinutes: 30, consecutiveFailures: 0, floorDelayStreak: 0,
   succeeded: true, outcome: 'decided', decisionId: null, missedBeats: 0, detail: null,
   floorAlertSent: false, failureAlertSent: false,
+  consecutiveBlindCycles: 0, blindAlertSent: false, sawMarketData: true,
 };
 const claimRow = { run_id: 7, prev_next_check_at: null, db_now: '2024-01-01T00:00:00Z', consecutive_failures: 1, floor_delay_streak: 2 };
 
@@ -241,11 +242,11 @@ function dispatchClient(calls: string[]): SupabaseClient {
 }
 
 const timedOutCycle = async () => ({
-  outcome: { status: 'error' as const, appliedDelayMinutes: null, decisionId: null, detail: 'frozen', equitySnapshot: null },
+  outcome: { status: 'error' as const, appliedDelayMinutes: null, decisionId: null, detail: 'frozen', equitySnapshot: null, marketData: 'unknown' as const },
   settled: false, result: null,
 });
 const settledThrow = async () => ({
-  outcome: { status: 'error' as const, appliedDelayMinutes: null, decisionId: null, detail: 'threw', equitySnapshot: null },
+  outcome: { status: 'error' as const, appliedDelayMinutes: null, decisionId: null, detail: 'threw', equitySnapshot: null, marketData: 'unknown' as const },
   settled: true, result: null,
 });
 
