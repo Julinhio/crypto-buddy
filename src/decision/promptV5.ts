@@ -316,14 +316,33 @@ export function buildUserPromptV5(params: {
           // The key is `applied_allocation`, deliberately NOT `risk_bounded_target`: that
           // name asserts the risk wrapper did it, and it would be a lie on a cycle the
           // transition gate refused. `divergence_cause` names the real reason.
+          //
+          // THE GATE TAKES PRECEDENCE WHEN BOTH ACTED, and the ordering is not cosmetic.
+          // The clamp and the gate can both fire on one cycle: the wrapper trims the
+          // proposal, then the gate refuses the vector the trimmed target produced. The
+          // stored `applied_allocation` is then the PREVIOUS vector — not the clamped one —
+          // so reporting `risk_clamp` would tell the model the clamp produced an allocation
+          // it never produced, and hide that the whole vector was refused. The clamp is
+          // still reported, alongside, because it did happen.
           ...(divergence.differsFromProposal
             ? {
                 applied_allocation: divergence.allocation,
-                divergence_cause: lastSignificant.clamped ? 'risk_clamp' : 'transition_gate',
-                divergence_detail: lastSignificant.clamped
-                  ? (lastSignificant.clamp_reason ?? null)
-                  : (lastSignificant.applied_divergence_cause ?? null),
-                ...(lastSignificant.clamped ? { clamped: true } : {}),
+                divergence_cause: lastSignificant.applied_divergence_cause
+                  ? 'transition_gate'
+                  : 'risk_clamp',
+                divergence_detail:
+                  lastSignificant.applied_divergence_cause ?? lastSignificant.clamp_reason ?? null,
+                ...(lastSignificant.clamped
+                  ? {
+                      clamped: true,
+                      clamp_reason: lastSignificant.clamp_reason ?? null,
+                      // Both mechanisms acted: the clamp trimmed, then the gate refused the
+                      // result. The applied vector above is the previous one, not the clamp's.
+                      ...(lastSignificant.applied_divergence_cause
+                        ? { also_clamped_before_refusal: true }
+                        : {}),
+                    }
+                  : {}),
               }
             : {}),
           what_changed: lastSignificant.what_changed,
