@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { config, resolveTransitionMode } from '../config/index.js';
 import { dec, ZERO } from '../money.js';
-import { applyGate } from '../transition/apply.js';
+import { applyGate, zeroOutStopped } from '../transition/apply.js';
 import { judgeVector } from '../transition/vector.js';
 import { evaluateTransition, type TransitionVerdict } from '../transition/gate.js';
 import { checkCoherence } from '../decision/coherence.js';
@@ -106,7 +106,7 @@ console.log('\n§2 — OBSERVE CHANGES NOTHING (proof 1, and proof 5 by construc
 
   const clamped = { BTC: 10, ETH: 15, USDT: 75 };
   const previous = { BTC: 5, ETH: 20, USDT: 75 };
-  const observed = applyGate({ mode: 'observe', movements, judgement, stopExits: [], clampedAllocation: clamped, previousApplied: previous });
+  const observed = applyGate({ mode: 'observe', movements, judgement, stopExits: [], reserveAsset: 'USDT', clampedAllocation: clamped, previousApplied: previous });
 
   ok('observe keeps EVERY movement, refused judgement or not',
     observed.movements.length === 2 && observed.movements === movements);
@@ -116,8 +116,8 @@ console.log('\n§2 — OBSERVE CHANGES NOTHING (proof 1, and proof 5 by construc
   ok('observe drops no leg', observed.droppedLegs.length === 0);
 
   // Proof 5: flipping back is a pure function of the mode, on the same inputs.
-  const enforced = applyGate({ mode: 'enforce', movements, judgement, stopExits: [], clampedAllocation: clamped, previousApplied: previous });
-  const backToObserve = applyGate({ mode: 'observe', movements, judgement, stopExits: [], clampedAllocation: clamped, previousApplied: previous });
+  const enforced = applyGate({ mode: 'enforce', movements, judgement, stopExits: [], reserveAsset: 'USDT', clampedAllocation: clamped, previousApplied: previous });
+  const backToObserve = applyGate({ mode: 'observe', movements, judgement, stopExits: [], reserveAsset: 'USDT', clampedAllocation: clamped, previousApplied: previous });
   ok('enforce and observe genuinely differ on the same inputs', enforced.refused !== backToObserve.refused);
   ok('returning to observe restores the exact previous outcome, byte for byte',
     JSON.stringify(backToObserve) === JSON.stringify(observed));
@@ -136,7 +136,7 @@ console.log('\n§3 — ENFORCE: applied_allocation KEEPS THE PREVIOUS VECTOR (pr
   );
   const clamped = { BTC: 10, ETH: 15, USDT: 75 };
   const previous = { BTC: 5, ETH: 20, USDT: 75 };
-  const out = applyGate({ mode: 'enforce', movements, judgement, stopExits: [], clampedAllocation: clamped, previousApplied: previous });
+  const out = applyGate({ mode: 'enforce', movements, judgement, stopExits: [], reserveAsset: 'USDT', clampedAllocation: clamped, previousApplied: previous });
 
   ok('the cycle is refused', out.refused);
   ok('applied_allocation is the PREVIOUS vector, not the refused proposal',
@@ -151,7 +151,7 @@ console.log('\n§3 — ENFORCE: applied_allocation KEEPS THE PREVIOUS VECTOR (pr
   ok('both strategic legs are reported as dropped', out.droppedLegs.length === 2);
 
   // The fallback: a bot with no decided history has no previous vector to revert to.
-  const cold = applyGate({ mode: 'enforce', movements, judgement, stopExits: [], clampedAllocation: clamped, previousApplied: null });
+  const cold = applyGate({ mode: 'enforce', movements, judgement, stopExits: [], reserveAsset: 'USDT', clampedAllocation: clamped, previousApplied: null });
   ok('with no history at all, the clamped proposal stands in rather than storing null',
     JSON.stringify(cold.appliedAllocation) === JSON.stringify(clamped));
   ok('and the refusal is still reported, so the fallback cannot mask it', cold.refused);
@@ -180,7 +180,7 @@ console.log('\n§4 — CONSECUTIVE REFUSALS DO NOT DRIFT THE REFERENCE (proof 3.
     const out = applyGate({
       mode: 'enforce',
       movements,
-      judgement, stopExits: [],
+      judgement, stopExits: [], reserveAsset: 'USDT',
       clampedAllocation: clamped[i % clamped.length]!,
       previousApplied: reference,
     });
@@ -208,7 +208,7 @@ console.log('\n§5 — DETERMINISTIC EXITS SURVIVE A REFUSAL');
   const out = applyGate({
     mode: 'enforce',
     movements,
-    judgement, stopExits: [],
+    judgement, stopExits: [], reserveAsset: 'USDT',
     clampedAllocation: { BTC: 10, ETH: 15, USDT: 75 },
     previousApplied: { BTC: 5, ETH: 20, USDT: 75 },
   });
@@ -230,7 +230,7 @@ console.log('\n§5b — THE PEAK STOP EXITS EVEN WHEN THE MODEL SAID NOTHING');
   // (a) the model proposed NOTHING on BNB, and nothing at all this cycle.
   const noLegs = judgeVector([], new Map([['BNB', verdictFor('BNB', { frozen: true })]]));
   const alone = applyGate({
-    mode: 'enforce', movements: [], judgement: noLegs, stopExits: [stopExit],
+    mode: 'enforce', movements: [], judgement: noLegs, stopExits: [stopExit], reserveAsset: 'USDT',
     clampedAllocation: { BNB: 10, USDT: 90 }, previousApplied: { BNB: 10, USDT: 90 },
   });
   ok('the stop exit fires with no model leg whatsoever',
@@ -245,7 +245,7 @@ console.log('\n§5b — THE PEAK STOP EXITS EVEN WHEN THE MODEL SAID NOTHING');
     new Map([['BNB', verdictFor('BNB', { frozen: true })]]),
   );
   const overtaken = applyGate({
-    mode: 'enforce', movements: [buy], judgement: withBuy, stopExits: [stopExit],
+    mode: 'enforce', movements: [buy], judgement: withBuy, stopExits: [stopExit], reserveAsset: 'USDT',
     clampedAllocation: { BNB: 10, USDT: 90 }, previousApplied: { BNB: 10, USDT: 90 },
   });
   ok('a model BUY on a stopping asset does NOT execute',
@@ -257,7 +257,7 @@ console.log('\n§5b — THE PEAK STOP EXITS EVEN WHEN THE MODEL SAID NOTHING');
 
   // (c) OBSERVE must not gain the exit — the stop has never placed an order there.
   const observed = applyGate({
-    mode: 'observe', movements: [buy], judgement: withBuy, stopExits: [stopExit],
+    mode: 'observe', movements: [buy], judgement: withBuy, stopExits: [stopExit], reserveAsset: 'USDT',
     clampedAllocation: { BNB: 10, USDT: 90 }, previousApplied: { BNB: 10, USDT: 90 },
   });
   ok('OBSERVE generates no exit and keeps the model leg — the switch still changes nothing',
@@ -288,7 +288,7 @@ console.log('\n§5c — AN ASSET WITH NO REGIME FAILS CLOSED IN ENFORCE');
   ok('and the leg is unjudged, not forbidden', judgement.legs[0]?.ownVerdict === 'unjudged');
 
   const enforced = applyGate({
-    mode: 'enforce', movements: legs, judgement, stopExits: [],
+    mode: 'enforce', movements: legs, judgement, stopExits: [], reserveAsset: 'USDT',
     clampedAllocation: { XRP: 10, USDT: 90 }, previousApplied: { XRP: 5, USDT: 95 },
   });
   ok('but ENFORCE fails CLOSED: the leg does not execute',
@@ -297,7 +297,7 @@ console.log('\n§5c — AN ASSET WITH NO REGIME FAILS CLOSED IN ENFORCE');
     enforced.reason.includes('NO regime') && enforced.reason.includes('XRP'));
 
   const observed = applyGate({
-    mode: 'observe', movements: legs, judgement, stopExits: [],
+    mode: 'observe', movements: legs, judgement, stopExits: [], reserveAsset: 'USDT',
     clampedAllocation: { XRP: 10, USDT: 90 }, previousApplied: { XRP: 5, USDT: 95 },
   });
   ok('OBSERVE is untouched — the leg still passes, exactly as today',
@@ -311,7 +311,7 @@ console.log('\n§5c — AN ASSET WITH NO REGIME FAILS CLOSED IN ENFORCE');
   });
   const sell = [movement('XRP', 'sell', '90')];
   const reduction = applyGate({
-    mode: 'enforce', movements: sell, stopExits: [],
+    mode: 'enforce', movements: sell, stopExits: [], reserveAsset: 'USDT',
     judgement: judgeVector(
       sell.map((m) => ({ asset: m.asset, side: m.side, notional: m.notional })),
       new Map([['XRP', riskOff]]),
@@ -492,6 +492,89 @@ console.log('\n§10 — THE ARMED-STOP-NOT-FIRED ALERT');
     formatAlert({ trigger: 'degraded', value: 3, timestamp: 'T' }).includes('DÉGRADÉ'));
   ok('the overheating alert wording is untouched',
     formatAlert({ trigger: 'overheating', value: 10, timestamp: 'T' }).includes('EMBALLEMENT'));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+console.log('\n§11 — A FIRED STOP PUTS ITS LINE FLAT IN applied_allocation');
+// The P1 the review found: a stop can fire while the strategic vector is perfectly fine —
+// the model obeys and proposes nothing on the frozen line. Keeping the model's positive
+// weight would leave the guard's reference describing a book that no longer exists, reject
+// an honest zero next cycle, and stand as an instruction to buy the line back.
+{
+  const stopExit: Movement = { ...movement('BNB', 'sell', '200'), fullExit: true };
+  const clamped = { BNB: 20, BTC: 10, USDT: 70 };
+
+  // (a) accepted cycle — nothing refused, the stop still fires.
+  const clean = judgeVector([], new Map([['BNB', verdictFor('BNB', { frozen: true })]]));
+  const accepted = applyGate({
+    mode: 'enforce', movements: [], judgement: clean, stopExits: [stopExit],
+    clampedAllocation: clamped, previousApplied: { BNB: 20, BTC: 10, USDT: 70 },
+    reserveAsset: 'USDT',
+  });
+  ok('the cycle is NOT refused — the fixture is the accepted case', accepted.refused === false);
+  ok('the stopped line is FLAT in applied_allocation', accepted.appliedAllocation.BNB === 0);
+  ok('and its weight lands in the reserve, where the proceeds went',
+    accepted.appliedAllocation.USDT === 90);
+  ok('the untouched line keeps its weight', accepted.appliedAllocation.BTC === 10);
+  ok('the exit still executes', accepted.movements.length === 1);
+
+  // (b) refused cycle — the base is the PREVIOUS vector, and it too must go flat.
+  const refusedJudgement = judgeVector(
+    [{ asset: 'BTC', side: 'buy', notional: dec('50') }],
+    new Map([
+      ['BTC', verdictFor('BTC', { frozen: true })],
+      ['BNB', verdictFor('BNB', { frozen: true })],
+    ]),
+  );
+  const refused = applyGate({
+    mode: 'enforce', movements: [movement('BTC', 'buy', '50')], judgement: refusedJudgement,
+    stopExits: [stopExit], clampedAllocation: { BNB: 5, BTC: 25, USDT: 70 },
+    previousApplied: { BNB: 20, BTC: 10, USDT: 70 }, reserveAsset: 'USDT',
+  });
+  ok('on a refused cycle the base is the previous vector', refused.refused && refused.appliedAllocation.BTC === 10);
+  ok('and the stopped line is flat there too', refused.appliedAllocation.BNB === 0);
+  ok('with the freed weight in the reserve', refused.appliedAllocation.USDT === 90);
+
+  // (c) no stop → the allocation is returned untouched, same object identity.
+  const noStop = applyGate({
+    mode: 'enforce', movements: [], judgement: clean, stopExits: [],
+    clampedAllocation: clamped, previousApplied: null, reserveAsset: 'USDT',
+  });
+  ok('with no stop firing the allocation is untouched', noStop.appliedAllocation === clamped);
+
+  // The helper's own edges.
+  ok('an asset absent from the allocation frees nothing',
+    JSON.stringify(zeroOutStopped({ BTC: 10, USDT: 90 }, new Set(['BNB']), 'USDT')) ===
+      JSON.stringify({ BTC: 10, USDT: 90 }));
+  ok('an already-zero weight frees nothing',
+    zeroOutStopped({ BNB: 0, USDT: 100 }, new Set(['BNB']), 'USDT').USDT === 100);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+console.log('\n§12 — AN ASSET WITH NO REGIME STILL APPEARS, MARKED NON-ACTIONABLE');
+// The other P1: during a PARTIAL 4h loss the failed asset is absent from `regime.assets`,
+// so it vanished from the payload entirely. The model saw the coin in the allocation
+// universe, got no hold instruction, could propose a leg on it — and enforcement then
+// cancelled every other valid leg of the cycle.
+{
+  const partial = {
+    version: 'r1', barAt: 'B',
+    global: { riskOff: false, raw: false, breadthPercent: 0, medianH4Rsi: null, assetsPresent: 1, assetsExpected: 2, pendingBars: 0 },
+    // XRP is MISSING — its 4h series failed this cycle.
+    assets: {
+      BTC: { effective: 'range', regime: 'range', raw: 'range', pendingRegime: null, pendingBars: 0, bearish: false, signals: { close: 1, pullbackConsumed: true } },
+    },
+  } as never;
+
+  const view = toActionableRegimeView(partial, new Map([['BTC', true], ['XRP', false]]));
+  ok('the missing asset is PRESENT in the payload', Object.keys(view.assets).includes('XRP'));
+  ok('marked non-actionable, so the model is told to hold it', view.assets.XRP?.actionable === false);
+  ok('with a NULL regime rather than a plausible-looking default',
+    view.assets.XRP?.regime === null && view.assets.XRP?.effective === null);
+  ok('and no fabricated signals', JSON.stringify(view.assets.XRP?.signals) === '{}');
+  ok('bearish is null, not a claim about a market nobody read', view.assets.XRP?.bearish === null);
+  ok('the asset that DID load is unaffected', view.assets.BTC?.actionable === true && view.assets.BTC?.regime === 'range');
+  ok('and `raw` is still nowhere to be found', !JSON.stringify(view).includes('"raw"'));
 }
 
 console.log(`\n${passed} passed, ${failed} failed — transition gate enforce (offline).`);

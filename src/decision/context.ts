@@ -71,13 +71,19 @@ export interface PositionLifecycleView {
  *     than an inference the model makes from a label.
  */
 export interface ActionableAssetView {
-  /** risk_off when the global override is confirmed, else the CONFIRMED regime. */
-  effective: string;
-  /** The confirmed regime after hysteresis — never the candidate. */
-  regime: string;
+  /**
+   * risk_off when the global override is confirmed, else the CONFIRMED regime.
+   *
+   * NULL when the asset produced no regime at all this cycle — a partial 4h data loss. It
+   * still appears, explicitly unreadable, rather than vanishing; see the universe note on
+   * `toActionableRegimeView`.
+   */
+  effective: string | null;
+  /** The confirmed regime after hysteresis — never the candidate. Null when unavailable. */
+  regime: string | null;
   /** May the model place a strategic order on this line this cycle? */
   actionable: boolean;
-  bearish: boolean;
+  bearish: boolean | null;
   signals: Record<string, unknown>;
 }
 
@@ -129,11 +135,43 @@ export function toActionableRegimeView(
   actionableByAsset: Map<string, boolean>,
 ): ActionableRegimeView {
   const assets: ActionableRegimeView['assets'] = {};
-  for (const [asset, entry] of Object.entries(regime.assets)) {
+
+  /**
+   * THE UNIVERSE IS THE UNION, not the regime's own keys.
+   *
+   * On a PARTIAL 4h data loss the failed asset is absent from `regime.assets` entirely, so
+   * iterating those keys dropped it from the payload altogether — while
+   * `actionableByAsset` carried it, correctly, as false. The model still saw the coin in
+   * the market block and in the allocation universe, never received its `actionable: false`
+   * hold instruction, and could propose a strategic leg on it. Enforcement then failed that
+   * leg closed and atomically cancelled EVERY other valid leg of the cycle: a silent defect
+   * costing the whole wake-up, triggered by a partial outage rather than by anything the
+   * model did wrong.
+   *
+   * So every asset the layer produced a verdict for appears, with or without a regime.
+   */
+  const universe = new Set([...Object.keys(regime.assets), ...actionableByAsset.keys()]);
+
+  for (const asset of universe) {
+    const entry = regime.assets[asset];
     // Default FALSE, not true. An asset the transition layer produced no verdict for is
     // one the code cannot vouch for, and the safe reading of "unknown" here is "do not
     // act" — the mirror of the ladder's own refusal to guess.
     const actionable = actionableByAsset.get(asset) ?? false;
+
+    if (entry == null) {
+      // No regime at all. Shown as such — nulls rather than a plausible-looking default,
+      // because a fabricated `range` would be a statement about a market nobody read.
+      assets[asset] = {
+        effective: null,
+        regime: null,
+        actionable: false,
+        bearish: null,
+        signals: {},
+      };
+      continue;
+    }
+
     const signals: Record<string, unknown> = { ...entry.signals };
     if (!actionable) {
       for (const flag of TACTICAL_FLAGS) delete signals[flag];

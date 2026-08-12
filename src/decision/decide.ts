@@ -1037,6 +1037,7 @@ export async function decide(): Promise<DecideResult> {
     judgement: gateJudgement,
     stopExits,
     clampedAllocation: clamp.applied,
+    reserveAsset: reserveStable,
     // The last ACCEPTED applied vector — the coherence guard's own reference, read at the
     // top of this cycle. Using the same source means the value the guard will compare
     // against next cycle is the value we store now, by construction rather than by luck.
