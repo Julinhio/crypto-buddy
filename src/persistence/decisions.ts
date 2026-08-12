@@ -24,6 +24,12 @@ export interface DecisionSummary {
   applied_allocation: unknown;
   clamped: boolean | null;
   clamp_reason: string | null;
+  /**
+   * Why `applied_allocation` diverged from the proposal when the RISK CLAMP was not the
+   * cause — i.e. the transition gate refused the cycle's strategic vector (migration 0026).
+   * Null on every row where the two agree, and on every row written before that migration.
+   */
+  applied_divergence_cause: string | null;
   confidence: string;
   market_state: string;
   what_changed: string;
@@ -40,6 +46,15 @@ export interface DecisionRow {
   applied_allocation: Record<string, number> | null;
   clamped: boolean | null;
   clamp_reason: string | null;
+  /**
+   * Why `applied_allocation` diverged from the proposal when the clamp was NOT the cause
+   * (migration 0026) — today, only the transition gate refusing the strategic vector.
+   *
+   * A separate column rather than reusing `clamp_reason`: on a refused cycle `clamped`
+   * stays FALSE, so a reader filtering on it would conclude nothing had trimmed the target
+   * while the two columns plainly disagree. Two causes, two columns, no overloading.
+   */
+  applied_divergence_cause: string | null;
   action_type: string | null;
   what_changed: string | null;
   confidence: string | null;
@@ -133,7 +148,8 @@ export async function loadLastSignificantDecision(
       .from(TABLE)
       .select(
         'created_at, action_type, target_allocation, applied_allocation, clamped, clamp_reason, ' +
-          'confidence, market_state, what_changed, reasoning, executions!inner(id)',
+          'applied_divergence_cause, confidence, market_state, what_changed, reasoning, ' +
+          'executions!inner(id)',
       )
       .eq('status', 'decided')
       // An INNER join on a booked intent: only a decision the ledger actually recorded

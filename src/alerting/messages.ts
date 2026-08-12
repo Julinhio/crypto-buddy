@@ -40,6 +40,45 @@ export interface AlertPayload {
   cause?: string | null;
 }
 
+/**
+ * A PEAK STOP THAT WAS ARMED ON A CYCLE THAT DIED BEFORE IT COULD FIRE.
+ *
+ * The gap is narrow and real: the stop's exit is synthesized after the model call, the
+ * parse and the coherence guard, so a cycle that fails at any of those three returns
+ * without generating it. A stop whose firing depends on the model succeeding is not
+ * deterministic, and the ladder presents it as though it were.
+ *
+ * The chosen posture is to make the gap VISIBLE rather than to close it here: closing it
+ * means placing orders on paths that today place none and that have no `decided` row to
+ * anchor the sovereign booking to — a change well beyond arming the gate, and one that
+ * deserves its own PR and its own proofs. So this message exists to stop the gap being
+ * silent, which is the only property it was missing.
+ *
+ * Wording matters more than usual: the operator must not read this as "an order failed".
+ * Nothing was placed, nothing was lost, and the stop fires on the next successful cycle.
+ * Kept PURE, like every other message here, so the wording is unit-testable.
+ */
+export function formatArmedStopNotFired(params: {
+  /** Assets whose peak stop would have fired on this cycle. */
+  assets: string[];
+  /** The cycle's terminal status — error, parse_failed, guard_failed. */
+  status: string;
+  /** ISO timestamp, so the message is self-dating. */
+  timestamp: string;
+}): string {
+  const list = params.assets.join(', ');
+  return (
+    `🛑 crypto-buddy — STOP DE PIC NON DÉCLENCHÉ\n` +
+    `Le stop était armé sur ${list}, mais le cycle a échoué (${params.status}) avant de ` +
+    `pouvoir le générer.\n` +
+    `AUCUN ordre n'a été passé et rien n'est perdu : la ligne est toujours ouverte, et le ` +
+    `stop tirera au prochain cycle réussi.\n` +
+    `À surveiller si ça se répète — c'est le seul cas où une sortie déterministe dépend ` +
+    `encore de la réussite du modèle.\n` +
+    `🕑 ${params.timestamp}`
+  );
+}
+
 /** Keep a stack/error from blowing past Telegram's limit and burying the message. */
 const MAX_ERROR_CHARS = 500;
 

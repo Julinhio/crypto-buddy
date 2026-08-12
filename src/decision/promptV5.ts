@@ -37,9 +37,54 @@ export const PROMPT_V5_VERSION = 'v5';
  * The frozen v5 system prompt. Byte-stable across runs (everything volatile lives in
  * the user message) so it stays prompt-cacheable.
  */
-export function buildSystemPromptV5(cfg: AppConfig = config): string {
+export function buildSystemPromptV5(
+  cfg: AppConfig = config,
+  /**
+   * Defaults to `observe`, which returns the prompt BYTE-FOR-BYTE as it has been. That
+   * default is what makes the rollback total: flipping back does not merely stop the gate
+   * blocking, it restores the exact system prompt — and therefore the prompt cache — that
+   * the bot has been running on. Only `decide()` passes the real mode.
+   */
+  mode: 'observe' | 'enforce' = 'observe',
+): string {
   const { caps, minMovementPercent } = cfg.execution;
   const th = cfg.regime.thresholds;
+  // The mandate for a non-actionable line. Present ONLY under `enforce`, because only
+  // there is it true: in observe the code executes the model's orders on frozen assets, so
+  // telling it otherwise would be a false statement about its own effect on the world.
+  const actionability = mode === 'enforce'
+    ? [
+        '## Actionable lines, and lines in transition',
+        '',
+        'Each asset carries an `actionable` flag. It is computed by the code and it is not',
+        'negotiable.',
+        '',
+        'actionable: false means the asset\'s raw regime has changed but has NOT yet held long',
+        'enough to be confirmed — the line is mid-transition. In that state the label you are',
+        'shown describes a market that may already be gone, so acting on it means acting on a',
+        'reading the code cannot vouch for. The tactical flags (pullbackConsumed /',
+        'bounceConsumed) are deliberately WITHHELD on those lines for the same reason.',
+        '',
+        'What is expected of you on a non-actionable line:',
+        '- do NOT propose a strategic change to it. Hold its current weight.',
+        '- a strategic order on such a line is REFUSED by the code, and the refusal cancels',
+        '  EVERY strategic leg of your vector — not just that one. A portfolio target is',
+        '  applied whole or not at all, so one blocked line costs you the entire cycle.',
+        '- your reasoning may absolutely say what you INTEND to do once it confirms. State it;',
+        '  it is recorded, and it is not an order.',
+        '',
+        'One thing is never blocked and you do not need to ask for it: the code\'s own peak stop.',
+        'It exits a line in full, by itself, and you cannot prevent it.',
+        '',
+        'REDUCTIONS UNDER A CONFIRMED GLOBAL risk_off ARE DIFFERENT, and the difference matters.',
+        'They are ALLOWED through the freeze — but the code does NOT generate them for you. If',
+        'risk_off is confirmed and a line should get smaller, you must PROPOSE that reduction',
+        'yourself, INCLUDING on a line marked actionable: false. It will pass. Staying silent',
+        'because the line is frozen traps the exposure at exactly the moment the market is',
+        'broadly breaking, which is the one outcome this whole ladder exists to prevent.',
+        '',
+      ]
+    : [];
   return [
     'You are the decision engine of an autonomous crypto-portfolio bot trading on',
     'Binance (spot, testnet). You PROPOSE a target allocation; deterministic code',
@@ -60,6 +105,7 @@ export function buildSystemPromptV5(cfg: AppConfig = config): string {
     'Plus a GLOBAL risk_off override. It is a portfolio posture, not a sixth label:',
     'when it is active it takes priority over every per-asset regime.',
     '',
+    ...actionability,
     '## Playbook per regime',
     '',
     '- range: accumulate in the low zone, lighten in the high zone. The round trip is',
@@ -243,6 +289,13 @@ export function buildUserPromptV5(params: {
 }): string {
   const { allocationAssets, reserveStable, context, lastSignificant } = params;
 
+  // Resolved rather than `applied ?? target` — see effectiveTarget.ts. That resolver was
+  // landed ahead of this PR precisely so the day the two columns diverge could be told
+  // apart from the refactor that made them comparable. This is that day.
+  const divergence = lastSignificant
+    ? resolveEffectiveTarget(lastSignificant)
+    : { allocation: null, differsFromProposal: false };
+
   // ONE past decision, and only a significant one. v4 injected the last five, which
   // were five identical holds — an anchor that showed the bot its own immobility as
   // evidence of consistency.
@@ -252,18 +305,50 @@ export function buildUserPromptV5(params: {
           at: lastSignificant.created_at,
           action_type: lastSignificant.action_type,
           proposed_allocation: lastSignificant.target_allocation,
-          // If the risk wrapper trimmed that proposal, say so and show what it kept.
-          // Handing back only the raw proposal would let this cycle reason about a
-          // target the book never actually pursued — and quietly invite the model to
-          // propose past the cap again, since nothing would tell it the last attempt
-          // was cut.
-          // Resolved rather than `applied ?? target` — see effectiveTarget.ts. Same value
-          // today; explicit about the fallback from now on.
-          ...(lastSignificant.clamped
+          // ── THE TWO MEMORIES, SHOWN APART ────────────────────────────────────────
+          //
+          // What the model ASKED for, and what the deterministic chain actually LET
+          // THROUGH. Handing back only the proposal would let this cycle reason about a
+          // target the book never pursued — and quietly invite the model to re-propose
+          // something that was already refused, since nothing would tell it the last
+          // attempt was cut.
+          //
+          // The trigger used to be `clamped`, and that stops working the day the gate
+          // blocks: a refused vector leaves `clamped` FALSE while applied and proposed
+          // diverge, so the divergence would simply vanish from the memory at exactly the
+          // moment it matters most. It is now driven by the divergence ITSELF
+          // (`differsFromProposal`), which is true whatever caused it.
+          //
+          // The key is `applied_allocation`, deliberately NOT `risk_bounded_target`: that
+          // name asserts the risk wrapper did it, and it would be a lie on a cycle the
+          // transition gate refused. `divergence_cause` names the real reason.
+          //
+          // THE GATE TAKES PRECEDENCE WHEN BOTH ACTED, and the ordering is not cosmetic.
+          // The clamp and the gate can both fire on one cycle: the wrapper trims the
+          // proposal, then the gate refuses the vector the trimmed target produced. The
+          // stored `applied_allocation` is then the PREVIOUS vector — not the clamped one —
+          // so reporting `risk_clamp` would tell the model the clamp produced an allocation
+          // it never produced, and hide that the whole vector was refused. The clamp is
+          // still reported, alongside, because it did happen.
+          ...(divergence.differsFromProposal
             ? {
-                risk_bounded_target: resolveEffectiveTarget(lastSignificant).allocation,
-                clamped: true,
-                clamp_reason: lastSignificant.clamp_reason ?? null,
+                applied_allocation: divergence.allocation,
+                divergence_cause: lastSignificant.applied_divergence_cause
+                  ? 'transition_gate'
+                  : 'risk_clamp',
+                divergence_detail:
+                  lastSignificant.applied_divergence_cause ?? lastSignificant.clamp_reason ?? null,
+                ...(lastSignificant.clamped
+                  ? {
+                      clamped: true,
+                      clamp_reason: lastSignificant.clamp_reason ?? null,
+                      // Both mechanisms acted: the clamp trimmed, then the gate refused the
+                      // result. The applied vector above is the previous one, not the clamp's.
+                      ...(lastSignificant.applied_divergence_cause
+                        ? { also_clamped_before_refusal: true }
+                        : {}),
+                    }
+                  : {}),
               }
             : {}),
           what_changed: lastSignificant.what_changed,

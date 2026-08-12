@@ -377,6 +377,48 @@ export function resolveCoherenceGuard(raw: string | undefined = process.env.COHE
   );
 }
 
+/**
+ * How the transition layer behaves this run.
+ *
+ *   `observe` — it computes and journals, and blocks NOTHING. Byte-for-byte the behaviour
+ *               the bot has had since 08/08: same orders, same payload to the model.
+ *   `enforce` — the ladder it computes becomes effective, and the atomic refusal applies.
+ */
+export type TransitionMode = 'observe' | 'enforce';
+
+/**
+ * Resolves `TRANSITION_MODE`, and FAILS LOUD on anything it does not recognise.
+ *
+ * Same convention as STRATEGY_VERSION and COHERENCE_GUARD, and the same reason:
+ * ABSENCE MEANS SAFE. Here `observe` is the safe mode — the one that changes nothing — so
+ * there is nothing to set on Railway to keep today's behaviour, the blocking mode requires
+ * an explicit opt-in, and an environment that loses its variables comes back observing.
+ *
+ * This is THE ROLLBACK. It is the reason it is an environment variable rather than a code
+ * constant: on Railway the value changes without a code deployment, so returning to
+ * `observe` is a restart, not a revert-and-redeploy. It gates the payload too, so going
+ * back restores what the MODEL sees as well as what the gate does — a mode switch that
+ * left the model reading a different context would not be a rollback, it would be a third
+ * behaviour nobody has measured.
+ *
+ * A PRESENT but unrecognised value is an error, never a silent fallback. `ENFORCE`,
+ * `true` and `on` all fail: someone typing them INTENDED to arm the gate, and silently
+ * observing instead would leave the operator believing the bot is protected.
+ */
+export function resolveTransitionMode(
+  raw: string | undefined = process.env.TRANSITION_MODE,
+): TransitionMode {
+  if (raw == null || raw.trim() === '') return 'observe';
+  const value = raw.trim();
+  if (value === 'observe' || value === 'enforce') return value;
+  throw new Error(
+    `Invalid TRANSITION_MODE="${raw}": expected exactly "observe" or "enforce" (case-sensitive), ` +
+      'or UNSET for the default "observe". A present-but-unrecognised value is refused rather than ' +
+      'defaulted: it means someone intended to change how the transition gate behaves, and silently ' +
+      'running the other mode would be worse than not booting.',
+  );
+}
+
 export const config: AppConfig = {
   // Pairs the bot may take positions on (subject to the risk caps). Add a tradable
   // pair by appending one line AND giving it a cap in execution.caps.perAsset.
@@ -847,6 +889,55 @@ export const STRATEGY_VERSION: StrategyVersion = resolveStrategyVersion();
  * disarm its own guard halfway through.
  */
 export const COHERENCE_GUARD: boolean = resolveCoherenceGuard();
+
+/**
+ * The transition layer's mode for this process, resolved ONCE at startup so a malformed
+ * value fails the boot rather than surfacing mid-cycle — and so a run cannot change what
+ * the gate does, or what the model is shown, under its own feet.
+ */
+export const TRANSITION_MODE: TransitionMode = resolveTransitionMode();
+
+/**
+ * Fails fast on `enforce` + `v4`, a combination that blocks in silence.
+ *
+ * Under v4 the model is shown NOTHING of the transition layer: `toDecisionContext` returns
+ * the base payload with no regime and no `actionable` flag, and `buildSystemPrompt` carries
+ * no mandate about non-actionable lines — both by design, because v4 is the mandate that
+ * predates all of this. But `applyGate` does not consult the strategy: it would keep
+ * blocking. The model would therefore propose a leg on a frozen asset in complete good
+ * faith, having been told nothing, and watch its entire strategic vector cancelled
+ * atomically. Silently, and on every frozen cycle.
+ *
+ * THIS IS NOT A THEORETICAL PATH, and that is the whole reason it fails the boot rather
+ * than warning. The absence of `STRATEGY_VERSION` resolves to `v4` BY DESIGN — it is the
+ * project's disaster-recovery posture, the thing that makes "an environment that lost its
+ * variables comes back safe" true. An environment that loses that variable while KEEPING
+ * `TRANSITION_MODE=enforce` lands in exactly this combination, and the safety net would
+ * have turned into a trading freeze nobody asked for.
+ *
+ * Refusing to boot is the right severity: the two supported configurations are `observe`
+ * with either strategy (today's behaviour), and `enforce` with v5 (the switch this PR
+ * exists for). Exported for the offline test.
+ */
+export function validateTransitionModeConfig(
+  mode: TransitionMode,
+  strategy: StrategyVersion,
+): void {
+  if (mode === 'enforce' && strategy !== 'v5') {
+    throw new Error(
+      `Invalid combination TRANSITION_MODE="enforce" with STRATEGY_VERSION="${strategy}": the ` +
+        `transition gate can only enforce under v5. Under ${strategy} the model is shown no regime ` +
+        'and no `actionable` flag, and its mandate says nothing about frozen lines — yet the gate ' +
+        'would still block, so the model would propose in good faith and have its whole strategic ' +
+        'vector cancelled atomically, on every frozen cycle, with no way to know why. Note that an ' +
+        'UNSET STRATEGY_VERSION resolves to v4 by design (the disaster-recovery posture), so this ' +
+        'is reachable by losing that variable while keeping TRANSITION_MODE. Set STRATEGY_VERSION=v5, ' +
+        'or set TRANSITION_MODE=observe (or unset it) to keep today\'s behaviour.',
+    );
+  }
+}
+
+validateTransitionModeConfig(TRANSITION_MODE, STRATEGY_VERSION);
 
 /**
  * Fails fast on a bad daily-summary config. The timezone is validated by trying to

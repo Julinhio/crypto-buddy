@@ -45,6 +45,61 @@ export interface PositionLifecycleView {
   invalidation: string | null;
 }
 
+/**
+ * ONE ASSET AS THE MODEL SEES IT UNDER `enforce` — the actionable state, not the candidate.
+ *
+ * Three deliberate absences, and each closes a measured defect rather than a hypothetical:
+ *
+ *   - NO `raw`, NO `pendingRegime`, NO `pendingBars`. These describe the candidate label
+ *     that has not yet confirmed. Showing them let the model ANTICIPATE a regime change —
+ *     that is what happened on XRP — and the fix has to be structural. Writing "do not use
+ *     this" beside them would make a deterministic invariant depend on the model obeying a
+ *     sentence, which is not an invariant at all. They stay in `decisions.regime`, which
+ *     the dashboard reads directly, so nothing is lost for observability.
+ *
+ *   - NO tactical FLAGS when the asset is not actionable. `pullbackConsumed` and
+ *     `bounceConsumed` are computed on the CURRENT bar while the regime label is smoothed
+ *     over three confirmation bars. During a transition that pair is exactly the "label
+ *     describing the past next to flags describing the present" the report identified, and
+ *     the v5 playbook tells the model to treat it as an instruction. Withheld while frozen,
+ *     restored the moment the regime confirms.
+ *
+ *     The other 4h numbers (`rsi14H4`, `ema21H4`, `h4RangePosition`) are kept: they are raw
+ *     measurements, not verdicts, and the model needs to see the market it cannot act on.
+ *
+ *   - `actionable` is PRESENT and explicit, so "may I trade this line" is a field rather
+ *     than an inference the model makes from a label.
+ */
+export interface ActionableAssetView {
+  /**
+   * risk_off when the global override is confirmed, else the CONFIRMED regime.
+   *
+   * NULL when the asset produced no regime at all this cycle — a partial 4h data loss. It
+   * still appears, explicitly unreadable, rather than vanishing; see the universe note on
+   * `toActionableRegimeView`.
+   */
+  effective: string | null;
+  /** The confirmed regime after hysteresis — never the candidate. Null when unavailable. */
+  regime: string | null;
+  /** May the model place a strategic order on this line this cycle? */
+  actionable: boolean;
+  bearish: boolean | null;
+  signals: Record<string, unknown>;
+}
+
+export interface ActionableRegimeView {
+  version: string;
+  barAt: string;
+  global: {
+    riskOff: boolean;
+    breadthPercent: number;
+    medianH4Rsi: number | null;
+    assetsPresent: number;
+    assetsExpected: number;
+  };
+  assets: Record<string, ActionableAssetView>;
+}
+
 export interface DecisionContext {
   generatedAt: string;
   source: MarketContext['source'];
@@ -54,9 +109,95 @@ export interface DecisionContext {
    * v5 ONLY. Under v4 both stay absent, which is what makes shadow mode real: the
    * regime and the lifecycle are computed and journaled either way, but the v4 model
    * is shown a context byte-identical to the one it has always seen.
+   *
+   * Under `observe` this is the FULL `RegimeJournal`, byte-identical to what the model has
+   * been shown since v5 shipped. Under `enforce` it is the reduced `ActionableRegimeView`.
+   * The mode gates it for the same reason it gates the gate: going back to `observe` has to
+   * restore what the model reads, not only what the code does, or the rollback would land
+   * on a third behaviour nobody has measured.
    */
-  regime?: MarketContext['regime'];
+  regime?: MarketContext['regime'] | ActionableRegimeView;
   positions?: PositionLifecycleView[];
+}
+
+/** The two flags withheld while an asset is not actionable — see ActionableAssetView. */
+const TACTICAL_FLAGS = ['pullbackConsumed', 'bounceConsumed'] as const;
+
+/**
+ * Projects the full regime journal onto what `enforce` shows the model.
+ *
+ * Exported so the payload can be asserted on its KEYS by a test rather than trusted: the
+ * whole point of removing `raw` is that it is not reachable, and "we removed it" is a claim
+ * a test should be able to falsify.
+ */
+export function toActionableRegimeView(
+  regime: NonNullable<MarketContext['regime']>,
+  actionableByAsset: Map<string, boolean>,
+): ActionableRegimeView {
+  const assets: ActionableRegimeView['assets'] = {};
+
+  /**
+   * THE UNIVERSE IS THE UNION, not the regime's own keys.
+   *
+   * On a PARTIAL 4h data loss the failed asset is absent from `regime.assets` entirely, so
+   * iterating those keys dropped it from the payload altogether — while
+   * `actionableByAsset` carried it, correctly, as false. The model still saw the coin in
+   * the market block and in the allocation universe, never received its `actionable: false`
+   * hold instruction, and could propose a strategic leg on it. Enforcement then failed that
+   * leg closed and atomically cancelled EVERY other valid leg of the cycle: a silent defect
+   * costing the whole wake-up, triggered by a partial outage rather than by anything the
+   * model did wrong.
+   *
+   * So every asset the layer produced a verdict for appears, with or without a regime.
+   */
+  const universe = new Set([...Object.keys(regime.assets), ...actionableByAsset.keys()]);
+
+  for (const asset of universe) {
+    const entry = regime.assets[asset];
+    // Default FALSE, not true. An asset the transition layer produced no verdict for is
+    // one the code cannot vouch for, and the safe reading of "unknown" here is "do not
+    // act" — the mirror of the ladder's own refusal to guess.
+    const actionable = actionableByAsset.get(asset) ?? false;
+
+    if (entry == null) {
+      // No regime at all. Shown as such — nulls rather than a plausible-looking default,
+      // because a fabricated `range` would be a statement about a market nobody read.
+      assets[asset] = {
+        effective: null,
+        regime: null,
+        actionable: false,
+        bearish: null,
+        signals: {},
+      };
+      continue;
+    }
+
+    const signals: Record<string, unknown> = { ...entry.signals };
+    if (!actionable) {
+      for (const flag of TACTICAL_FLAGS) delete signals[flag];
+    }
+    assets[asset] = {
+      effective: entry.effective,
+      regime: entry.regime,
+      actionable,
+      bearish: entry.bearish,
+      signals,
+    };
+  }
+  return {
+    version: regime.version,
+    barAt: regime.barAt,
+    // `raw` and `pendingBars` dropped here too: the global override has the same
+    // candidate/confirmed split as the per-asset labels, and the same reason to hide it.
+    global: {
+      riskOff: regime.global.riskOff,
+      breadthPercent: regime.global.breadthPercent,
+      medianH4Rsi: regime.global.medianH4Rsi,
+      assetsPresent: regime.global.assetsPresent,
+      assetsExpected: regime.global.assetsExpected,
+    },
+    assets,
+  };
 }
 
 const n2 = (d: Decimal): number => Number(d.toFixed(2));
@@ -90,6 +231,17 @@ export function toDecisionContext(
   portfolio: VirtualPortfolio,
   strategy: StrategyVersion = 'v4',
   lifecycle: Map<string, PositionState> = new Map(),
+  /**
+   * The transition layer's mode, and its per-asset verdict.
+   *
+   * BOTH default to today's behaviour — `observe`, no verdicts — so every existing caller
+   * (the tests, the printers, the replay harness) keeps producing the payload it produced
+   * before this PR without being touched. Only `decide()` passes them.
+   */
+  gate: { mode: 'observe' | 'enforce'; actionableByAsset: Map<string, boolean> } = {
+    mode: 'observe',
+    actionableByAsset: new Map(),
+  },
 ): DecisionContext {
   const base: DecisionContext = {
     generatedAt: market.generatedAt,
@@ -132,7 +284,14 @@ export function toDecisionContext(
       invalidation: state.invalidation,
     });
   }
-  return { ...base, regime: market.regime, positions };
+  // THE ONLY PAYLOAD DIFFERENCE BETWEEN THE TWO MODES. In `observe` the journal goes
+  // through untouched — byte-identical to every cycle since v5 shipped, which is what makes
+  // the switch a true rollback. In `enforce` the model is shown the actionable state.
+  const regime =
+    gate.mode === 'enforce' && market.regime != null
+      ? toActionableRegimeView(market.regime, gate.actionableByAsset)
+      : market.regime;
+  return { ...base, regime, positions };
 }
 
 /**
