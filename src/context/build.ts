@@ -16,6 +16,13 @@ import {
 } from '../market/regime.js';
 import { stickyTimelines, type StickyPoint } from '../market/transition.js';
 import { fetchRelevantBalances, type AssetBalance } from '../account/balances.js';
+import {
+  captureHttpErrors,
+  errorClassOf,
+  parseCcxtMessage,
+  type HttpErrorTrace,
+} from '../exchanges/errorCapture.js';
+import type { MarketFailure } from '../persistence/marketDataIncidents.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
 import {
   resolveAllTimeLevels,
@@ -46,6 +53,38 @@ export interface TransitionRead {
   barAtMs: number;
   /** Sticky state per asset AT that bar. An asset whose walk ended earlier is omitted. */
   perAsset: Record<string, StickyPoint>;
+}
+
+/**
+ * THE SECOND HEALTH STATE, as this cycle measured it.
+ *
+ * "The scheduler is alive" and "the bot can see the market" are two different questions
+ * that used to be one. On 09/08 the first was TRUE for 23 hours — the bot really was
+ * waking up, and the dead-man's switch was right to stay green — while the second was
+ * false 31 times, and nothing anywhere recorded it.
+ *
+ * This is the raw material for the second answer. It carries no verdict of its own: the
+ * scheduler turns it into a counter, the alert reads the counter, and the incident writer
+ * turns the failures into a durable row.
+ */
+export interface MarketDataHealth {
+  /**
+   * TRUE when no tradable pair returned usable data — the 09/08 signature, and the exact
+   * condition the existing fail-closed already refuses to decide on. Deliberately the
+   * SAME predicate as `context.market.tradable.length === 0` rather than a parallel one,
+   * so the alert can never disagree with the behaviour it is reporting on.
+   */
+  blind: boolean;
+  /** Every configured pair the cycle tried to read (tradable + reference). */
+  attempted: number;
+  /** Pairs actually LOST — the brief's "nombre de marchés affectés". */
+  lost: number;
+  /** Every failed read, including the contained ones that did not drop their pair. */
+  failures: MarketFailure[];
+  /** HTTP-level detail for the failing responses: status, endpoint, Retry-After. */
+  httpTraces: HttpErrorTrace[];
+  /** Traces dropped at the capture cap — 0 in any realistic cycle. */
+  tracesDropped: number;
 }
 
 export interface MarketContext {
@@ -94,6 +133,15 @@ export interface MarketContext {
   account: {
     balances: AssetBalance[];
   };
+  /**
+   * What the market read cost this cycle — see MarketDataHealth.
+   *
+   * Kept OUT of `DecisionContext`, like the regime and the transition read before it, and
+   * for the sharper of the two reasons: this is pure observability, so the model must not
+   * see it and `decisions.market_context` must stay byte-identical. An A/B over the same
+   * window proves it did (see the PR's proof).
+   */
+  dataHealth: MarketDataHealth;
 }
 
 /**
@@ -111,6 +159,7 @@ export interface MarketContext {
 export async function fetchTacticalSeries(
   fetch: () => Promise<Candle[]>,
   label: string,
+  record?: (err: unknown) => void,
 ): Promise<Candle[]> {
   try {
     return await fetch();
@@ -120,7 +169,68 @@ export async function fetchTacticalSeries(
       `[warn] ${label}: tactical series fetch failed (${msg}) — the pair keeps its place in ` +
         'the context and only sits out of the regime read.',
     );
+    // Journaled, never acted on: the containment above is unchanged and the pair still
+    // keeps its place. `record` is optional so the offline test that proves that
+    // containment keeps calling this with two arguments.
+    record?.(err);
     return [];
+  }
+}
+
+/** Enough of a ccxt message to identify the fault; not enough to bloat a JSONB column. */
+const MAX_FAILURE_MESSAGE_CHARS = 500;
+
+/**
+ * Accumulates this cycle's failed market reads. One instance per `buildMarketContext`
+ * call, so its lifetime is the cycle's and there is nothing to reset between runs.
+ *
+ * Purely additive: nothing here can change what a pair build returns. It is handed down
+ * as a callback rather than consulted, so the read path cannot branch on it.
+ */
+class FailureCollector {
+  readonly failures: MarketFailure[] = [];
+
+  record(
+    symbol: string,
+    kind: PairKind,
+    stage: MarketFailure['stage'],
+    dropped: boolean,
+    err: unknown,
+  ): void {
+    const message = err instanceof Error ? err.message : String(err);
+    // The HTTP hook is the authoritative source for status/endpoint; this parse is the
+    // fallback for a transport-level failure, where no response ever existed.
+    const parsed = parseCcxtMessage(message);
+    this.failures.push({
+      symbol,
+      kind,
+      stage,
+      dropped,
+      errorClass: errorClassOf(err),
+      httpStatus: parsed.httpStatus,
+      endpoint: parsed.endpoint,
+      message: message.slice(0, MAX_FAILURE_MESSAGE_CHARS),
+    });
+  }
+
+  /** The no-exception case: ccxt returned an empty OHLCV array and nothing was thrown. */
+  recordEmptyPrimary(symbol: string, kind: PairKind): void {
+    this.failures.push({
+      symbol,
+      kind,
+      stage: 'primary',
+      dropped: true,
+      errorClass: 'EmptyPrimarySeries',
+      httpStatus: null,
+      endpoint: null,
+      message:
+        'the primary candle series came back empty with no exception — the pair was dropped',
+    });
+  }
+
+  /** Pairs actually LOST. A contained tactical failure never counts here. */
+  get lost(): number {
+    return this.failures.filter((f) => f.dropped).length;
   }
 }
 
@@ -142,6 +252,7 @@ async function buildPairContext(
   supabase: SupabaseClient | null,
   symbol: string,
   kind: PairKind,
+  collector: FailureCollector,
 ): Promise<BuiltPair | null> {
   // The long weekly series is NOT fetched here anymore. It is pulled lazily by
   // the cache (only on seed / re-seed / fallback) via the thunk below, so a
@@ -161,6 +272,7 @@ async function buildPairContext(
     fetchTacticalSeries(
       () => fetchCandles(publicClient, symbol, config.regime.timeframe, config.regime.limit),
       `${symbol} (${kind}) ${config.regime.timeframe}`,
+      (err) => collector.record(symbol, kind, 'tactical', false, err),
     ),
   ]);
 
@@ -168,6 +280,11 @@ async function buildPairContext(
     console.warn(
       `[warn] ${symbol} (${kind}): primary candle series is empty — skipping pair.`,
     );
+    // The pair vanishes here WITHOUT any exception having been thrown — ccxt returns an
+    // empty array rather than raising. Before this PR that made a whole class of outage
+    // invisible: no error to log, no error to journal, just a pair that quietly stopped
+    // existing. Recorded explicitly so "no error" never again means "nothing happened".
+    collector.recordEmptyPrimary(symbol, kind);
     return null;
   }
 
@@ -223,14 +340,20 @@ async function safeBuildPair(
   supabase: SupabaseClient | null,
   symbol: string,
   kind: PairKind,
+  collector: FailureCollector,
 ): Promise<BuiltPair | null> {
   try {
-    return await buildPairContext(publicClient, supabase, symbol, kind);
+    return await buildPairContext(publicClient, supabase, symbol, kind, collector);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(
       `[warn] ${symbol} (${kind}): failed to read market data (${msg}) — skipping pair.`,
     );
+    // THE LINE THIS PR EXISTS FOR. This catch is where the 09/08 outage went to die: it
+    // logged the real error — class, HTTP status, endpoint — to a `console.warn` that
+    // Railway does not retain, and returned null. Twenty-three hours later all that was
+    // left was `status=skipped`. The error now survives the process.
+    collector.record(symbol, kind, 'pair', true, err);
     return null;
   }
 }
@@ -307,15 +430,22 @@ export async function buildMarketContext(): Promise<MarketContext> {
   const accountClient = testnetAccountClient();
   const supabase = getSupabaseClient();
 
+  // Instrument the PUBLIC client only — it is the one whose failure blinds the bot, and
+  // the one this PR is about. The testnet account client is untouched. The wrapper always
+  // delegates and swallows its own faults, so it cannot change a single market read; see
+  // exchanges/errorCapture.ts.
+  const readHttpErrors = captureHttpErrors(publicClient);
+  const collector = new FailureCollector();
+
   const [tradableRaw, referenceRaw, balances] = await Promise.all([
     Promise.all(
       config.tradablePairs.map((symbol) =>
-        safeBuildPair(publicClient, supabase, symbol, 'tradable'),
+        safeBuildPair(publicClient, supabase, symbol, 'tradable', collector),
       ),
     ),
     Promise.all(
       config.referencePairs.map((symbol) =>
-        safeBuildPair(publicClient, supabase, symbol, 'reference'),
+        safeBuildPair(publicClient, supabase, symbol, 'reference', collector),
       ),
     ),
     fetchRelevantBalances(accountClient, tradableAssets(config)),
@@ -324,6 +454,8 @@ export async function buildMarketContext(): Promise<MarketContext> {
   const isPair = (p: BuiltPair | null): p is BuiltPair => p !== null;
   const tradable = tradableRaw.filter(isPair);
   const reference = referenceRaw.filter(isPair);
+
+  const captured = readHttpErrors();
 
   return {
     generatedAt: new Date().toISOString(),
@@ -337,5 +469,18 @@ export async function buildMarketContext(): Promise<MarketContext> {
       reference: reference.map((p) => p.context),
     },
     account: { balances },
+    dataHealth: {
+      // THE SAME PREDICATE the fail-closed already uses, read off the same array rather
+      // than recomputed from the failure list. A parallel definition could disagree with
+      // the behaviour it reports on — e.g. every read "succeeding" while returning junk
+      // that the pair builder then drops — and an alert that disagrees with the bot is
+      // worse than no alert.
+      blind: tradable.length === 0,
+      attempted: config.tradablePairs.length + config.referencePairs.length,
+      lost: collector.lost,
+      failures: collector.failures,
+      httpTraces: captured.traces,
+      tracesDropped: captured.dropped,
+    },
   };
 }

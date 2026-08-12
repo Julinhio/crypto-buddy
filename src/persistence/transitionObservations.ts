@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { runBoundedWrite } from './boundedWrite.js';
 import { toNumericString } from '../money.js';
 import type { OrderVerdict, TransitionVerdict } from '../transition/gate.js';
 import type { JudgedLeg, VectorJudgement } from '../transition/vector.js';
@@ -123,14 +124,12 @@ export function toObservationRow(
 /**
  * HARD DEADLINE on the observational write.
  *
- * A try/catch does not make a write best-effort — it only handles the ones that FINISH.
- * A request Supabase accepts but never settles would hang the `await` inside `decide()`,
- * burn the cycle budget, and let `armCycleWatchdog` force-exit the process at
- * `maxCycleSeconds + grace` — potentially after the decision was journaled and the orders
- * were placed. The cycle would then be recorded as a failure and the scheduler would back
- * off, which means a purely observational layer would have changed operational behaviour.
- * That is exactly what this brick promises it cannot do, and it is the same hazard
- * `decide()` already documents when it refuses to await guard events before execution.
+ * The MECHANISM now lives in `runBoundedWrite` (persistence/boundedWrite.ts), shared with
+ * the market-data incident writer, and its reasoning is documented there in full: a
+ * try/catch only handles the writes that FINISH, so a request Supabase accepts and never
+ * settles would burn the cycle budget and let the watchdog force-exit — a purely
+ * observational layer changing operational behaviour, which is exactly what this brick
+ * promises it cannot do.
  *
  * 5s is generous for a four-row upsert (the whole v5 corpus writes in well under that) and
  * negligible against the 300s cycle budget, so a healthy write is never cut short and an
@@ -159,50 +158,17 @@ export async function saveTransitionObservations(
     return false;
   }
   try {
-    const query = supabase
-      .from(TABLE)
-      .upsert(rows, { onConflict: 'decision_id,asset' })
-      // The clean cancellation: postgrest-js aborts the underlying fetch and the promise
-      // rejects, which the catch below turns into a logged, non-fatal miss.
-      .abortSignal(AbortSignal.timeout(WRITE_DEADLINE_MS));
-
-    // The backstop, because the guarantee must not depend on the client honouring the
-    // signal. Rejection is folded into the VALUE rather than caught away: a bare
-    // `.catch(() => undefined)` would make a failed write indistinguishable from a
-    // successful one and quietly report every error as a success. Handling both settle
-    // paths here also means a late rejection from a query the race abandoned can never
-    // surface as an unhandled rejection mid-cycle.
-    type Outcome =
-      | { kind: 'settled'; result: { error: { message: string } | null } }
-      | { kind: 'failed'; error: unknown }
-      | { kind: 'timeout' };
-
-    const settled: Promise<Outcome> = Promise.resolve(query).then(
-      (result) => ({ kind: 'settled', result: result as { error: { message: string } | null } }),
-      (error: unknown) => ({ kind: 'failed', error }),
+    await runBoundedWrite(
+      (signal) =>
+        supabase
+          .from(TABLE)
+          .upsert(rows, { onConflict: 'decision_id,asset' })
+          // The clean cancellation: postgrest-js aborts the underlying fetch and the
+          // promise rejects, which the catch below turns into a logged, non-fatal miss.
+          .abortSignal(signal),
+      WRITE_DEADLINE_MS,
     );
-
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<Outcome>((resolve) => {
-      // Deliberately NOT unref'd: this timer is the only thing that can resolve the race
-      // when the query never settles, and an unref'd one lets Node exit the moment the
-      // hung await is all that is left — turning "return on the deadline" into "the
-      // process quietly ends". It is cleared in `finally`, so on the fast path it holds
-      // the loop for microseconds and on the slow path for at most the deadline.
-      timer = setTimeout(() => resolve({ kind: 'timeout' }), WRITE_DEADLINE_MS);
-    });
-
-    try {
-      const outcome = await Promise.race([settled, deadline]);
-      if (outcome.kind === 'timeout') {
-        throw new Error(`write did not settle within ${WRITE_DEADLINE_MS}ms — abandoned`);
-      }
-      if (outcome.kind === 'failed') throw outcome.error;
-      if (outcome.result?.error) throw new Error(outcome.result.error.message);
-      return true;
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
+    return true;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(

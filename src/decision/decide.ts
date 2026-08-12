@@ -7,6 +7,7 @@ import {
   toObservationRow,
 } from '../persistence/transitionObservations.js';
 import { buildMarketContext, type MarketContext } from '../context/build.js';
+import { recordMarketDataOutage } from '../market/outage.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
 import {
   insertDecision,
@@ -52,11 +53,29 @@ import { buildSystemPromptV5, buildUserPromptV5, PROMPT_V5_VERSION } from './pro
 import { assertAnthropicConfigured, resolveModel, runDecision, type LlmResult } from './llm.js';
 import { getGitSha } from './gitSha.js';
 
+/**
+ * Whether this cycle could SEE THE MARKET — the second health state, as a value the
+ * scheduler can act on.
+ *
+ * `unknown` is not modelled here on purpose: reaching a `DecideResult` at all means
+ * `buildMarketContext` returned, so the answer is always known. The unknown case belongs
+ * one level up, where a cycle can time out or throw before ever reading the market —
+ * see CycleOutcome.marketData.
+ */
+export type SeenMarket = 'blind' | 'sighted';
+
 export interface DecideResult {
   status: DecisionRow['status'];
   persisted: boolean;
   decisionId: number | null;
   row: DecisionRow;
+  /**
+   * Did this cycle see the market? Drives `bot_state.consecutive_blind_cycles` and the
+   * "données de marché indisponibles" alert. Reported on EVERY path — including the ones
+   * that fail for reasons of their own — because the market read either worked or it
+   * didn't, independently of what happened after it.
+   */
+  marketData: SeenMarket;
   /** The virtual book the AI saw (null only when the cycle was skipped). */
   portfolio: VirtualPortfolio | null;
   /**
@@ -125,6 +144,44 @@ export async function decide(): Promise<DecideResult> {
   };
 
   const context = await buildMarketContext();
+
+  /**
+   * THE OUTAGE TRACE — one probe, one row, and only when something actually failed.
+   *
+   * Placed HERE, immediately after the read and BEFORE anything else, for three reasons:
+   *
+   *   1. the probe answers "does the alternate endpoint respond from this exit IP RIGHT
+   *      NOW", so it has to fire while the failure is current;
+   *   2. this is the single point every path passes through, so "once per cycle, not per
+   *      market" is structural rather than a rule to remember across six early returns;
+   *   3. it runs BEFORE the decision row is written, so an outage severe enough to also
+   *      break that insert still leaves its trace. That is the same reasoning behind the
+   *      table having no foreign key to `decisions`. The cost is that `decision_id` is
+   *      null today and the incident correlates to its cycle by timestamp — unambiguous
+   *      when cycles are 15+ minutes apart, and a fair trade for surviving the worst case.
+   *
+   * `recordMarketDataOutage` returns `void`, which is what makes it structurally
+   * incapable of feeding a decision — see the header of market/outage.ts. It is also
+   * bounded (probe + write ≤ 10s, asserted against the cycle budget at startup), so it
+   * cannot push this cycle toward the watchdog.
+   */
+  const health = context.dataHealth;
+  if (health.failures.length > 0) {
+    await recordMarketDataOutage({
+      supabase,
+      // Reserved columns; see (3) above. Kept in the schema so a later PR can thread the
+      // run token down without another migration.
+      decisionId: null,
+      runToken: null,
+      blind: health.blind,
+      marketsAttempted: health.attempted,
+      marketsFailed: health.lost,
+      failures: health.failures,
+      httpTraces: health.httpTraces,
+      tracesDropped: health.tracesDropped,
+    });
+  }
+  const marketData: SeenMarket = health.blind ? 'blind' : 'sighted';
 
   // Derive the virtual portfolio + decision context UP FRONT so EVERY row stores
   // the same market_context shape (the virtual book, not the raw testnet
@@ -385,7 +442,7 @@ export async function decide(): Promise<DecideResult> {
     const { persisted, id } = await insertDecision(supabase, row);
     // Deliberately NO persistLifecycle here: writing from the fallback is the very
     // thing being avoided.
-    return emptyResult('skipped', persisted, id, row, portfolio);
+    return emptyResult('skipped', persisted, id, row, portfolio, marketData);
   }
 
   // Edge case 1 — empty context: no tradable pair returned usable data. Never
@@ -398,7 +455,7 @@ export async function decide(): Promise<DecideResult> {
     const { persisted, id } = await insertDecision(supabase, row);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
-    return emptyResult('skipped', persisted, id, row, portfolio);
+    return emptyResult('skipped', persisted, id, row, portfolio, marketData);
   }
 
   const presentSymbols = context.market.tradable.map((pair) => pair.symbol);
@@ -484,7 +541,7 @@ export async function decide(): Promise<DecideResult> {
     await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
-    return emptyResult('error', persisted, id, row, portfolio);
+    return emptyResult('error', persisted, id, row, portfolio, marketData);
   }
 
   /**
@@ -530,7 +587,7 @@ export async function decide(): Promise<DecideResult> {
     await flushGuardEvents(id);
     // Best-effort by contract: sendTelegram never throws and never blocks the cycle.
     await sendTelegram(alert);
-    return emptyResult(status, persisted, id, row, portfolio);
+    return emptyResult(status, persisted, id, row, portfolio, marketData);
   };
 
   // ── The SYSTEMIC check — is the output contract itself still standing? ─────────
@@ -581,7 +638,7 @@ export async function decide(): Promise<DecideResult> {
     await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
-    return emptyResult('parse_failed', persisted, id, row, portfolio);
+    return emptyResult('parse_failed', persisted, id, row, portfolio, marketData);
   }
 
   // ── The COHERENCE GUARD ──────────────────────────────────────────────────────
@@ -886,6 +943,7 @@ export async function decide(): Promise<DecideResult> {
     persisted,
     decisionId: id,
     row,
+    marketData,
     portfolio,
     portfolioAfter,
     clamp,
@@ -900,12 +958,14 @@ function emptyResult(
   id: number | null,
   row: DecisionRow,
   portfolio: VirtualPortfolio | null,
+  marketData: SeenMarket,
 ): DecideResult {
   return {
     status,
     persisted,
     decisionId: id,
     row,
+    marketData,
     portfolio,
     portfolioAfter: null,
     clamp: null,

@@ -154,6 +154,11 @@ export interface AlertingConfig {
   floorStreakThreshold: number;
   /** Degraded: alert once consecutive_failures reaches this many hard errors. */
   consecutiveFailuresThreshold: number;
+  /**
+   * Market data unavailable: alert once consecutive_blind_cycles reaches this many cycles
+   * with no usable market data at all. See the value below for the calibration.
+   */
+  blindCyclesThreshold: number;
 }
 
 /**
@@ -510,6 +515,15 @@ export const config: AppConfig = {
     // its cycle keeps failing. Both are easy to retune from here.
     floorStreakThreshold: 10,
     consecutiveFailuresThreshold: 3,
+    // Market data unavailable: 3 blind cycles in a row. CALIBRATED AGAINST THE REAL BAND,
+    // not chosen for roundness — the 09/08 outage's consecutive blind blocks were 1, then
+    // 4, then 22, then 4 (src/replay/marketDataOutageWindow.ts, frozen from Supabase).
+    // A threshold of 3 ignores the isolated 03:55 failure and fires on each of the three
+    // prolonged blocks: exactly three alerts over the 23 hours, replayed in
+    // src/replay/marketDataAlerts.ts. At 2 it would also have fired on nothing-in-
+    // particular; at 5 it would have missed both 4-cycle blocks, i.e. two of the three
+    // real events.
+    blindCyclesThreshold: 3,
   },
 
   dailySummary: {
@@ -566,6 +580,24 @@ validateExecutionConfig(config.execution);
  * watchdog fires at maxCycleSeconds + this, and the lease TTL must exceed that.
  */
 export const WATCHDOG_GRACE_SECONDS = 15;
+
+/**
+ * The two HARD bounds of the market-data outage observability (probe + incident write),
+ * in milliseconds. They live here, next to the cycle budget they are asserted against, for
+ * the same reason WATCHDOG_GRACE_SECONDS does: the timer and the invariant must not be
+ * able to drift apart. `market/probe.ts` and `persistence/marketDataIncidents.ts` import
+ * them rather than declaring their own.
+ *
+ * Both run INSIDE the cycle, on the failure path. The PR #26 review found exactly this
+ * hazard — an unbounded observational write able to reach the watchdog after the orders
+ * had gone out — so these are checked against the budget at startup by
+ * `validateOutageBudget`, not merely believed to be small.
+ *
+ * 5s each matches every other best-effort network bound in the codebase (Healthchecks,
+ * Telegram, the transition observations).
+ */
+export const PROBE_TIMEOUT_MS = 5_000;
+export const INCIDENT_WRITE_DEADLINE_MS = 5_000;
 
 /**
  * Fails fast on an unsafe scheduler config. The critical invariant is
@@ -645,6 +677,43 @@ export function validateDecisionTimingConfig(
 validateDecisionTimingConfig(config.decision, config.scheduler);
 
 /**
+ * Fails fast when the outage observability could push a cycle into the watchdog.
+ *
+ * The probe and the incident write run on the FAILURE path, inside the cycle, and the
+ * brief is explicit that neither may ever change the cycle's financial status nor push it
+ * to the watchdog. Both are individually bounded — but "individually bounded" and "fits
+ * inside the budget alongside everything else" are different claims, and only the second
+ * one matters. So the whole worst case is asserted:
+ *
+ *   2 × attemptTimeoutSeconds + retryReserveSeconds + probe + write  ≤  maxCycleSeconds
+ *
+ * With today's values: 2×90 + 45 + 5 + 5 = 235s against a 300s budget. Checked at STARTUP
+ * with the env overrides (MAX_CYCLE_SECONDS) in scope, rather than discovered at runtime
+ * on the one blind cycle that also needed its retry. Exported for the offline test.
+ */
+export function validateOutageBudget(
+  decision: DecisionConfig,
+  scheduler: SchedulerConfig,
+  probeMs: number = PROBE_TIMEOUT_MS,
+  writeMs: number = INCIDENT_WRITE_DEADLINE_MS,
+): void {
+  const observability = (probeMs + writeMs) / 1000;
+  const worstCase = 2 * decision.attemptTimeoutSeconds + decision.retryReserveSeconds + observability;
+  if (worstCase > scheduler.maxCycleSeconds) {
+    throw new Error(
+      `Invalid outage-observability budget: two bounded LLM attempts, the post-decision reserve and the ` +
+        `market-data outage trace (2 × ${decision.attemptTimeoutSeconds} + ${decision.retryReserveSeconds} + ` +
+        `${observability} = ${worstCase}s) must fit inside maxCycleSeconds (${scheduler.maxCycleSeconds}s). ` +
+        `The probe and the incident write run on the cycle's FAILURE path: if they did not fit, a blind ` +
+        `cycle that also needed its guard retry could be force-exited by the watchdog — an observability ` +
+        `component changing the bot's operational behaviour, which is exactly what it must never do.`,
+    );
+  }
+}
+
+validateOutageBudget(config.decision, config.scheduler);
+
+/**
  * Fails fast on a nonsensical alerting config. Thresholds must be >= 1, otherwise a
  * counter would be "at or above" from its very first tick and the alert would fire
  * (or be permanently suppressed) without any real crossing.
@@ -656,6 +725,9 @@ function validateAlertingConfig(cfg: AlertingConfig): void {
   }
   if (!(Number.isInteger(cfg.consecutiveFailuresThreshold) && cfg.consecutiveFailuresThreshold >= 1)) {
     problems.push(`consecutiveFailuresThreshold must be an integer >= 1 (got ${cfg.consecutiveFailuresThreshold})`);
+  }
+  if (!(Number.isInteger(cfg.blindCyclesThreshold) && cfg.blindCyclesThreshold >= 1)) {
+    problems.push(`blindCyclesThreshold must be an integer >= 1 (got ${cfg.blindCyclesThreshold})`);
   }
   if (problems.length > 0) {
     throw new Error(`Invalid alerting config: ${problems.join('; ')}`);
