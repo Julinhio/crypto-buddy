@@ -6,7 +6,7 @@ import {
   saveTransitionObservations,
   toObservationRow,
 } from '../persistence/transitionObservations.js';
-import { buildMarketContext, type MarketContext } from '../context/build.js';
+import { buildMarketContext, marketHealthOf, type MarketContext } from '../context/build.js';
 import { recordMarketDataOutage } from '../market/outage.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
 import {
@@ -143,35 +143,82 @@ export async function decide(): Promise<DecideResult> {
     }
   };
 
-  const context = await buildMarketContext();
+  /**
+   * The market read. Its failure is NOT contained — a context that could not be built
+   * fails the cycle, exactly as before — but the market health it managed to collect is
+   * salvaged on the way out.
+   *
+   * The case that motivates it: the account balance read rejecting during a broad outage
+   * that is also hitting the public endpoints. The context build then threw before any
+   * health existed, so the incident was never journaled and the scheduler recorded the
+   * market state as `unknown` — losing both the evidence and the blind streak in the one
+   * scenario where they matter most. `marketHealthOf` reads what `buildMarketContext`
+   * stapled onto the error; the error itself is rethrown untouched.
+   */
+  let context: MarketContext;
+  try {
+    context = await buildMarketContext();
+  } catch (err) {
+    const salvaged = marketHealthOf(err);
+    if (salvaged && salvaged.failures.length > 0) {
+      console.error(
+        '[market-data] the context build failed, but the market read had already collected ' +
+          `${salvaged.failures.length} failure(s) — journaling them before the cycle dies.`,
+      );
+      await recordMarketDataOutage({
+        supabase,
+        decisionId: null,
+        runToken: null,
+        blind: salvaged.blind,
+        marketsAttempted: salvaged.attempted,
+        marketsFailed: salvaged.lost,
+        failures: salvaged.failures,
+        httpTraces: salvaged.httpTraces,
+        tracesDropped: salvaged.tracesDropped,
+      });
+    }
+    // The cycle still fails, with the original error and the original stack.
+    throw err;
+  }
 
   /**
    * THE OUTAGE TRACE — one probe, one row, and only when something actually failed.
    *
-   * Placed HERE, immediately after the read and BEFORE anything else, for three reasons:
+   * At most ONCE per cycle, enforced by the flag rather than by remembering: it is called
+   * from every terminal path, exactly like `observeTransition` and for the same reason —
+   * a cycle either had a failed market read or it didn't, whatever it went on to do.
    *
-   *   1. the probe answers "does the alternate endpoint respond from this exit IP RIGHT
-   *      NOW", so it has to fire while the failure is current;
-   *   2. this is the single point every path passes through, so "once per cycle, not per
-   *      market" is structural rather than a rule to remember across six early returns;
-   *   3. it runs BEFORE the decision row is written, so an outage severe enough to also
-   *      break that insert still leaves its trace. That is the same reasoning behind the
-   *      table having no foreign key to `decisions`. The cost is that `decision_id` is
-   *      null today and the incident correlates to its cycle by timestamp — unambiguous
-   *      when cycles are 15+ minutes apart, and a fair trade for surviving the worst case.
+   * ── WHY IT IS NOT CALLED RIGHT AFTER THE READ ──────────────────────────────────────
    *
-   * `recordMarketDataOutage` returns `void`, which is what makes it structurally
-   * incapable of feeding a decision — see the header of market/outage.ts. It is also
-   * bounded (probe + write ≤ 10s, asserted against the cycle budget at startup), so it
-   * cannot push this cycle toward the watchdog.
+   * It was, and that was wrong. The probe and the write are bounded at 10s together, and
+   * on a PARTIAL failure the cycle carries on to the model — so those 10s landed BEFORE
+   * the coherence guard's time-budget gate and were counted in its `remaining`. A cycle
+   * sitting within 10s of that boundary would have been retried before this PR and would
+   * now die as `guard_failed_no_retry_budget` instead. The startup budget check does not
+   * catch it: it bounds the worst case, not the boundary. That is observability changing
+   * the bot's decision — the one thing this component must be incapable of.
+   *
+   * Running from the terminal paths removes the interference entirely: on any path that
+   * reaches the model, the trace is written after the decision work is done. On the BLIND
+   * path — the 09/08 case, and the one where the probe's timing actually matters — the
+   * cycle ends immediately anyway, so the probe still fires about a second after the
+   * failure, from the same instance and the same exit IP.
+   *
+   * `recordMarketDataOutage` returns `void`, which is what makes it structurally incapable
+   * of feeding a decision — see the header of market/outage.ts.
    */
   const health = context.dataHealth;
-  if (health.failures.length > 0) {
+  const marketData: SeenMarket = health.blind ? 'blind' : 'sighted';
+  let outageObserved = false;
+  const observeMarketDataOutage = async (decisionId: number | null): Promise<void> => {
+    if (outageObserved || health.failures.length === 0) return;
+    outageObserved = true;
     await recordMarketDataOutage({
       supabase,
-      // Reserved columns; see (3) above. Kept in the schema so a later PR can thread the
-      // run token down without another migration.
-      decisionId: null,
+      // Now available on most paths, since the decision row is written before we get
+      // here. Still nullable: an outage bad enough to break that insert is precisely the
+      // case the table has no foreign key for.
+      decisionId,
       runToken: null,
       blind: health.blind,
       marketsAttempted: health.attempted,
@@ -180,8 +227,7 @@ export async function decide(): Promise<DecideResult> {
       httpTraces: health.httpTraces,
       tracesDropped: health.tracesDropped,
     });
-  }
-  const marketData: SeenMarket = health.blind ? 'blind' : 'sighted';
+  };
 
   // Derive the virtual portfolio + decision context UP FRONT so EVERY row stores
   // the same market_context shape (the virtual book, not the raw testnet
@@ -441,7 +487,10 @@ export async function decide(): Promise<DecideResult> {
     const row = makeRow(decisionContext, context.regime, gitSha, { status: 'skipped', skip_reason: skipReason });
     const { persisted, id } = await insertDecision(supabase, row);
     // Deliberately NO persistLifecycle here: writing from the fallback is the very
-    // thing being avoided.
+    // thing being avoided. The market-data trace is NOT in that category: it records what
+    // the exchange did, not what the book looks like, and this cycle may well have been
+    // blind on top of failing its lifecycle read.
+    await observeMarketDataOutage(id);
     return emptyResult('skipped', persisted, id, row, portfolio, marketData);
   }
 
@@ -455,6 +504,7 @@ export async function decide(): Promise<DecideResult> {
     const { persisted, id } = await insertDecision(supabase, row);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
+    await observeMarketDataOutage(id);
     return emptyResult('skipped', persisted, id, row, portfolio, marketData);
   }
 
@@ -541,6 +591,7 @@ export async function decide(): Promise<DecideResult> {
     await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
+    await observeMarketDataOutage(id);
     return emptyResult('error', persisted, id, row, portfolio, marketData);
   }
 
@@ -581,6 +632,7 @@ export async function decide(): Promise<DecideResult> {
     guardEvents.push(event);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
+    await observeMarketDataOutage(id);
     // After persistLifecycle, so anything it queued is written too. It cannot queue a
     // refusal here (it is called with no notes), but the ordering is the same on every
     // path so nobody has to remember which one is the exception.
@@ -638,6 +690,7 @@ export async function decide(): Promise<DecideResult> {
     await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
+    await observeMarketDataOutage(id);
     return emptyResult('parse_failed', persisted, id, row, portfolio, marketData);
   }
 
@@ -930,6 +983,10 @@ export async function decide(): Promise<DecideResult> {
   // blocks, so it is the one the atomicity provenance rehearses. Runs after every order is
   // placed, and its result is discarded — see the closure's header.
   await observeTransition(id, bookedLedger, movements);
+  // A DECIDED cycle can still have lost a market — a reference pair, or a tactical series.
+  // Written here, after every order is placed and after the layer's own observation, so it
+  // sits in the same best-effort tier as they do and cannot weigh on the trading verdict.
+  await observeMarketDataOutage(id);
 
   // THE SECOND FLUSH, and it is the one that matters on this path. `persistLifecycle`
   // can queue a `thesis_write_refused` that no earlier flush could have seen: the guard

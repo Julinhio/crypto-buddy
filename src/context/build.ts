@@ -87,6 +87,29 @@ export interface MarketDataHealth {
   tracesDropped: number;
 }
 
+/**
+ * Where the market health is stapled onto an error thrown by `buildMarketContext`.
+ *
+ * A Symbol, non-enumerable, rather than a wrapper error class: the account read's failure
+ * must keep propagating as the SAME object with the SAME stack, so the cycle fails
+ * identically and `scheduler_runs.detail` does not change. Wrapping would have altered
+ * both. Nothing reads this except `marketHealthOf`.
+ */
+const MARKET_HEALTH = Symbol.for('crypto-buddy.marketDataHealth');
+
+/**
+ * The market health carried by a failed context build, when there is one.
+ *
+ * Returns null for any error that did not come from `buildMarketContext` — a cycle that
+ * threw for an unrelated reason has nothing to say about the market read, and `unknown` is
+ * the honest answer there.
+ */
+export function marketHealthOf(err: unknown): MarketDataHealth | null {
+  if (err == null || typeof err !== 'object') return null;
+  const health = (err as Record<symbol, unknown>)[MARKET_HEALTH];
+  return (health as MarketDataHealth | undefined) ?? null;
+}
+
 export interface MarketContext {
   generatedAt: string;
   source: {
@@ -156,13 +179,28 @@ export interface MarketContext {
  * including when the regime layer breaks. Exported so that guarantee is testable
  * without a network.
  */
+/**
+ * How a tactical read went wrong. TWO outcomes, because a throw is not the only failure:
+ * ccxt resolves an EMPTY array for an empty OHLCV response, and `fetchCandles` also drops
+ * malformed candles, so a series can come back empty having thrown nothing at all. Both
+ * cost the pair its place in the regime read, so both are recorded — the same reasoning
+ * that puts `EmptyPrimarySeries` on the primary series.
+ */
+export type TacticalFailure = { kind: 'threw'; error: unknown } | { kind: 'empty' };
+
 export async function fetchTacticalSeries(
   fetch: () => Promise<Candle[]>,
   label: string,
-  record?: (err: unknown) => void,
+  record?: (failure: TacticalFailure) => void,
 ): Promise<Candle[]> {
   try {
-    return await fetch();
+    const candles = await fetch();
+    if (candles.length === 0) {
+      // Resolved, but with nothing usable. Silent before this PR: no exception to log, no
+      // exception to journal — the pair just quietly left the regime read.
+      record?.({ kind: 'empty' });
+    }
+    return candles;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(
@@ -172,7 +210,7 @@ export async function fetchTacticalSeries(
     // Journaled, never acted on: the containment above is unchanged and the pair still
     // keeps its place. `record` is optional so the offline test that proves that
     // containment keeps calling this with two arguments.
-    record?.(err);
+    record?.({ kind: 'threw', error: err });
     return [];
   }
 }
@@ -213,18 +251,29 @@ class FailureCollector {
     });
   }
 
-  /** The no-exception case: ccxt returned an empty OHLCV array and nothing was thrown. */
-  recordEmptyPrimary(symbol: string, kind: PairKind): void {
+  /**
+   * The no-exception cases: ccxt resolved an EMPTY OHLCV array (or every candle was
+   * dropped as malformed) and nothing was thrown. Silent before this PR — there was no
+   * error to log and none to journal, so an outage of this shape left no trace at all.
+   *
+   * `dropped` differs by stage and that is not an oversight: an empty PRIMARY series
+   * removes the pair from the universe, an empty TACTICAL one only removes it from the
+   * regime read (its containment is deliberate — see fetchTacticalSeries).
+   */
+  recordEmpty(symbol: string, kind: PairKind, stage: 'primary' | 'tactical'): void {
+    const dropped = stage === 'primary';
     this.failures.push({
       symbol,
       kind,
-      stage: 'primary',
-      dropped: true,
-      errorClass: 'EmptyPrimarySeries',
+      stage,
+      dropped,
+      errorClass: stage === 'primary' ? 'EmptyPrimarySeries' : 'EmptyTacticalSeries',
       httpStatus: null,
       endpoint: null,
-      message:
-        'the primary candle series came back empty with no exception — the pair was dropped',
+      message: dropped
+        ? 'the primary candle series came back empty with no exception — the pair was dropped'
+        : 'the tactical (4h) series came back empty with no exception — the pair kept its ' +
+          'place in the context and only sits out of the regime read',
     });
   }
 
@@ -272,7 +321,10 @@ async function buildPairContext(
     fetchTacticalSeries(
       () => fetchCandles(publicClient, symbol, config.regime.timeframe, config.regime.limit),
       `${symbol} (${kind}) ${config.regime.timeframe}`,
-      (err) => collector.record(symbol, kind, 'tactical', false, err),
+      (failure) =>
+        failure.kind === 'threw'
+          ? collector.record(symbol, kind, 'tactical', false, failure.error)
+          : collector.recordEmpty(symbol, kind, 'tactical'),
     ),
   ]);
 
@@ -284,7 +336,7 @@ async function buildPairContext(
     // empty array rather than raising. Before this PR that made a whole class of outage
     // invisible: no error to log, no error to journal, just a pair that quietly stopped
     // existing. Recorded explicitly so "no error" never again means "nothing happened".
-    collector.recordEmptyPrimary(symbol, kind);
+    collector.recordEmpty(symbol, kind, 'primary');
     return null;
   }
 
@@ -437,7 +489,23 @@ export async function buildMarketContext(): Promise<MarketContext> {
   const readHttpErrors = captureHttpErrors(publicClient);
   const collector = new FailureCollector();
 
-  const [tradableRaw, referenceRaw, balances] = await Promise.all([
+  // The ACCOUNT read is started alongside the market reads (unchanged: same concurrency),
+  // but it is no longer allowed to take the market evidence down with it.
+  //
+  // It used to sit inside the same `Promise.all` as the two market legs. A rejection there
+  // — a broad connectivity outage hitting the testnet host at the same time as the public
+  // one, which is exactly the scenario worth diagnosing — rejected the whole thing before
+  // `dataHealth` was ever assembled. `buildMarketContext` threw, no incident was written,
+  // and the scheduler recorded the market state as `unknown`: both the evidence AND the
+  // blind streak lost, in the one case where they matter most.
+  //
+  // Its failure still fails the cycle, exactly as before (it is rethrown untouched below).
+  const balancesPromise = fetchRelevantBalances(accountClient, tradableAssets(config));
+  // The account leg may now settle well before we await it. Attach a no-op handler so a
+  // rejection can never surface as an unhandled rejection in that gap.
+  balancesPromise.catch(() => {});
+
+  const [tradableRaw, referenceRaw] = await Promise.all([
     Promise.all(
       config.tradablePairs.map((symbol) =>
         safeBuildPair(publicClient, supabase, symbol, 'tradable', collector),
@@ -448,7 +516,6 @@ export async function buildMarketContext(): Promise<MarketContext> {
         safeBuildPair(publicClient, supabase, symbol, 'reference', collector),
       ),
     ),
-    fetchRelevantBalances(accountClient, tradableAssets(config)),
   ]);
 
   const isPair = (p: BuiltPair | null): p is BuiltPair => p !== null;
@@ -456,6 +523,37 @@ export async function buildMarketContext(): Promise<MarketContext> {
   const reference = referenceRaw.filter(isPair);
 
   const captured = readHttpErrors();
+  const dataHealth: MarketDataHealth = {
+    // THE SAME PREDICATE the fail-closed already uses, read off the same array rather
+    // than recomputed from the failure list. A parallel definition could disagree with
+    // the behaviour it reports on — e.g. every read "succeeding" while returning junk
+    // that the pair builder then drops — and an alert that disagrees with the bot is
+    // worse than no alert.
+    blind: tradable.length === 0,
+    attempted: config.tradablePairs.length + config.referencePairs.length,
+    lost: collector.lost,
+    failures: collector.failures,
+    httpTraces: captured.traces,
+    tracesDropped: captured.dropped,
+  };
+
+  let balances;
+  try {
+    balances = await balancesPromise;
+  } catch (err) {
+    // Rethrown UNTOUCHED — same object, same stack, so the cycle fails exactly as it did
+    // before and `scheduler_runs.detail` is unchanged. We only staple the market health
+    // onto it, which `decide()` reads (via `marketHealthOf`) to journal the incident
+    // before letting the error continue on its way.
+    if (err != null && typeof err === 'object') {
+      Object.defineProperty(err, MARKET_HEALTH, {
+        value: dataHealth,
+        enumerable: false,
+        configurable: true,
+      });
+    }
+    throw err;
+  }
 
   return {
     generatedAt: new Date().toISOString(),
@@ -469,18 +567,6 @@ export async function buildMarketContext(): Promise<MarketContext> {
       reference: reference.map((p) => p.context),
     },
     account: { balances },
-    dataHealth: {
-      // THE SAME PREDICATE the fail-closed already uses, read off the same array rather
-      // than recomputed from the failure list. A parallel definition could disagree with
-      // the behaviour it reports on — e.g. every read "succeeding" while returning junk
-      // that the pair builder then drops — and an alert that disagrees with the bot is
-      // worse than no alert.
-      blind: tradable.length === 0,
-      attempted: config.tradablePairs.length + config.referencePairs.length,
-      lost: collector.lost,
-      failures: collector.failures,
-      httpTraces: captured.traces,
-      tracesDropped: captured.dropped,
-    },
+    dataHealth,
   };
 }

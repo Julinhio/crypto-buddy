@@ -9,6 +9,7 @@ import {
   parseCcxtMessage,
   type HttpErrorTrace,
 } from '../exchanges/errorCapture.js';
+import { fetchTacticalSeries, marketHealthOf } from '../context/build.js';
 import { PROBE_URL, probeAlternateEndpoint } from '../market/probe.js';
 import { recordMarketDataOutage, summarise } from '../market/outage.js';
 import { saveMarketDataIncident, type MarketFailure } from '../persistence/marketDataIncidents.js';
@@ -89,12 +90,46 @@ console.log('\n§3a — THE PROBE CANNOT REACH A DECISION: the import graph');
   // `void` already guarantees the value is useless; this catches the reviewer-visible
   // form too, so a future edit that tried to use it would look wrong as well as fail.
   const decideSrc = readFileSync(join(SRC, 'decision', 'decide.ts'), 'utf8');
-  const callSites = decideSrc.match(/^.*recordMarketDataOutage\s*\(/gm) ?? [];
-  ok('recordMarketDataOutage is called exactly once in decide.ts', callSites.length === 1);
   ok(
-    'and its result is discarded (bare `await`, never assigned)',
+    'recordMarketDataOutage results are always discarded (bare `await`, never assigned)',
     /await recordMarketDataOutage\(/.test(decideSrc) &&
-      !/=\s*await\s+recordMarketDataOutage/.test(decideSrc),
+      !/=\s*await\s+recordMarketDataOutage/.test(decideSrc) &&
+      !/return\s+recordMarketDataOutage/.test(decideSrc),
+  );
+
+  // ── the trace must not precede the coherence guard's time-budget gate ──────────────
+  // It used to. The probe + write are bounded at 10s together, and sitting before the
+  // gate they were counted in its `remaining`: a cycle within 10s of the boundary would
+  // have been retried before, and would instead die `guard_failed_no_retry_budget`. No
+  // budget check catches that — it is a boundary shift, not an overrun — so the ordering
+  // itself is the guarantee, and the ordering is what gets asserted.
+  //
+  // Source position is NOT execution order here (`failCycle` is declared early and invoked
+  // late), so the check is the property itself: after tracing, the cycle never goes on to
+  // call the model. The retry-budget gate only exists downstream of that call — so a trace
+  // that cannot precede the model cannot shift the gate either.
+  const observeCalls = [...decideSrc.matchAll(/await observeMarketDataOutage\(/g)].map((m) => m.index ?? -1);
+  ok('the retry-budget gate is still there to be reasoned about',
+    decideSrc.includes('no room for the retry'));
+  ok('the model call is still named as expected', /await callModel\(/.test(decideSrc));
+
+  const precedesModel = observeCalls.filter((i) => {
+    const after = decideSrc.slice(i);
+    const nextReturn = after.search(/\breturn\b/);
+    const slice = nextReturn === -1 ? after : after.slice(0, nextReturn);
+    return /await callModel\(/.test(slice);
+  });
+  ok(
+    'no outage-trace call is followed by a model call before its return — it is terminal',
+    observeCalls.length > 0 && precedesModel.length === 0,
+    `offending offsets: ${JSON.stringify(precedesModel)}`,
+  );
+  // And it is genuinely called on every terminal path, not just kept out of the way.
+  const terminalReturns = (decideSrc.match(/return emptyResult\(/g) ?? []).length;
+  ok(
+    'the trace is wired on every terminal path (once-flag makes repeats a no-op)',
+    observeCalls.length >= terminalReturns,
+    `${observeCalls.length} call sites for ${terminalReturns} emptyResult returns`,
   );
 }
 
@@ -331,6 +366,67 @@ console.log('\n§1 — THE ERROR IS CAPTURED, STRUCTURED');
     parsed.endpoint === 'https://api.binance.com/api/v3/ticker/price');
   ok('and it degrades to nulls rather than guessing',
     parseCcxtMessage('some unrelated error').httpStatus === null);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+console.log('\n§1c — a read that FAILS WITHOUT THROWING is still recorded');
+// ccxt resolves `[]` for an empty OHLCV response, so a market can vanish with no exception
+// at all. Handled for the primary series from the start; the tactical one had the same
+// hole. Both are silent failures, and a silent failure is exactly what left the 09/08
+// outage undiagnosable.
+{
+  const seen: { kind: string }[] = [];
+  const empty = await fetchTacticalSeries(async () => [], 'X 4h', (f) => seen.push(f));
+  ok('an empty tactical series is recorded, not silently dropped',
+    empty.length === 0 && seen.length === 1 && seen[0]?.kind === 'empty');
+
+  seen.length = 0;
+  const threw = await fetchTacticalSeries(async () => {
+    throw new Error('boom');
+  }, 'X 4h', (f) => seen.push(f));
+  ok('a throwing tactical series is recorded as a throw', threw.length === 0 && seen[0]?.kind === 'threw');
+
+  seen.length = 0;
+  const fine = await fetchTacticalSeries(
+    async () => [{ timestamp: 1, open: 1, high: 1, low: 1, close: 1, volume: 1 }],
+    'X 4h',
+    (f) => seen.push(f),
+  );
+  ok('a healthy tactical series records nothing', fine.length === 1 && seen.length === 0);
+
+  // The containment itself is unchanged: a failing tactical fetch still resolves to [] and
+  // never rejects, so the pair keeps its place. That is what src/test/regime.ts asserts,
+  // and the recording callback stays optional so it keeps calling this with two arguments.
+  ok('the containment is unchanged — a two-argument call still works and never rejects',
+    (await fetchTacticalSeries(async () => { throw new Error('x'); }, 'X 4h')).length === 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+console.log('\n§1d — the evidence survives a context build that dies on the account read');
+// A broad outage can take the testnet account host down alongside the public one. That
+// rejection used to reject the whole `Promise.all`, so `dataHealth` was never assembled:
+// no incident, and the scheduler recorded `unknown` — evidence and blind streak both lost,
+// in the one case where they matter most.
+{
+  const health = {
+    blind: true, attempted: 5, lost: 5,
+    failures: [] as MarketFailure[], httpTraces: [] as HttpErrorTrace[], tracesDropped: 0,
+  };
+  const original = new Error('testnet balances unreachable');
+  const stackBefore = original.stack;
+  Object.defineProperty(original, Symbol.for('crypto-buddy.marketDataHealth'), {
+    value: health, enumerable: false, configurable: true,
+  });
+
+  ok('marketHealthOf recovers the health stapled onto the error',
+    marketHealthOf(original)?.blind === true);
+  ok('the error keeps its identity and its stack — the cycle fails exactly as before',
+    original.message === 'testnet balances unreachable' && original.stack === stackBefore);
+  ok('the stapled property is non-enumerable (it cannot leak into a JSON dump)',
+    Object.keys(original).length === 0 && JSON.stringify(original) === '{}');
+  ok('an unrelated error yields null — `unknown` stays the honest answer there',
+    marketHealthOf(new Error('anthropic timeout')) === null &&
+      marketHealthOf(undefined) === null && marketHealthOf('nope') === null);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────

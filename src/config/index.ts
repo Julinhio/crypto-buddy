@@ -679,17 +679,22 @@ validateDecisionTimingConfig(config.decision, config.scheduler);
 /**
  * Fails fast when the outage observability could push a cycle into the watchdog.
  *
- * The probe and the incident write run on the FAILURE path, inside the cycle, and the
- * brief is explicit that neither may ever change the cycle's financial status nor push it
- * to the watchdog. Both are individually bounded — but "individually bounded" and "fits
- * inside the budget alongside everything else" are different claims, and only the second
- * one matters. So the whole worst case is asserted:
+ * The probe and the incident write run inside the cycle, on the TAIL of any path whose
+ * market read failed, and the brief is explicit that neither may ever change the cycle's
+ * financial status nor push it to the watchdog. Both are individually bounded — but
+ * "individually bounded" and "fits inside the budget alongside everything else" are
+ * different claims, and only the second one matters. So the whole worst case is asserted:
  *
  *   2 × attemptTimeoutSeconds + retryReserveSeconds + probe + write  ≤  maxCycleSeconds
  *
  * With today's values: 2×90 + 45 + 5 + 5 = 235s against a 300s budget. Checked at STARTUP
  * with the env overrides (MAX_CYCLE_SECONDS) in scope, rather than discovered at runtime
- * on the one blind cycle that also needed its retry. Exported for the offline test.
+ * on the one degraded cycle that also needed its retry.
+ *
+ * This bounds the WALL CLOCK. It deliberately does not license the trace to sit anywhere
+ * in the cycle: placed before the guard's retry gate it would still shift that gate's
+ * boundary by up to 10s and cost a cycle a retry it used to get, which no budget check
+ * can catch. Hence the tail placement in decide(). Exported for the offline test.
  */
 export function validateOutageBudget(
   decision: DecisionConfig,

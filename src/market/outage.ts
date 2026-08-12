@@ -45,8 +45,16 @@ import { probeAlternateEndpoint, PROBE_TIMEOUT_MS, type ProbeResult } from './pr
  *
  * ── ONCE PER CYCLE, NOT PER MARKET ──────────────────────────────────────────────────
  *
- * One call site, placed right after `buildMarketContext()` in `decide()`. Five markets
- * failing together (the 09/08 signature) produce ONE probe and ONE row, not five.
+ * Called from `decide()`'s TERMINAL paths behind a once-flag, exactly like
+ * `observeTransition`. Five markets failing together (the 09/08 signature) produce ONE
+ * probe and ONE row, not five.
+ *
+ * Terminal rather than "right after the read", which is where it started: the 10s bound
+ * would otherwise land BEFORE the coherence guard's time-budget gate on a partial-failure
+ * cycle, and a cycle within 10s of that boundary would lose a retry it used to get. From
+ * the tail it cannot reach the gate at all. The blind path ends immediately, so the probe
+ * there still fires about a second after the failure — which is the case its timing is
+ * for.
  */
 
 /** The ceiling this function is allowed to add to a cycle. Asserted against the budget. */
