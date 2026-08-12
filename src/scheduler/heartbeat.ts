@@ -9,7 +9,9 @@ import {
   canClaim,
   classifyOutcome,
   evaluateAlert,
+  evaluateRecovery,
   missedBeats,
+  nextBlindCycles,
   nextConsecutiveFailures,
   nextDelayMinutes,
   nextFloorStreak,
@@ -136,7 +138,14 @@ export async function runHeartbeat(
     //    under the hard timeout, capturing whether it SETTLED (returned/threw → no
     //    orphan) or timed out (an orphan keeps running in the background).
     const { outcome, settled, result } = await runCycle();
-    const { status, appliedDelayMinutes: appliedDelay, decisionId, detail, equitySnapshot } = outcome;
+    const {
+      status,
+      appliedDelayMinutes: appliedDelay,
+      decisionId,
+      detail,
+      equitySnapshot,
+      marketData,
+    } = outcome;
 
     // 5b. TIMED OUT → crash behavior. Do NOT finish_run: KEEP the lock and do NOT
     //     reschedule. The lock expires at its TTL and a later beat reclaims via the
@@ -184,6 +193,30 @@ export async function runHeartbeat(
     const floorAlert = evaluateAlert(floorStreak, config.alerting.floorStreakThreshold, state.floorAlertSent);
     const failureAlert = evaluateAlert(failuresAfter, config.alerting.consecutiveFailuresThreshold, state.failureAlertSent);
 
+    // THE SECOND HEALTH STATE. Same shape as the two above — a counter, one pure debounce
+    // evaluation, one flag persisted in the same fenced transaction — because the brief
+    // asks for the same anti-spam behaviour and reusing the mechanism is the only way to
+    // be sure it behaves identically. 22 consecutive blind cycles must produce ONE
+    // message, not 22.
+    //
+    // The one addition is the DOWNWARD crossing: `market_data` can stay armed for hours,
+    // so its recovery is worth announcing. It is evaluated against the SAME pair of values
+    // as the upward one, so the two can never both fire on one beat.
+    // Both previous values come from `claim`, NOT from the pre-cycle `state` snapshot the
+    // two triggers above use. `reset_bot` can land between record_heartbeat and the claim:
+    // it zeroes these columns and reschedules to now(), so the claim still succeeds while
+    // the snapshot holds pre-reset values — and we would then write back an outage streak
+    // the reset had just erased, and possibly fire an obsolete alert. Reading under the
+    // claim closes that: once we hold the run-lock, reset_bot (which claims the same lock)
+    // cannot interleave.
+    const blindAfter = nextBlindCycles(claim.consecutiveBlindCycles, marketData);
+    const blindAlert = evaluateAlert(blindAfter, config.alerting.blindCyclesThreshold, claim.blindAlertSent);
+    const blindRecovered = evaluateRecovery(
+      blindAfter,
+      config.alerting.blindCyclesThreshold,
+      claim.blindAlertSent,
+    );
+
     const finalized = await finishRun(supabase, {
       runToken,
       runId: claim.runId,
@@ -200,6 +233,11 @@ export async function runHeartbeat(
       // a reclaimed run can't write these (fencing) so it won't send below either.
       floorAlertSent: floorAlert.sent,
       failureAlertSent: failureAlert.sent,
+      consecutiveBlindCycles: blindAfter,
+      blindAlertSent: blindAlert.sent,
+      // Only a KNOWN answer touches `last_market_data_ok_at`; 'unknown' passes null and
+      // the timestamp keeps whatever it had. Mirrors nextBlindCycles' three-way handling.
+      sawMarketData: marketData === 'unknown' ? null : marketData === 'sighted',
     });
 
     if (!finalized) {
@@ -222,13 +260,32 @@ export async function runHeartbeat(
     if (failureAlert.fire) {
       alerts.push({ trigger: 'degraded', value: failuresAfter, timestamp: claim.dbNow, lastError: detail });
     }
+    if (blindAlert.fire) {
+      // `detail` carries the cycle's own status string, which on a blind cycle is
+      // `status=skipped` — the very poverty this PR set out to fix. The structured cause
+      // (ccxt class / HTTP status / endpoint) lives in `market_data_incidents`, written by
+      // the cycle itself; the message points there rather than restating a useless string.
+      alerts.push({ trigger: 'market_data', value: blindAfter, timestamp: claim.dbNow, cause: null });
+    }
+    if (blindRecovered) {
+      // Counted and reported SEPARATELY from the alerts in the proof: a recovery is not a
+      // problem being announced, and lumping the two would make "3 alerts" ambiguous.
+      alerts.push({
+        trigger: 'market_data_recovered',
+        // The streak that just ENDED — the outage's length, which is the number worth
+        // reading here. `blindAfter` is 0 by definition on this path.
+        value: claim.consecutiveBlindCycles,
+        timestamp: claim.dbNow,
+      });
+    }
     if (alerts.length > 0) {
       console.warn(`[alert] ${alerts.length} threshold crossing(s) this beat: ${alerts.map((a) => a.trigger).join(', ')}.`);
     }
 
     console.log(
       `[beat] run #${claim.runId} done — outcome=${runOutcome}, next check in ${delayMinutes} min ` +
-        `(consecutive_failures=${failuresAfter}, floor_streak=${floorStreak}).`,
+        `(consecutive_failures=${failuresAfter}, floor_streak=${floorStreak}, ` +
+        `market_data=${marketData}, blind_cycles=${blindAfter}).`,
     );
     return { action: 'ran', reason: runOutcome, outcome: runOutcome, delayMinutes, missedBeats: missed, lockLost: false, alerts, equitySnapshot, activityNotification };
   } finally {

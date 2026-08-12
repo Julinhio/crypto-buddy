@@ -15,6 +15,22 @@ export interface BotState {
   failureAlertSent: boolean;
 }
 
+/*
+ * DELIBERATELY ABSENT from BotState: `consecutive_blind_cycles` and `blind_alert_sent`.
+ *
+ * They exist on the row (record_heartbeat returns `*`), but exposing them here would
+ * re-offer the stale read this PR had to correct. `reset_bot` can land between
+ * record_heartbeat and the claim — it zeroes both columns and reschedules to now(), so
+ * the claim still succeeds while the snapshot holds pre-reset values, and finish_run
+ * would then restore an outage streak the reset had just erased, possibly firing an
+ * obsolete alert. They travel with ClaimResult instead, where the run-lock makes them
+ * current by construction.
+ *
+ * The same race still applies to `floorAlertSent` / `failureAlertSent` above, which
+ * predate this PR. Not corrected here — that would change the behaviour of existing
+ * alerts, which this PR does not do — but reported alongside it.
+ */
+
 /** What `claim_due_run` returns on a successful (atomic) claim. */
 export interface ClaimResult {
   runId: number;
@@ -22,6 +38,14 @@ export interface ClaimResult {
   dbNow: string;
   consecutiveFailures: number;
   floorDelayStreak: number;
+  /**
+   * THE SECOND HEALTH STATE, read UNDER THE CLAIM. Consecutive cycles that saw no
+   * tradable market, plus its debounce flag — carried here rather than on BotState so
+   * they cannot be read from a pre-claim snapshot that `reset_bot` may have invalidated.
+   * Same reason `consecutiveFailures` and `floorDelayStreak` have always come from here.
+   */
+  consecutiveBlindCycles: number;
+  blindAlertSent: boolean;
 }
 
 export interface FinishRunParams {
@@ -38,6 +62,17 @@ export interface FinishRunParams {
   /** Debounce flags to persist (computed post-cycle by the pure policy). */
   floorAlertSent: boolean;
   failureAlertSent: boolean;
+  /** The second health state's counter + flag (computed post-cycle by the pure policy). */
+  consecutiveBlindCycles: number;
+  blindAlertSent: boolean;
+  /**
+   * Did this cycle SEE the market? Three-valued, and only used by the SQL side to stamp
+   * `last_market_data_ok_at`: true refreshes it, false and null leave it alone. The
+   * counter itself is already computed by the app (a pure, offline-tested function) —
+   * this exists because the timestamp must take the DATABASE's now(), exactly like
+   * `last_success_at`.
+   */
+  sawMarketData: boolean | null;
 }
 
 function toBotState(row: Record<string, unknown>): BotState {
@@ -96,6 +131,8 @@ export async function claimDueRun(
     dbNow: String(row.db_now),
     consecutiveFailures: Number(row.consecutive_failures ?? 0),
     floorDelayStreak: Number(row.floor_delay_streak ?? 0),
+    consecutiveBlindCycles: Number(row.consecutive_blind_cycles ?? 0),
+    blindAlertSent: Boolean(row.blind_alert_sent ?? false),
   };
 }
 
@@ -126,6 +163,9 @@ export async function finishRun(supabase: SupabaseClient, p: FinishRunParams): P
     p_detail: p.detail,
     p_floor_alert_sent: p.floorAlertSent,
     p_failure_alert_sent: p.failureAlertSent,
+    p_consecutive_blind_cycles: p.consecutiveBlindCycles,
+    p_blind_alert_sent: p.blindAlertSent,
+    p_saw_market_data: p.sawMarketData,
   });
   if (error) throw new Error(`finish_run RPC failed: ${error.message}`);
   return data === true;

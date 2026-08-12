@@ -150,3 +150,41 @@ export function evaluateAlert(value: number, threshold: number, prevSent: boolea
   const atOrAbove = value >= threshold;
   return { fire: atOrAbove && !prevSent, sent: atOrAbove };
 }
+
+/**
+ * Consecutive cycles that saw NO tradable market — the second health state's counter.
+ *
+ * Deliberately NOT folded into `nextConsecutiveFailures`. A blind cycle is classified
+ * `skip` by `classifyOutcome` (the run mechanics worked; there was simply nothing to
+ * decide on), and `skip` RESETS the failure counter. That is why 31 blind cycles over 23
+ * hours left `consecutive_failures` at zero and never armed the degraded alert. Changing
+ * that classification would alter the bot's backoff and rescheduling — a behaviour change
+ * this PR explicitly does not make. So the blindness gets its own counter instead, and the
+ * fail-closed keeps behaving exactly as it did.
+ *
+ * Three-valued input, three behaviours (see MarketDataState):
+ *   - blind   → +1;
+ *   - sighted → 0, which is what re-arms the alert;
+ *   - unknown → unchanged. A cycle that never looked is neither evidence of an outage nor
+ *               evidence of a recovery, and pretending otherwise would make the alert
+ *               fire on freezes or go quiet in the middle of a real outage.
+ */
+export function nextBlindCycles(prev: number, marketData: 'blind' | 'sighted' | 'unknown'): number {
+  if (marketData === 'blind') return prev + 1;
+  if (marketData === 'sighted') return 0;
+  return prev;
+}
+
+/**
+ * The DOWNWARD crossing of a debounced trigger: was it armed, and has the value now
+ * dropped back below the threshold? That is the moment — and the only moment — a
+ * "recovered" message is worth sending.
+ *
+ * Kept as its own function rather than a third field on `AlertDecision` so the two
+ * existing triggers (overheating, degraded) are untouched: they have never sent a recovery
+ * message and this PR does not start. Only the market-data trigger calls it, which is why
+ * the proof counts alerts and recoveries separately.
+ */
+export function evaluateRecovery(value: number, threshold: number, prevSent: boolean): boolean {
+  return prevSent && value < threshold;
+}

@@ -146,8 +146,9 @@ const fp: FinishRunParams = {
   runToken: 'tok', runId: 1, delayMinutes: 30, consecutiveFailures: 0, floorDelayStreak: 0,
   succeeded: true, outcome: 'decided', decisionId: null, missedBeats: 0, detail: null,
   floorAlertSent: false, failureAlertSent: false,
+  consecutiveBlindCycles: 0, blindAlertSent: false, sawMarketData: true,
 };
-const claimRow = { run_id: 7, prev_next_check_at: null, db_now: '2024-01-01T00:00:00Z', consecutive_failures: 1, floor_delay_streak: 2 };
+const claimRow = { run_id: 7, prev_next_check_at: null, db_now: '2024-01-01T00:00:00Z', consecutive_failures: 1, floor_delay_streak: 2, consecutive_blind_cycles: 4, blind_alert_sent: true };
 
 // recordHeartbeat: throws on RPC error and on a missing singleton; ok otherwise.
 await okThrows('recordHeartbeat throws on an RPC error', recordHeartbeat(rpcError()));
@@ -157,6 +158,17 @@ await okThrows('recordHeartbeat throws on a missing bot_state row', recordHeartb
 await okThrows('claimDueRun throws on an RPC error', claimDueRun(rpcError(), 'tok', 600));
 await okResolves('claimDueRun → null only when not claimed (not due / locked)', claimDueRun(rpc([]), 'tok', 600), null);
 ok('claimDueRun maps a claimed row', (await claimDueRun(rpc([claimRow]), 'tok', 600))?.runId === 7);
+// The blind counter + its debounce flag ride WITH the claim, not with the pre-cycle
+// snapshot: reset_bot can land between record_heartbeat and the claim, zero both, and
+// reschedule — a snapshot read would then restore an outage streak the reset just erased.
+{
+  const c = await claimDueRun(rpc([claimRow]), 'tok', 600);
+  ok('claimDueRun carries consecutive_blind_cycles', c?.consecutiveBlindCycles === 4);
+  ok('claimDueRun carries blind_alert_sent', c?.blindAlertSent === true);
+  const cold = await claimDueRun(rpc([{ run_id: 1, db_now: 'x' }]), 'tok', 600);
+  ok('and a row without them cold-starts at 0/false rather than NaN/undefined',
+    cold?.consecutiveBlindCycles === 0 && cold?.blindAlertSent === false);
+}
 
 // finishRun: throws on RPC error; true/false are the real results (false = fencing).
 await okThrows('finishRun throws on an RPC error', finishRun(rpcError(), fp));
@@ -241,11 +253,11 @@ function dispatchClient(calls: string[]): SupabaseClient {
 }
 
 const timedOutCycle = async () => ({
-  outcome: { status: 'error' as const, appliedDelayMinutes: null, decisionId: null, detail: 'frozen', equitySnapshot: null },
+  outcome: { status: 'error' as const, appliedDelayMinutes: null, decisionId: null, detail: 'frozen', equitySnapshot: null, marketData: 'unknown' as const },
   settled: false, result: null,
 });
 const settledThrow = async () => ({
-  outcome: { status: 'error' as const, appliedDelayMinutes: null, decisionId: null, detail: 'threw', equitySnapshot: null },
+  outcome: { status: 'error' as const, appliedDelayMinutes: null, decisionId: null, detail: 'threw', equitySnapshot: null, marketData: 'unknown' as const },
   settled: true, result: null,
 });
 
