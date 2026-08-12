@@ -5,6 +5,7 @@ import { applyGate } from '../transition/apply.js';
 import { judgeVector } from '../transition/vector.js';
 import { evaluateTransition, type TransitionVerdict } from '../transition/gate.js';
 import { checkCoherence } from '../decision/coherence.js';
+import { formatAlert, formatArmedStopNotFired } from '../alerting/messages.js';
 import { toActionableRegimeView, toDecisionContext } from '../decision/context.js';
 import { buildSystemPromptV5 } from '../decision/promptV5.js';
 import { classifyOutcome, priceMovePercent } from '../persistence/refusedIntentions.js';
@@ -466,6 +467,31 @@ console.log('\n§9 — THE REFUSED-INTENTION CLASSIFICATION (item 5)');
     priceMovePercent(null, '110') === null && priceMovePercent('100', null) === null);
   ok('a non-positive base price yields null rather than dividing by zero',
     priceMovePercent('0', '110') === null);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+console.log('\n§10 — THE ARMED-STOP-NOT-FIRED ALERT');
+// The gap the review found and this PR makes VISIBLE rather than closes: the stop's exit
+// is synthesized after the model call, the parse and the guard, so a cycle failing at any
+// of those returns without generating it. Closing it means executing on paths that place
+// nothing today and have no `decided` row to anchor a booking to — its own PR.
+{
+  const msg = formatArmedStopNotFired({ assets: ['BNB', 'ETH'], status: 'guard_failed', timestamp: 'T' });
+  ok('the message names the assets whose stop was armed', msg.includes('BNB, ETH'));
+  ok('and the status that prevented it', msg.includes('guard_failed'));
+  // The wording must not read as "an order failed": nothing was placed and nothing lost.
+  ok('it states plainly that NO order was placed', msg.includes("AUCUN ordre n'a été passé"));
+  ok('and that the stop fires on the next successful cycle', msg.includes('prochain cycle réussi'));
+  ok('it is a distinct message, not a mutation of the degraded alert',
+    !msg.includes('DÉGRADÉ') && msg.includes('STOP DE PIC NON DÉCLENCHÉ'));
+
+  // The three existing alert wordings must be untouched by this addition.
+  ok('the market-data alert wording is untouched',
+    formatAlert({ trigger: 'market_data', value: 3, timestamp: 'T' }).includes('DONNÉES DE MARCHÉ INDISPONIBLES'));
+  ok('the degraded alert wording is untouched',
+    formatAlert({ trigger: 'degraded', value: 3, timestamp: 'T' }).includes('DÉGRADÉ'));
+  ok('the overheating alert wording is untouched',
+    formatAlert({ trigger: 'overheating', value: 10, timestamp: 'T' }).includes('EMBALLEMENT'));
 }
 
 console.log(`\n${passed} passed, ${failed} failed — transition gate enforce (offline).`);

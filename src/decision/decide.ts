@@ -53,6 +53,7 @@ import {
   recordGuardEvent,
   type GuardEventInsert,
 } from '../persistence/decisionGuard.js';
+import { formatArmedStopNotFired } from '../alerting/messages.js';
 import { sendTelegram } from '../alerting/telegram.js';
 import { buildSystemPrompt, buildUserPrompt, marketStateFromRegime, PROMPT_VERSION } from './prompt.js';
 import { buildSystemPromptV5, buildUserPromptV5, PROMPT_V5_VERSION } from './promptV5.js';
@@ -412,6 +413,64 @@ export async function decide(): Promise<DecideResult> {
   const verdictsByAsset = new Map(transitionVerdicts.map((v) => [v.asset, v]));
   const actionableByAsset = new Map(transitionVerdicts.map((v) => [v.asset, v.actionable]));
 
+  /**
+   * THE PEAK STOP'S EXITS, built from the held quantity and the live price.
+   *
+   * A function rather than a value, computed from inputs that are all already in hand, so
+   * the two consumers cannot disagree: the EXECUTION path below generates these, and the
+   * FAILURE paths alert on exactly the same set. A separate predicate for the alert would
+   * eventually drift from the one that fires, and an alert about a stop that would not have
+   * fired is worse than no alert.
+   *
+   * `fullExit: true` exempts it from the plumbing floor, as the mandate requires. A stale
+   * price or a flat line produces NO exit: `evaluateStop` already refuses to fire without a
+   * live price, and this refuses to invent a quantity.
+   */
+  const computeStopExits = (): Movement[] =>
+    transitionVerdicts.flatMap((verdict) => {
+      if (verdict.gate !== 'stop_exit') return [];
+      const qty = heldByAsset.get(verdict.asset) ?? ZERO;
+      const price = priceOf(verdict.asset);
+      if (!qty.gt(0) || price == null || price.lte(0)) return [];
+      return [{
+        symbol: `${verdict.asset}/${reserveStable}`,
+        asset: verdict.asset,
+        side: 'sell' as const,
+        qty,
+        price,
+        notional: qty.times(price),
+        fee: qty.times(price).times(config.execution.feePercent).div(100),
+        fullExit: true,
+      }];
+    });
+
+  /**
+   * Announces a stop that was ARMED on a cycle that died before it could generate its exit.
+   *
+   * ALERTS ONLY — it places nothing, and it is deliberately not a repair. Closing the gap
+   * means executing on paths that today execute nothing and that have no `decided` row to
+   * anchor a sovereign booking to; that is a change of failure semantics, not a gate, and it
+   * belongs to its own PR. This makes the gap visible, which is the property it lacked.
+   *
+   * ENFORCE ONLY, and that is load-bearing rather than a detail: in `observe` the stop has
+   * never generated an order at all, so there is no gap to report and a message here would
+   * make "flipping the switch changes nothing" false. Best-effort, like every send in this
+   * file — `sendTelegram` never throws and never blocks the cycle.
+   */
+  const alertArmedStopNotFired = async (status: string): Promise<void> => {
+    if (TRANSITION_MODE !== 'enforce') return;
+    const pending = computeStopExits();
+    if (pending.length === 0) return;
+    const assets = pending.map((m) => m.asset);
+    console.error(
+      `[transition] peak stop was ARMED on ${assets.join(', ')} but the cycle ended ${status} ` +
+        'before it could be generated — NO order placed; it fires on the next successful cycle.',
+    );
+    await sendTelegram(
+      formatArmedStopNotFired({ assets, status, timestamp: context.generatedAt }),
+    );
+  };
+
   const observeTransition = async (
     decisionId: number | null,
     bookedLedger: LedgerEntry[],
@@ -625,6 +684,9 @@ export async function decide(): Promise<DecideResult> {
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
     await observeMarketDataOutage(id);
+    // The stop may have been armed on this book. Nothing is placed here — the alert only
+    // makes the gap visible. See alertArmedStopNotFired.
+    await alertArmedStopNotFired('error');
     return emptyResult('error', persisted, id, row, portfolio, marketData);
   }
 
@@ -672,6 +734,9 @@ export async function decide(): Promise<DecideResult> {
     await flushGuardEvents(id);
     // Best-effort by contract: sendTelegram never throws and never blocks the cycle.
     await sendTelegram(alert);
+    // Sent AFTER the cycle's own alert, so the operator reads why the cycle failed first
+    // and the stop notice second — the second only matters in the light of the first.
+    await alertArmedStopNotFired(status);
     return emptyResult(status, persisted, id, row, portfolio, marketData);
   };
 
@@ -724,6 +789,7 @@ export async function decide(): Promise<DecideResult> {
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
     await observeMarketDataOutage(id);
+    await alertArmedStopNotFired('parse_failed');
     return emptyResult('parse_failed', persisted, id, row, portfolio, marketData);
   }
 
@@ -950,37 +1016,14 @@ export async function decide(): Promise<DecideResult> {
     verdictsByAsset,
   );
   /**
-   * THE PEAK STOP'S EXITS, GENERATED BY THE CODE.
+   * THE PEAK STOP'S EXITS, GENERATED BY THE CODE — see `computeStopExits` above, which the
+   * failure paths' alert reads too so the two can never disagree about what would fire.
    *
-   * Built from the held quantity and the live price, NOT from anything the model
-   * proposed — that independence is the whole point. `applyGate` can only filter the list
-   * it is handed, so a stop firing on a line the model did not mention would otherwise
-   * produce no exit at all: the ladder's first rung promised a full exit and delivered
-   * nothing, on exactly the line that needed one.
-   *
-   * `fullExit: true` exempts it from the plumbing floor, as the mandate requires — a line
-   * small enough to sit under the floor must still be closable, or it becomes permanently
-   * stuck. A stale price or a flat line produces NO exit: `evaluateStop` already refuses to
-   * fire without a live price, and this refuses to invent a quantity.
+   * Built from the held quantity and the live price, NOT from anything the model proposed:
+   * `applyGate` can only filter the list it is handed, so a stop firing on a line the model
+   * did not mention would otherwise produce no exit at all.
    */
-  const stopExits: Movement[] = TRANSITION_MODE === 'enforce'
-    ? transitionVerdicts.flatMap((verdict) => {
-        if (verdict.gate !== 'stop_exit') return [];
-        const qty = heldByAsset.get(verdict.asset) ?? ZERO;
-        const price = priceOf(verdict.asset);
-        if (!qty.gt(0) || price == null || price.lte(0)) return [];
-        return [{
-          symbol: `${verdict.asset}/${reserveStable}`,
-          asset: verdict.asset,
-          side: 'sell' as const,
-          qty,
-          price,
-          notional: qty.times(price),
-          fee: qty.times(price).times(config.execution.feePercent).div(100),
-          fullExit: true,
-        }];
-      })
-    : [];
+  const stopExits: Movement[] = TRANSITION_MODE === 'enforce' ? computeStopExits() : [];
   if (stopExits.length > 0) {
     console.warn(
       `[transition] ENFORCE — peak stop firing on ${stopExits.map((m) => m.asset).join(', ')}: ` +
