@@ -402,8 +402,15 @@ console.log('\n§3 — THE ALERT DEBOUNCES LIKE THE EXISTING ONES');
     msg.includes('DONNÉES DE MARCHÉ INDISPONIBLES') && msg.includes('fail-closed'));
   ok('the alert carries the structured cause when there is one',
     msg.includes('451'));
-  ok('the recovery message reports the outage length',
-    formatAlert({ trigger: 'market_data_recovered', value: 22, timestamp: 'T' }).includes('22 cycles'));
+  const rec = formatAlert({ trigger: 'market_data_recovered', value: 22, timestamp: 'T' });
+  ok('the recovery message reports the outage length', rec.includes('22 cycles'));
+  // The recovery fires on `marketData === 'sighted'`, which says NOTHING about the cycle's
+  // outcome: that same cycle can still end error/parse_failed/guard_failed, or skip on a
+  // different dependency. The message must not hand out an all-clear it cannot support.
+  ok('the recovery message claims ONLY that the data is back, not that decisions resumed',
+    !/repris ses décisions/.test(rec) && rec.includes('données exploitables'));
+  ok('and it points at the trigger that DOES cover a failing cycle',
+    rec.includes('dégradé'));
   ok('the degraded alert wording is untouched',
     formatAlert({ trigger: 'degraded', value: 3, timestamp: 'T' }).includes('DÉGRADÉ'));
   ok('the overheating alert wording is untouched',

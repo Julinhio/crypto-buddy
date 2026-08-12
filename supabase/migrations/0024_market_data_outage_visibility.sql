@@ -158,6 +158,95 @@ comment on column public.bot_state.blind_alert_sent is
 comment on column public.bot_state.last_market_data_ok_at is
   'Dernier cycle ayant vu le marché. L''analogue de last_success_at pour le SECOND état de santé : rend « depuis combien de temps est-il aveugle » lisible en une requête, sans reconstituer la séquence.';
 
+-- ── 2b. claim_due_run() : le compteur voyage AVEC la réclamation ─────────────────
+--
+-- Première intention de cette PR : lire le compteur depuis l'instantané de
+-- `record_heartbeat`, comme les drapeaux d'alerte existants, pour ne PAS toucher au
+-- compare-and-set atomique. La revue Codex a montré que ce raisonnement est faux, et le
+-- contre-exemple est net :
+--
+--   `reset_bot` s'exécute ENTRE notre record_heartbeat et notre claim_due_run. Il remet
+--   le compteur et le drapeau à zéro et repositionne next_check_at à now(). Notre claim
+--   réussit donc (dû, non verrouillé) — mais nous tenons encore l'instantané d'AVANT le
+--   reset. finish_run réécrirait alors la série d'aveuglement que le reset venait
+--   d'effacer, et pourrait émettre une alerte ou un rétablissement périmés.
+--
+-- La fenêtre est étroite (quelques millisecondes, et il faut un reset manuel dedans),
+-- mais elle est réelle et l'argument « seul finish_run écrit ces colonnes » est
+-- simplement inexact : `reset_bot` les écrit aussi.
+--
+-- Le compteur voyage donc désormais avec la réclamation, comme `consecutive_failures` et
+-- `floor_delay_streak` le font depuis 0006 — qui étaient déjà corrects pour exactement
+-- cette raison. Après le claim nous tenons le verrou, et `reset_bot` réclame ce même
+-- verrou avant de purger : il ne peut donc plus s'intercaler.
+--
+-- La RETURNS TABLE change, donc `create or replace` refuserait (« cannot change return
+-- type ») : il faut DROP d'abord, puis réappliquer les grants. Le CORPS est inchangé
+-- hormis les deux variables ajoutées — le compare-and-set lui-même, sa clause WHERE et
+-- son insertion dans scheduler_runs sont ré-énoncés verbatim.
+--
+-- NOTE, hors périmètre : les drapeaux `floor_alert_sent` / `failure_alert_sent` sont
+-- toujours lus depuis l'instantané et restent exposés à la même course. Ce n'est pas
+-- corrigé ici — ce serait modifier le comportement d'alertes existantes, ce que cette PR
+-- s'interdit — mais c'est signalé dans la PR comme sujet à part.
+drop function if exists public.claim_due_run(uuid, integer);
+
+create or replace function public.claim_due_run(
+  p_run_token        uuid,
+  p_lock_ttl_seconds integer
+)
+returns table (
+  run_id                   bigint,
+  prev_next_check_at       timestamptz,
+  db_now                   timestamptz,
+  consecutive_failures     integer,
+  floor_delay_streak       integer,
+  consecutive_blind_cycles integer,
+  blind_alert_sent         boolean
+)
+language plpgsql
+as $$
+declare
+  v_prev_next  timestamptz;
+  v_failures   integer;
+  v_floor      integer;
+  v_blind      integer;
+  v_blind_sent boolean;
+  v_run_id     bigint;
+begin
+  -- Alias the table as `b` and qualify the WHERE/RETURNING columns: the RETURNS
+  -- TABLE output columns (consecutive_failures, floor_delay_streak, and now
+  -- consecutive_blind_cycles / blind_alert_sent) share names with bot_state columns,
+  -- so an unqualified reference is ambiguous. `b.` ties them to the table. (SET
+  -- targets are never ambiguous, so they stay unqualified.)
+  --
+  -- RETURNING gives the values of the columns we did NOT set, i.e. the pre-cycle
+  -- counters — which is exactly what the app's debounce needs to evaluate a crossing.
+  update public.bot_state b
+     set run_token    = p_run_token,
+         locked_until = now() + make_interval(secs => p_lock_ttl_seconds)
+   where b.id = 1
+     and (b.next_check_at is null or b.next_check_at <= now())                         -- due?
+     and (b.run_token is null or b.locked_until is null or b.locked_until <= now())    -- free / expired?
+   returning b.next_check_at, b.consecutive_failures, b.floor_delay_streak,
+             b.consecutive_blind_cycles, b.blind_alert_sent
+        into v_prev_next, v_failures, v_floor, v_blind, v_blind_sent;
+
+  if not found then
+    return;  -- not due, or a live lock exists → claim refused (no rows)
+  end if;
+
+  insert into public.scheduler_runs (run_token, started_at, status)
+  values (p_run_token, now(), 'running')
+  returning id into v_run_id;
+
+  return query select v_run_id, v_prev_next, now(), v_failures, v_floor, v_blind, v_blind_sent;
+end;
+$$;
+
+revoke execute on function public.claim_due_run(uuid, integer) from public;
+grant execute on function public.claim_due_run(uuid, integer) to service_role;
+
 -- ── 3. finish_run() : trois assignations de plus, zéro logique de plus ───────────
 --
 -- Inchangée dans l'esprit — replanifier + relâcher + clore le run dans UNE transaction,

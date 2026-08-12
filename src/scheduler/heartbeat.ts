@@ -202,12 +202,19 @@ export async function runHeartbeat(
     // The one addition is the DOWNWARD crossing: `market_data` can stay armed for hours,
     // so its recovery is worth announcing. It is evaluated against the SAME pair of values
     // as the upward one, so the two can never both fire on one beat.
-    const blindAfter = nextBlindCycles(state.consecutiveBlindCycles, marketData);
-    const blindAlert = evaluateAlert(blindAfter, config.alerting.blindCyclesThreshold, state.blindAlertSent);
+    // Both previous values come from `claim`, NOT from the pre-cycle `state` snapshot the
+    // two triggers above use. `reset_bot` can land between record_heartbeat and the claim:
+    // it zeroes these columns and reschedules to now(), so the claim still succeeds while
+    // the snapshot holds pre-reset values — and we would then write back an outage streak
+    // the reset had just erased, and possibly fire an obsolete alert. Reading under the
+    // claim closes that: once we hold the run-lock, reset_bot (which claims the same lock)
+    // cannot interleave.
+    const blindAfter = nextBlindCycles(claim.consecutiveBlindCycles, marketData);
+    const blindAlert = evaluateAlert(blindAfter, config.alerting.blindCyclesThreshold, claim.blindAlertSent);
     const blindRecovered = evaluateRecovery(
       blindAfter,
       config.alerting.blindCyclesThreshold,
-      state.blindAlertSent,
+      claim.blindAlertSent,
     );
 
     const finalized = await finishRun(supabase, {
@@ -267,7 +274,7 @@ export async function runHeartbeat(
         trigger: 'market_data_recovered',
         // The streak that just ENDED — the outage's length, which is the number worth
         // reading here. `blindAfter` is 0 by definition on this path.
-        value: state.consecutiveBlindCycles,
+        value: claim.consecutiveBlindCycles,
         timestamp: claim.dbNow,
       });
     }

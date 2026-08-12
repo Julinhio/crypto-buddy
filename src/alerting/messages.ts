@@ -72,10 +72,18 @@ export function formatAlert(payload: AlertPayload): string {
   }
 
   if (payload.trigger === 'market_data_recovered') {
+    // Says ONLY what the trigger establishes. It fires on `marketData === 'sighted'`,
+    // which is a statement about the market READ and nothing else: that same cycle may
+    // still have ended in `error`, `parse_failed` or `guard_failed`, or skipped because a
+    // different dependency was down. Claiming "decisions resumed" here would tell the
+    // operator the all-clear on the strength of a fact that does not support it — and the
+    // cycle's own outcome already has its own alert (`degraded`) if it keeps failing.
     return (
       `✅ crypto-buddy — DONNÉES DE MARCHÉ RÉTABLIES\n` +
-      `Le bot revoit le marché et a repris ses décisions normalement.\n` +
+      `Le bot revoit le marché : le dernier réveil a de nouveau obtenu des données exploitables.\n` +
       `Durée de l'aveuglement : ${payload.value} cycles.\n` +
+      `(Ceci ne dit rien de l'issue du cycle lui-même — s'il échoue pour une autre raison, ` +
+      `l'alerte « dégradé » prendra le relais.)\n` +
       `🕑 ${payload.timestamp}`
     );
   }

@@ -10,22 +10,26 @@ export interface BotState {
   lastSuccessAt: string | null;
   consecutiveFailures: number;
   floorDelayStreak: number;
-  /**
-   * THE SECOND HEALTH STATE. Consecutive cycles that saw no tradable market, and its
-   * debounce flag. Read from the `record_heartbeat` snapshot rather than from
-   * `claim_due_run` (which is where the other two counters come from) on purpose: the
-   * claim RPC is the safety-critical atomic compare-and-set, and changing its RETURN
-   * TABLE means dropping and recreating it. A pure-observability counter does not justify
-   * that risk, and the snapshot is just as current — `finish_run` is the only writer of
-   * these columns, and it is fenced by our own run token, exactly the argument the alert
-   * flags already rely on.
-   */
-  consecutiveBlindCycles: number;
   /** Debounce flags (one per trigger) — the pre-cycle snapshot the heartbeat reads. */
   floorAlertSent: boolean;
   failureAlertSent: boolean;
-  blindAlertSent: boolean;
 }
+
+/*
+ * DELIBERATELY ABSENT from BotState: `consecutive_blind_cycles` and `blind_alert_sent`.
+ *
+ * They exist on the row (record_heartbeat returns `*`), but exposing them here would
+ * re-offer the stale read this PR had to correct. `reset_bot` can land between
+ * record_heartbeat and the claim — it zeroes both columns and reschedules to now(), so
+ * the claim still succeeds while the snapshot holds pre-reset values, and finish_run
+ * would then restore an outage streak the reset had just erased, possibly firing an
+ * obsolete alert. They travel with ClaimResult instead, where the run-lock makes them
+ * current by construction.
+ *
+ * The same race still applies to `floorAlertSent` / `failureAlertSent` above, which
+ * predate this PR. Not corrected here — that would change the behaviour of existing
+ * alerts, which this PR does not do — but reported alongside it.
+ */
 
 /** What `claim_due_run` returns on a successful (atomic) claim. */
 export interface ClaimResult {
@@ -34,6 +38,14 @@ export interface ClaimResult {
   dbNow: string;
   consecutiveFailures: number;
   floorDelayStreak: number;
+  /**
+   * THE SECOND HEALTH STATE, read UNDER THE CLAIM. Consecutive cycles that saw no
+   * tradable market, plus its debounce flag — carried here rather than on BotState so
+   * they cannot be read from a pre-claim snapshot that `reset_bot` may have invalidated.
+   * Same reason `consecutiveFailures` and `floorDelayStreak` have always come from here.
+   */
+  consecutiveBlindCycles: number;
+  blindAlertSent: boolean;
 }
 
 export interface FinishRunParams {
@@ -72,10 +84,8 @@ function toBotState(row: Record<string, unknown>): BotState {
     lastSuccessAt: (row.last_success_at as string | null) ?? null,
     consecutiveFailures: Number(row.consecutive_failures ?? 0),
     floorDelayStreak: Number(row.floor_delay_streak ?? 0),
-    consecutiveBlindCycles: Number(row.consecutive_blind_cycles ?? 0),
     floorAlertSent: Boolean(row.floor_alert_sent ?? false),
     failureAlertSent: Boolean(row.failure_alert_sent ?? false),
-    blindAlertSent: Boolean(row.blind_alert_sent ?? false),
   };
 }
 
@@ -121,6 +131,8 @@ export async function claimDueRun(
     dbNow: String(row.db_now),
     consecutiveFailures: Number(row.consecutive_failures ?? 0),
     floorDelayStreak: Number(row.floor_delay_streak ?? 0),
+    consecutiveBlindCycles: Number(row.consecutive_blind_cycles ?? 0),
+    blindAlertSent: Boolean(row.blind_alert_sent ?? false),
   };
 }
 
