@@ -264,6 +264,64 @@ console.log('\n§5b — THE PEAK STOP EXITS EVEN WHEN THE MODEL SAID NOTHING');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────
+console.log('\n§5c — AN ASSET WITH NO REGIME FAILS CLOSED IN ENFORCE');
+// A leg on an asset with no usable 4h bar gets `no_regime` / `unjudged`. `judgeVector`
+// refuses to let that trigger an atomic refusal — right for the journal, but carried into
+// enforcement it would execute a strategic leg precisely when the layer has no regime to
+// validate it against, while the payload already told the model `actionable: false`.
+{
+  const noRegime = evaluateTransition({
+    asset: 'XRP', sticky: null, riskOffConfirmed: false,
+    qty: dec('1'), price: dec('100'), priceStale: false,
+    peakPriceSinceEntry: dec('100'), stopThresholdPercent: config.transition.peakStopPercent,
+  });
+  ok('the gate really does say no_regime on a missing bar', noRegime.gate === 'no_regime');
+
+  const legs = [movement('XRP', 'buy', '90')];
+  const judgement = judgeVector(
+    legs.map((m) => ({ asset: m.asset, side: m.side, notional: m.notional })),
+    new Map([['XRP', noRegime]]),
+  );
+  ok('judgeVector does NOT refuse it — the journal must not invent a refusal',
+    judgement.refused === false);
+  ok('and the leg is unjudged, not forbidden', judgement.legs[0]?.ownVerdict === 'unjudged');
+
+  const enforced = applyGate({
+    mode: 'enforce', movements: legs, judgement, stopExits: [],
+    clampedAllocation: { XRP: 10, USDT: 90 }, previousApplied: { XRP: 5, USDT: 95 },
+  });
+  ok('but ENFORCE fails CLOSED: the leg does not execute',
+    enforced.refused && enforced.movements.length === 0);
+  ok('and the reason names the missing regime rather than a generic refusal',
+    enforced.reason.includes('NO regime') && enforced.reason.includes('XRP'));
+
+  const observed = applyGate({
+    mode: 'observe', movements: legs, judgement, stopExits: [],
+    clampedAllocation: { XRP: 10, USDT: 90 }, previousApplied: { XRP: 5, USDT: 95 },
+  });
+  ok('OBSERVE is untouched — the leg still passes, exactly as today',
+    observed.refused === false && observed.movements.length === 1);
+
+  // Rung 2 still lifts the silence: a confirmed risk_off reduces a regime-less line.
+  const riskOff = evaluateTransition({
+    asset: 'XRP', sticky: null, riskOffConfirmed: true,
+    qty: dec('1'), price: dec('100'), priceStale: false,
+    peakPriceSinceEntry: dec('100'), stopThresholdPercent: config.transition.peakStopPercent,
+  });
+  const sell = [movement('XRP', 'sell', '90')];
+  const reduction = applyGate({
+    mode: 'enforce', movements: sell, stopExits: [],
+    judgement: judgeVector(
+      sell.map((m) => ({ asset: m.asset, side: m.side, notional: m.notional })),
+      new Map([['XRP', riskOff]]),
+    ),
+    clampedAllocation: { XRP: 5, USDT: 95 }, previousApplied: { XRP: 10, USDT: 90 },
+  });
+  ok('a risk_off REDUCTION on a regime-less line still executes — rung 2 lifts the silence',
+    reduction.movements.length === 1 && reduction.movements[0]?.side === 'sell');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
 console.log('\n§6 — THE PAYLOAD (proof 4): asserted on the KEYS, not claimed');
 {
   const regime = {

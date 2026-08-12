@@ -4,6 +4,7 @@ import { evaluateTransition, judgeOrder, type TransitionVerdict } from '../trans
 import { judgeVector } from '../transition/vector.js';
 import { applyGate } from '../transition/apply.js';
 import {
+  bumpFrozenEpisodes,
   openRefusedEpisodes,
   resolveRefusedEpisodes,
 } from '../persistence/refusedIntentions.js';
@@ -1138,6 +1139,16 @@ export async function decide(): Promise<DecideResult> {
         ];
       }),
     ),
+  );
+
+  // Then count this frozen wake-up on every episode still open — driven by the VERDICT,
+  // not by whether a leg was dropped. Once the model obeys the prompt and stops proposing
+  // on a frozen line, nothing would be dropped and the episode would stop being counted:
+  // a ten-cycle freeze would record one. Between resolve and open, so a row inserted below
+  // (which already starts at 1) is not counted twice.
+  await bumpFrozenEpisodes(
+    supabase,
+    new Set([...actionableByAsset].filter(([, ok]) => !ok).map(([asset]) => asset)),
   );
 
   if (gateOutcome.refused && gateOutcome.droppedLegs.length > 0) {

@@ -73,9 +73,15 @@ export function buildSystemPromptV5(
         '- your reasoning may absolutely say what you INTEND to do once it confirms. State it;',
         '  it is recorded, and it is not an order.',
         '',
-        'Two things are never blocked, because they make the book smaller: the code\'s own peak',
-        'stop, and reductions under a confirmed global risk_off. You do not need to request',
-        'them and you cannot prevent them.',
+        'One thing is never blocked and you do not need to ask for it: the code\'s own peak stop.',
+        'It exits a line in full, by itself, and you cannot prevent it.',
+        '',
+        'REDUCTIONS UNDER A CONFIRMED GLOBAL risk_off ARE DIFFERENT, and the difference matters.',
+        'They are ALLOWED through the freeze — but the code does NOT generate them for you. If',
+        'risk_off is confirmed and a line should get smaller, you must PROPOSE that reduction',
+        'yourself, INCLUDING on a line marked actionable: false. It will pass. Staying silent',
+        'because the line is frozen traps the exposure at exactly the moment the market is',
+        'broadly breaking, which is the one outcome this whole ladder exists to prevent.',
         '',
       ]
     : [];

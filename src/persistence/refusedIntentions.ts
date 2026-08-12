@@ -107,20 +107,9 @@ export async function openRefusedEpisodes(
     const open = new Map(
       ((data ?? []) as { id: number; asset: string; frozen_cycles: number }[]).map((r) => [r.asset, r]),
     );
-
-    // Already open → this is another frozen wake-up on the same episode, not a new one.
-    for (const [asset, row] of open) {
-      if (!assets.includes(asset)) continue;
-      await runBoundedWrite(
-        (signal) =>
-          supabase
-            .from(TABLE)
-            .update({ frozen_cycles: row.frozen_cycles + 1 })
-            .eq('id', row.id)
-            .abortSignal(signal),
-        deadlineMs,
-      );
-    }
+    // An episode already open is NOT bumped here — `bumpFrozenEpisodes` owns the counter,
+    // and it runs on every frozen wake-up rather than only on the ones that dropped a leg.
+    // Counting in both places would double every cycle where the model did propose again.
 
     // Deduplicated by asset: a cycle can drop a buy AND a sell on the same line only
     // through conflicting legs, and the episode is about the asset, not the leg.
@@ -149,6 +138,56 @@ export async function openRefusedEpisodes(
     console.warn(
       `[warn] could not open the refused-intention episode(s) (${err instanceof Error ? err.message : String(err)}) — ` +
         'the cycle is unaffected; only the measurement is lost.',
+    );
+  }
+}
+
+/**
+ * Counts one more frozen wake-up on every OPEN episode whose asset is still frozen.
+ *
+ * Separate from `openRefusedEpisodes`, and it has to be. That function only runs when the
+ * gate actually dropped a leg — so once the model starts OBEYING the prompt and proposes
+ * nothing on a frozen line, the episode stops being counted. A ten-cycle freeze made of one
+ * refusal followed by nine compliant holds would record `frozen_cycles = 1`, and the
+ * duration denominator this instrumentation exists to measure would be corrupted by the
+ * model doing exactly what it was asked.
+ *
+ * Driven by the transition VERDICT (is this asset still non-actionable) rather than by
+ * whether anything was refused, so compliance and defiance count the same.
+ *
+ * MUST run before `openRefusedEpisodes` and after `resolveRefusedEpisodes`: a row inserted
+ * this cycle already starts at 1, so bumping after opening would count its first wake-up
+ * twice.
+ */
+export async function bumpFrozenEpisodes(
+  supabase: SupabaseClient | null,
+  stillFrozen: Set<string>,
+  deadlineMs: number = INCIDENT_WRITE_DEADLINE_MS,
+): Promise<void> {
+  if (!supabase || stillFrozen.size === 0) return;
+  try {
+    const { data, error } = await supabase
+      .from(TABLE)
+      .select('id, asset, frozen_cycles')
+      .in('asset', [...stillFrozen])
+      .is('resolved_at', null)
+      .abortSignal(AbortSignal.timeout(deadlineMs));
+    if (error) throw new Error(error.message);
+    for (const row of (data ?? []) as { id: number; frozen_cycles: number }[]) {
+      await runBoundedWrite(
+        (signal) =>
+          supabase
+            .from(TABLE)
+            .update({ frozen_cycles: row.frozen_cycles + 1 })
+            .eq('id', row.id)
+            .abortSignal(signal),
+        deadlineMs,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[warn] could not bump the frozen-episode counter (${err instanceof Error ? err.message : String(err)}) — ` +
+        'the cycle is unaffected; only the duration measurement drifts.',
     );
   }
 }

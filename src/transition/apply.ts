@@ -131,7 +131,28 @@ export function applyGate(params: {
   const superseded = movements.filter((m) => stopAssets.has(m.asset));
   const remaining = movements.filter((m) => !stopAssets.has(m.asset));
 
-  if (!judgement.refused) {
+  /**
+   * UNJUDGED STRATEGIC LEGS FAIL CLOSED — but only under `enforce`, and only here.
+   *
+   * A leg on an asset with no usable 4h bar gets gate `no_regime` and verdict `unjudged`.
+   * `judgeVector` deliberately refuses to let those trigger an atomic refusal, and that is
+   * RIGHT for the journal: in observe mode it must never invent a refusal that did not
+   * happen. But carried into enforcement it fails OPEN — the strategic leg would execute
+   * precisely when the layer has no regime to validate it against, while the payload has
+   * already told the model that asset is `actionable: false`. The code would then be
+   * trading a line it just instructed the model to leave alone.
+   *
+   * So the correction lives HERE rather than in `judgeVector`: changing the judgement
+   * itself would rewrite what observe mode journals, and the switch would stop being a
+   * no-op. Deterministic exits are exempt, as always — a `no_regime` asset under a
+   * confirmed risk_off still reduces (rung 2 lifts the silence as well as the freeze).
+   */
+  const unjudgedStrategic = judgement.legs.filter(
+    (leg) => !leg.deterministic && leg.ownVerdict === 'unjudged',
+  );
+  const refused = judgement.refused || unjudgedStrategic.length > 0;
+
+  if (!refused) {
     return {
       movements: [...stopExits, ...remaining],
       supersededLegs: superseded,
@@ -167,7 +188,12 @@ export function applyGate(params: {
     refused: true,
     droppedLegs: dropped,
     reason:
-      `${judgement.reason} — ${dropped.length} strategic leg(s) dropped, ${kept.length} ` +
+      `${judgement.reason}${
+        unjudgedStrategic.length > 0 && !judgement.refused
+          ? ` — but ${unjudgedStrategic.length} strategic leg(s) sit on assets with NO regime ` +
+            `(${unjudgedStrategic.map((l) => l.asset).join(', ')}); enforcement fails closed on those`
+          : ''
+      } — ${dropped.length} strategic leg(s) dropped, ${kept.length} ` +
       `risk_off reduction(s) kept, ${stopExits.length} peak-stop exit(s) generated; ` +
       `applied_allocation holds the previous vector and no drift rebalancing is generated toward it`,
   };
