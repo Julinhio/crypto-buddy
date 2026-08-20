@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { Decimal } from '../money.js';
 import {
   resolveCoherenceGuard,
-  validateDecisionTimingConfig,
+  validateDecisionConfig,
   config,
   type AppConfig,
   type DecisionConfig,
@@ -507,7 +507,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   });
 
   // The shipped values must fit, or the assertion below is theatre.
-  validateDecisionTimingConfig(config.decision, config.scheduler);
+  validateDecisionConfig(config.decision, config.scheduler);
   ok(
     'the shipped timing fits the cycle budget with room to spare',
     2 * config.decision.attemptTimeoutSeconds + config.decision.retryReserveSeconds <=
@@ -518,18 +518,18 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // otherwise be force-exited by the watchdog MID-EXECUTION — after a booking, possibly
   // before its trace.
   assert.throws(
-    () => validateDecisionTimingConfig(decision(140, 45), scheduler(300)),
+    () => validateDecisionConfig(decision(140, 45), scheduler(300)),
     /must fit inside maxCycleSeconds/,
     'two attempts that overflow the budget must fail the boot',
   );
   assert.throws(
-    () => validateDecisionTimingConfig(decision(90, 0), scheduler(300)),
+    () => validateDecisionConfig(decision(90, 0), scheduler(300)),
     /retryReserveSeconds must be > 0/,
     'a zero post-decision reserve must fail the boot',
   );
   // And it must react to the MAX_CYCLE_SECONDS override, not just to the default.
   assert.throws(
-    () => validateDecisionTimingConfig(decision(90, 45), scheduler(120)),
+    () => validateDecisionConfig(decision(90, 45), scheduler(120)),
     /must fit inside maxCycleSeconds/,
     'a shrunk cycle budget must fail the boot too',
   );

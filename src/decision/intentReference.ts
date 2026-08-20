@@ -1,4 +1,4 @@
-import type { AppConfig } from '../config/index.js';
+import { ALLOCATION_CORRUPTION_BAND_PERCENT, type AppConfig } from '../config/index.js';
 import { clampAllocation } from '../risk/clamp.js';
 import { allocationSum, releaseToReserve } from '../allocation.js';
 import { zeroOutStopped } from '../transition/apply.js';
@@ -74,6 +74,13 @@ import { zeroOutStopped } from '../transition/apply.js';
  * have been. This is not the schema's contract with the model; it is the line past which a
  * stored allocation is CORRUPT rather than merely loose.
  *
+ * AND THE OTHER HALF OF THAT GUARANTEE IS AT THE BOOT. `max` only protects history while the
+ * tolerance cannot exceed the band: widen it to 12, persist a total of 90, tighten it back,
+ * and the band falls to 5 while the stored value stays at 90. So the tolerance is bounded to
+ * the band at startup (`ALLOCATION_CORRUPTION_BAND_PERCENT`), which turns that scenario into
+ * a loud boot failure instead of a reference nobody can read a month later. The two halves
+ * are one guarantee, and neither works alone.
+ *
  * A failure of either is REPORTED, never coerced and never fatal — see how the caller treats
  * it. Both are read-and-understood conditions, not read failures, and the difference decides
  * everything about the right reaction.
@@ -111,8 +118,12 @@ const CONSERVATION_EPSILON = 1e-6;
  * of 0, of 240), not to re-adjudicate the schema's tolerance — which lives in configuration,
  * can move, and must never be able to retroactively invalidate a reference that was legal
  * when it was written.
+ *
+ * Defined in the configuration module rather than here, because it is also the CEILING that
+ * startup validation puts on `allocationTolerancePercent` — and the two have to be the same
+ * number or the guarantee below has a hole in it.
  */
-const CORRUPTION_BAND_PERCENT = 5;
+const CORRUPTION_BAND_PERCENT = ALLOCATION_CORRUPTION_BAND_PERCENT;
 
 export function restateIntentReference(params: {
   /** The stored intention of the last `decided` cycle, exactly as persisted. */

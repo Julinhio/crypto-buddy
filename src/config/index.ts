@@ -677,6 +677,23 @@ export function validateSchedulerConfig(cfg: SchedulerConfig): void {
 validateSchedulerConfig(config.scheduler);
 
 /**
+ * The half-width, in points, past which a stored allocation is CORRUPT rather than merely
+ * loose — and the ceiling on `allocationTolerancePercent`, which is why it lives here.
+ *
+ * `restateIntentReference` judges a stored intention against the WIDER of the current
+ * tolerance and this band, so that loosening the tolerance can never make a reference look
+ * corrupt. That only holds while the tolerance cannot itself exceed the band: set it to 12,
+ * persist an allocation summing to 90, tighten back to 0.5, and a legally written reference
+ * suddenly reads as corrupt. The band would then be narrower than the rule that accepted the
+ * value, which is the whole thing it exists to prevent.
+ *
+ * So the invariant is CLOSED AT THE BOOT rather than argued about: a tolerance wider than
+ * this is not a loose tolerance, it is the absence of one. Five points means the schema would
+ * accept anything from 95 to 105; the shipped value is 0.5.
+ */
+export const ALLOCATION_CORRUPTION_BAND_PERCENT = 5;
+
+/**
  * Fails fast when the decision layer could outlive the cycle budget.
  *
  * The coherence guard puts a SECOND LLM call inside one cycle, so the arithmetic that
@@ -690,12 +707,34 @@ validateSchedulerConfig(config.scheduler);
  * its trace — which is the one place this codebase refuses to be sloppy. Asserted at
  * STARTUP, with the env overrides (MAX_CYCLE_SECONDS) in scope, rather than discovered at
  * runtime on the one cycle that needed the retry. Exported for the offline test.
+ *
+ * It also bounds `allocationTolerancePercent`, which is not a timing concern but belongs to
+ * the same startup gate: an unbounded tolerance is what would let the intention pipeline's
+ * corruption band become narrower than the rule that accepted a stored reference. See
+ * ALLOCATION_CORRUPTION_BAND_PERCENT above.
  */
-export function validateDecisionTimingConfig(
+
+export function validateDecisionConfig(
   decision: DecisionConfig,
   scheduler: SchedulerConfig,
 ): void {
   const problems: string[] = [];
+  // Bounded at BOTH ends, and the upper one is load-bearing rather than cosmetic — see
+  // ALLOCATION_CORRUPTION_BAND_PERCENT. A tolerance above the corruption band lets a legally
+  // stored allocation become unreadable the day someone tightens it back.
+  if (
+    !(
+      Number.isFinite(decision.allocationTolerancePercent) &&
+      decision.allocationTolerancePercent > 0 &&
+      decision.allocationTolerancePercent <= ALLOCATION_CORRUPTION_BAND_PERCENT
+    )
+  ) {
+    problems.push(
+      `allocationTolerancePercent must be in (0, ${ALLOCATION_CORRUPTION_BAND_PERCENT}] ` +
+        `(got ${decision.allocationTolerancePercent}) — a tolerance wider than the corruption ` +
+        'band would let a legally stored reference read as corrupt once it is tightened back',
+    );
+  }
   if (!(decision.attemptTimeoutSeconds > 0)) {
     problems.push(`attemptTimeoutSeconds must be > 0 (got ${decision.attemptTimeoutSeconds})`);
   }
@@ -716,7 +755,7 @@ export function validateDecisionTimingConfig(
   }
 }
 
-validateDecisionTimingConfig(config.decision, config.scheduler);
+validateDecisionConfig(config.decision, config.scheduler);
 
 /**
  * Fails fast when the outage observability could push a cycle into the watchdog.

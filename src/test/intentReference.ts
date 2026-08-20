@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { config, type AppConfig } from '../config/index.js';
+import {
+  ALLOCATION_CORRUPTION_BAND_PERCENT,
+  config,
+  validateDecisionConfig,
+  type AppConfig,
+} from '../config/index.js';
 import { Decimal } from '../money.js';
 import { allocationSum, releaseToReserve } from '../allocation.js';
 import {
@@ -192,15 +197,40 @@ console.log('\n§5 — the sum is verified, WITHOUT revalidating history against
   );
 
   // And the band FOLLOWS a loosened tolerance rather than fighting it: configuration may
-  // widen what counts as legal, it just may not narrow what counted as legal yesterday.
+  // widen what counts as legal, up to the corruption band, and the band follows it there.
   const loosened: AppConfig = {
     ...config,
-    decision: { ...config.decision, allocationTolerancePercent: 12 },
+    decision: { ...config.decision, allocationTolerancePercent: ALLOCATION_CORRUPTION_BAND_PERCENT },
   };
-  const veryLoose = { BTC: 25, ETH: 20, BNB: 12, XRP: 0, USDT: 33 }; // sums to 90
-  ok('a widened tolerance widens the band with it', restate(veryLoose, UNIVERSE, loosened).ok);
-  ok('while the same total is refused under the shipped one', !restate(veryLoose).ok);
+  const loose = { BTC: 25, ETH: 20, BNB: 12, XRP: 0, USDT: 39 }; // sums to 96
+  ok('a tolerance at the ceiling still accepts a loose total', restate(loose, UNIVERSE, loosened).ok);
 
+  // AND THE OTHER HALF OF THE GUARANTEE IS AT THE BOOT — the second half of the review's
+  // point, and the one `max` alone cannot deliver. Widen the tolerance ABOVE the band, store
+  // a total of 90 legally, tighten it back, and the band falls below the rule that accepted
+  // the value. So that configuration cannot exist: it fails the boot, loudly, rather than
+  // producing a reference nobody can read a month later.
+  assert.throws(
+    () =>
+      validateDecisionConfig(
+        { ...config.decision, allocationTolerancePercent: 12 },
+        config.scheduler,
+      ),
+    /allocationTolerancePercent must be in/,
+    'a tolerance wider than the corruption band must fail the boot',
+  );
+  assert.throws(
+    () =>
+      validateDecisionConfig({ ...config.decision, allocationTolerancePercent: 0 }, config.scheduler),
+    /allocationTolerancePercent must be in/,
+    'and a zero tolerance is not a tolerance either',
+  );
+  // The shipped value passes, or the assertions above are theatre.
+  validateDecisionConfig(config.decision, config.scheduler);
+  ok(
+    'a tolerance wider than the corruption band cannot exist — the boot refuses it',
+    config.decision.allocationTolerancePercent <= ALLOCATION_CORRUPTION_BAND_PERCENT,
+  );
   // The refusal is a REPORT, never a throw — and the caller degrades rather than freezing.
   // A read that fails is transient and worth skipping a cycle for; a restatement that fails
   // is deterministic on the same row, so skipping would repeat forever AND would never write
