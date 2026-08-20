@@ -820,6 +820,69 @@ const withCaps = (perAsset: Record<string, number>, minCashPercent?: number): Ap
 }
 
 {
+  // ── AND THE OTHER SIDE OF THAT BOUNDARY, argued a second time in review.
+  //
+  // Codex then proposed requiring the two counterfactual plans to genuinely DIFFER —
+  // comparing side and notional rather than mere presence — on the evidence that a cap can
+  // collapse both plans onto the same order. The case: the ceiling is 35, the standing
+  // intention is 40, the model now asks 45. Both clamp to 35, so against a book at 30 both
+  // plans hold the SAME buy, and the five-point intention change moves no order.
+  //
+  // IT IS ACCEPTED, and tightening it here would resurrect this PR's own defect wearing a
+  // different hat. Refuse the cycle and the retry tells the model to re-emit the reference;
+  // it drops back to 40, the intention never records the revision, and the model asks 45
+  // again next wake-up — ONE EXTRA CALL EVERY CYCLE, for as long as the ceiling binds and
+  // the model holds its view. That is precisely the treadmill the relaxed-cap case was
+  // written to remove, triggered from the other direction.
+  //
+  // What makes accepting it defensible rather than merely convenient: the line IS trading
+  // this cycle, toward the bound the policy allows, and the revised intention is not
+  // discarded — `intent_allocation` records it, unclamped, which is the entire point of a
+  // third column. A decision the caps absorb is not a decision nothing came of.
+  const policy = withCaps({ BTC: 35 });
+  const standing = { BTC: 40, ETH: 18, BNB: 12, XRP: 0, USDT: 30 };
+  const revised = { BTC: 45, ETH: 15, BNB: 10, XRP: 0, USDT: 30 };
+
+  // The premise, demonstrated rather than assumed: the ceiling collapses both asks onto
+  // the same bounded target, so the two plans really are the same order.
+  assert.equal(clampAllocation(standing, 'USDT', policy).applied.BTC, 35);
+  assert.equal(clampAllocation(revised, 'USDT', policy).applied.BTC, 35);
+
+  const capAbsorbed = input({
+    actionType: 'rebalance',
+    intentReference: standing,
+    intentTarget: revised,
+    // The same buy in both plans — the book is at 30 and both bounded targets are 35.
+    movements: [movement('BTC', 'buy')],
+    previousIntentMovements: [movement('BTC', 'buy')],
+    notes: [note('BTC')],
+    assetsWithStoredThesis: new Set(['BTC']),
+  });
+  ok('a revision the CAP absorbs is accepted, not refused', checkCoherence(capAbsorbed).ok);
+
+  // And the reason it must be: the refusal would repeat forever. Judged the strict way —
+  // "the plans must differ" — this identical cycle recurs every wake-up, because the retry
+  // can only walk the model back to the reference it just came from.
+  ok(
+    'the strict reading would refuse the same cycle again and again, one retry per wake-up',
+    capAbsorbed.movements.length > 0 &&
+      capAbsorbed.previousIntentMovements.length > 0 &&
+      capAbsorbed.movements[0]!.asset === capAbsorbed.previousIntentMovements[0]!.asset &&
+      capAbsorbed.movements[0]!.side === capAbsorbed.previousIntentMovements[0]!.side,
+  );
+
+  // The guarantee that keeps this from being a hole: a cap-absorbed revision is accepted
+  // only while the line is ACTUALLY TRADING. Put the book on its bounded target and both
+  // plans go empty — nothing reaches the line, and rule 2 refuses exactly as it should.
+  ok(
+    'but with the book already ON the bound, the same revision is refused',
+    rules({ ...capAbsorbed, movements: [], previousIntentMovements: [], notes: [] }).includes(
+      'target_not_executable',
+    ),
+  );
+}
+
+{
   // NEUTRAL ON THE CORPUS — the property the replay proof rests on, stated locally.
   //
   // `applied_allocation` is byte-identical to `target_allocation` on all 1332 decided
