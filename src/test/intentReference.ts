@@ -5,6 +5,7 @@ import {
   ALLOCATION_CORRUPTION_BAND_PERCENT,
   config,
   validateDecisionConfig,
+  validateExecutionConfig,
   type AppConfig,
 } from '../config/index.js';
 import { Decimal } from '../money.js';
@@ -230,6 +231,41 @@ console.log('\n§5 — the sum is verified, WITHOUT revalidating history against
   ok(
     'a tolerance wider than the corruption band cannot exist — the boot refuses it',
     config.decision.allocationTolerancePercent <= ALLOCATION_CORRUPTION_BAND_PERCENT,
+  );
+
+  // THE TWIN BOUND, on the other side of the same number. The corruption band is also the
+  // ceiling under the CASH FLOOR, because both answer the same question: what is the smallest
+  // total an allocation can carry into the clamp?
+  //
+  // The cash-floor pass scales the coins by `(S − minCashPercent) / coinTotal`, so a floor at
+  // or above S writes every coin line flat — and `resolveIntentAllocation` reads a flat line
+  // against a positive proposal as a PEAK STOP. Without this bound, a legal configuration could
+  // make a cash-floor squeeze indistinguishable from a stop and destroy the model's intention
+  // for every line at once. `minCashPercent < 100 − band` makes that unreachable rather than
+  // unlikely.
+  assert.throws(
+    () =>
+      validateExecutionConfig({
+        ...config.execution,
+        caps: { ...config.execution.caps, minCashPercent: 100 - ALLOCATION_CORRUPTION_BAND_PERCENT },
+      }),
+    /minCashPercent must be in/,
+    'a floor at the corruption band must fail the boot',
+  );
+  assert.throws(
+    () =>
+      validateExecutionConfig({
+        ...config.execution,
+        caps: { ...config.execution.caps, minCashPercent: 99.6 },
+      }),
+    /minCashPercent must be in/,
+    'and so must the 99.6 that would zero a proposal summing to 99.5',
+  );
+  // The shipped floor passes, or the assertions above are theatre.
+  validateExecutionConfig(config.execution);
+  ok(
+    'a cash floor that could zero every coin line cannot exist — the boot refuses it',
+    config.execution.caps.minCashPercent < 100 - ALLOCATION_CORRUPTION_BAND_PERCENT,
   );
   // The refusal is a REPORT, never a throw — and the caller degrades rather than freezing.
   // A read that fails is transient and worth skipping a cycle for; a restatement that fails

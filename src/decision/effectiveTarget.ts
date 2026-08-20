@@ -184,13 +184,24 @@ function usableAllocation(value: unknown): Record<string, number> | null {
  *               vector, so a zero there means "the book was not in this line", not "the code
  *               just emptied it" — and the model's intention to ENTER it must survive, which
  *               is the whole point of a refusal not touching the intention.
- *   the CLAMP   it trims to a cap, and a cap is a positive weight, so it cannot produce the
- *               zero this predicate looks for. The cash-floor pass cannot either: its scale
- *               is `(coinTotal − deficit) / coinTotal`, which startup validation keeps
- *               strictly positive by requiring `minCashPercent < 100`. `clamped` is
- *               DELIBERATELY not consulted — it is a portfolio-wide flag, so reading it
- *               would let a cap firing on BTC silently suppress the recovery of a stop on
- *               ETH, which is the review's finding and the reason this reads per line.
+ *   the CLAMP   it cannot produce the zero this predicate looks for — but that is a bound
+ *               someone maintains, not a law of arithmetic, and the earlier version of this
+ *               comment got it wrong. Both passes have to be argued separately:
+ *
+ *                 · the PER-ASSET pass trims to the cap, and a cap is a positive weight
+ *                   (a cap of exactly zero is the one exception — residual ambiguity 2);
+ *                 · the CASH-FLOOR pass scales the coins by `(S − minCashPercent) / coinTotal`,
+ *                   where S is the allocation's TOTAL. S is not 100 — it is 100 within the
+ *                   tolerance the schema accepts, or within the corruption band for a stored
+ *                   intention. So the scale collapses to zero as soon as the floor reaches S,
+ *                   and every coin line is written flat. What keeps that unreachable is a
+ *                   startup bound: `caps.minCashPercent < 100 − ALLOCATION_CORRUPTION_BAND_PERCENT`,
+ *                   asserted in `validateExecutionConfig`. Remove that bound and this
+ *                   predicate starts reading a cash-floor squeeze as a peak stop.
+ *
+ *               `clamped` is DELIBERATELY not consulted, because it would be the wrong
+ *               instrument even so: the flag is portfolio-wide, so reading it would let a cap
+ *               firing on BTC suppress the recovery of a stop on ETH.
  *   the STOP    no divergence cause, applied at zero, proposal above it. That is a peak-stop
  *               exit, and it is the case being recovered.
  *
@@ -293,10 +304,15 @@ function codeEmptiedLines(row: TargetColumns, proposal: Record<string, number>):
   // A gate refusal makes `applied_allocation` the PREVIOUS vector, so it says nothing about
   // what THIS cycle emptied — the proposal stands as the intention, which is the contract.
   //
-  // The clamp needs no exclusion at all, and reading `clamped` for one would be actively
-  // wrong: the flag is portfolio-wide, so a cap firing on BTC would suppress the recovery of
-  // a stop on ETH. The predicate is per line instead, and per line the clamp cannot produce
-  // a zero — see the enumeration above.
+  // The clamp needs no exclusion, and `clamped` would be the wrong instrument for one anyway:
+  // the flag is portfolio-wide, so a cap firing on BTC would suppress the recovery of a stop
+  // on ETH.
+  //
+  // NOT because "the clamp cannot produce a zero" — it can, and an earlier version of this
+  // comment claimed otherwise. The cash-floor pass writes every coin flat once the floor
+  // reaches the allocation's total, which is 100 only within a tolerance. What makes it
+  // unreachable is the startup bound on `caps.minCashPercent` — see the enumeration above,
+  // and `validateExecutionConfig`. This predicate is only sound while that bound holds.
   if (row.applied_divergence_cause != null) return [];
   const applied = usableAllocation(row.applied_allocation);
   if (applied == null) return [];

@@ -3,7 +3,12 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { resolveEffectiveTarget, resolveIntentAllocation } from '../decision/effectiveTarget.js';
 import { loadReferenceAllocations } from '../persistence/decisionGuard.js';
 import { clampAllocation } from '../risk/clamp.js';
-import { config, type AppConfig } from '../config/index.js';
+import {
+  ALLOCATION_CORRUPTION_BAND_PERCENT,
+  config,
+  validateExecutionConfig,
+  type AppConfig,
+} from '../config/index.js';
 
 /**
  * Invariants of the EFFECTIVE TARGET resolver — run with `npm test` (tsx). No framework.
@@ -226,21 +231,56 @@ const APPLIED = { BTC: 25, ETH: 20, USDT: 55 };
     "BTC keeps the model's over-cap ASK — a clamped line is still what the model meant",
   );
 
-  // AND THE CLAMP CANNOT PRODUCE THE ZERO the predicate looks for, which is why it needs no
-  // exclusion of its own. A cap is a positive weight, and the cash-floor pass scales by
-  // `(coinTotal − deficit) / coinTotal`, kept strictly positive by `minCashPercent < 100` at
-  // startup. Demonstrated against the real clamp rather than asserted.
-  const extreme: AppConfig = {
+  // AND THE CLAMP CANNOT PRODUCE THE ZERO the predicate looks for — but only because a
+  // startup bound says so, and the earlier version of this case asserted the wrong reason.
+  //
+  // It claimed the cash-floor pass was harmless because its scale stays positive "since the
+  // allocation sums to 100". Allocations do NOT sum to 100: the schema accepts anything within
+  // its tolerance, and a stored intention is admitted within the corruption band. The scale is
+  // `(S − minCashPercent) / coinTotal`, so it collapses the moment the floor reaches the TOTAL.
+  //
+  // First, the failure the bound exists to make unreachable — shown against the real clamp with
+  // a policy that could not survive `validateExecutionConfig`.
+  const unbounded: AppConfig = {
     ...config,
     execution: {
       ...config.execution,
-      caps: { ...config.execution.caps, minCashPercent: 99, defaultPerAsset: 1, perAsset: {} },
+      caps: { ...config.execution.caps, minCashPercent: 99.6 },
     },
   };
-  const squeezed = clampAllocation({ BTC: 60, ETH: 20, USDT: 20 }, 'USDT', extreme).applied;
+  const legalButShort = { BTC: 60, ETH: 19.5, USDT: 20 }; // sums to 99.5 — inside any tolerance
+  const collapsed = clampAllocation(legalButShort, 'USDT', unbounded).applied;
+  assert.equal(collapsed.BTC, 0, 'a floor above the total writes every coin flat');
+  assert.equal(collapsed.ETH, 0);
+  // ...and that is exactly the shape this resolver would misread as a peak stop, destroying the
+  // model's intention for both lines. Which is why the configuration is refused at the boot.
+  assert.throws(
+    () => validateExecutionConfig(unbounded.execution),
+    /minCashPercent must be in/,
+    'a cash floor that can zero every coin line must fail the boot',
+  );
+
+  // Second, the property that now holds BY CONSTRUCTION: at the highest floor the validator
+  // still accepts, the shortest total it can meet still leaves every positive line positive.
+  const atCeiling: AppConfig = {
+    ...config,
+    execution: {
+      ...config.execution,
+      caps: {
+        ...config.execution.caps,
+        minCashPercent: 100 - ALLOCATION_CORRUPTION_BAND_PERCENT - 0.1,
+        defaultPerAsset: 1,
+        perAsset: {},
+      },
+    },
+  };
+  validateExecutionConfig(atCeiling.execution); // legal, or the case below proves nothing
+  // Sums to exactly 100 − band: the shortest total the corruption check still admits.
+  const shortest = { BTC: 60, ETH: 20, USDT: 20 - ALLOCATION_CORRUPTION_BAND_PERCENT };
+  const squeezed = clampAllocation(shortest, 'USDT', atCeiling).applied;
   assert.ok(
     (squeezed.BTC ?? 0) > 0 && (squeezed.ETH ?? 0) > 0,
-    'even at a 99% cash floor and a 1% per-asset cap, no positive line is driven to zero',
+    'at the highest legal floor and the shortest legal total, no positive line reaches zero',
   );
 
   // AND IT IS A NO-OP ON EVERY HISTORICAL ROW, which is what keeps the corpus replay inert:
