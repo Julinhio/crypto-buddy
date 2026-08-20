@@ -44,11 +44,17 @@
 -- Left NULL, deliberately. A backfill would have to guess which historical rows had a stop
 -- fire, and the answer is "none" (0 gate refusals and 0 applied/target divergences on the
 -- 1332 decided rows as of 20/08) — so a backfill would write exactly `target_allocation`
--- into every row and buy nothing but the risk of writing it wrong. NULL is read as an
--- explicit named fallback to `target_allocation` in `resolveIntentAllocation`, which is a
--- contract the code states rather than a default it stumbles into.
+-- into every row and buy nothing but the risk of writing it wrong.
+--
+-- AND NULL DOES NOT MEAN "OLD". This migration is additive, so it lands BEFORE the binary
+-- that writes the column, and it survives a rollback: any `decided` row written by a binary
+-- without that code leaves this column null too. `resolveIntentAllocation` therefore
+-- RECONSTRUCTS rather than substituting — a line flat in `applied_allocation` while the
+-- proposal holds weight, with neither `clamped` nor `applied_divergence_cause` to explain
+-- it, is a peak-stop exit the writer did not record. A backfill could not have covered that
+-- case anyway, because it recurs on every rollback.
 alter table public.decisions
   add column if not exists intent_allocation jsonb;
 
 comment on column public.decisions.intent_allocation is
-  'The model INTENTION the coherence guard rereads as its rule-1 reference. Equals target_allocation except that a deterministic peak-stop exit zeroes the emptied line and transfers its weight to the reserve (including on a cycle the transition gate also refused); the risk clamp and a gate refusal alone leave it untouched. NULL on rows written before migration 0027 — readers fall back to target_allocation explicitly. NOT an execution target: applied_allocation remains the only allocation an operational path may read.';
+  'The model INTENTION the coherence guard rereads as its rule-1 reference. Equals target_allocation except that a deterministic peak-stop exit zeroes the emptied line and transfers its weight to the reserve (including on a cycle the transition gate also refused); the risk clamp and a gate refusal alone leave it untouched. NULL on any row written by a binary without that code (pre-migration history, or a rollback) — readers then RECONSTRUCT the intention: a line flat in applied_allocation while target_allocation holds weight, with neither clamped nor applied_divergence_cause to explain it, is an unrecorded peak-stop exit. NOT an execution target: applied_allocation remains the only allocation an operational path may read.';

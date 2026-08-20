@@ -79,6 +79,13 @@ export interface StoredCycle {
   /** Migration 0027. Null on every corpus row — the resolver falls back to the proposal. */
   intent_allocation?: unknown;
   applied_allocation: unknown;
+  /**
+   * The PROVENANCE of a proposal/applied divergence, carried so the replay resolves an
+   * intention exactly the way production does — including the reconstruction branch for a
+   * row written without one. Both are null on every corpus row.
+   */
+  clamped?: unknown;
+  applied_divergence_cause?: unknown;
 }
 
 /** The virtual book EXACTLY as that cycle saw it. */
@@ -358,12 +365,20 @@ export function replayCycle(
     return { kind: 'rejected', decision: decoded.decision, violations: verdict.violations };
   }
   // The intention this cycle would have established. `resolveIntentAllocation` is the same
-  // resolver production reads with, so a corpus row that predates migration 0027 falls back
-  // to its raw proposal here exactly as it would there.
-  const storedIntent = resolveIntentAllocation({
-    intent_allocation: cycle.intent_allocation,
-    target_allocation: cycle.target_allocation,
-  });
+  // resolver production reads with — including its provenance columns, so a row written
+  // without an intention while a peak stop fired is reconstructed here exactly as it would
+  // be there. On the corpus that branch is unreachable (the stop has never fired), which is
+  // what keeps the chain identical to what production walked.
+  const storedIntent = resolveIntentAllocation(
+    {
+      intent_allocation: cycle.intent_allocation,
+      target_allocation: cycle.target_allocation,
+      applied_allocation: cycle.applied_allocation,
+      clamped: cycle.clamped,
+      applied_divergence_cause: cycle.applied_divergence_cause,
+    },
+    cycle.market_context.account.portfolio.reserveAsset,
+  );
   return {
     kind: 'accepted',
     decision: decoded.decision,
@@ -424,7 +439,8 @@ export async function loadCorpus(
     let query = supabase
       .from('decisions')
       .select(
-        'id, created_at, raw_response, market_context, target_allocation, intent_allocation, applied_allocation',
+        'id, created_at, raw_response, market_context, target_allocation, intent_allocation, ' +
+          'applied_allocation, clamped, applied_divergence_cause',
       )
       .eq('status', 'decided')
       .eq('prompt_version', 'v5')

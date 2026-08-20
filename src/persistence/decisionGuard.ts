@@ -65,6 +65,14 @@ export interface ReferenceAllocationsRead {
 
 export async function loadReferenceAllocations(
   supabase: SupabaseClient | null,
+  /**
+   * The cycle's reserve stable. Needed because a row written WITHOUT an intention column —
+   * an old binary running after the additive migration, or a rollback — has to have its
+   * intention reconstructed, and a stopped line's weight has to land somewhere. Passed in
+   * rather than imported so the resolver stays pure and the caller stays honest about which
+   * reserve it means.
+   */
+  reserveAsset: string,
 ): Promise<ReferenceAllocationsRead> {
   // No persistence configured is a local/dev run, not a failure: there is no history to
   // read, which is honestly "no reference yet".
@@ -77,7 +85,9 @@ export async function loadReferenceAllocations(
       // did the model last mean", `applied_allocation` answers "what did the book last
       // pursue", and `target_allocation` is the named fallback for rows written before
       // migration 0027 — never a value either resolver reaches for otherwise.
-      .select('target_allocation, applied_allocation, intent_allocation')
+      .select(
+        'target_allocation, applied_allocation, intent_allocation, clamped, applied_divergence_cause',
+      )
       .eq('status', 'decided')
       .order('created_at', { ascending: false })
       .limit(1);
@@ -87,7 +97,7 @@ export async function loadReferenceAllocations(
     if (!row) return { ok: true, intent: null, applied: null }; // genuinely the first decision
 
     const effective = resolveEffectiveTarget(row);
-    const intent = resolveIntentAllocation(row);
+    const intent = resolveIntentAllocation(row, reserveAsset);
     if (effective.allocation == null || intent.allocation == null) {
       // A `decided` row is CHECK-constrained to have a target_allocation, so reaching here
       // means the columns hold something no resolver can use. Refusing is safer than
@@ -116,8 +126,19 @@ export async function loadReferenceAllocations(
     }
     if (intent.source === 'intent-fallback') {
       console.warn(
-        '[warn] the last decided row predates migration 0027 — the coherence guard is reading ' +
-          'the raw proposal as its intention reference. Expected exactly once after the deploy.',
+        '[warn] the last decided row carries no intent_allocation — the coherence guard is ' +
+          'reading the raw proposal as its intention reference. Expected exactly once after ' +
+          'the deploy; recurring means a binary without this code is still writing rows.',
+      );
+    }
+    if (intent.source === 'intent-reconstructed') {
+      // Loud, because it means a row was written by a binary that did not know about the
+      // column WHILE A PEAK STOP FIRED. The reconstruction is correct; the fact that it was
+      // needed says something about the deployment that is worth reading.
+      console.warn(
+        '[warn] the last decided row carries no intent_allocation but shows a peak-stop exit ' +
+          `on ${intent.stoppedAssets.join(', ')} — the intention was RECONSTRUCTED from the ` +
+          'applied target. A binary without this code wrote that row; check for a rollback.',
       );
     }
     return { ok: true, intent: intent.allocation, applied: effective.allocation };

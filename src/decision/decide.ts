@@ -267,7 +267,7 @@ export async function decide(): Promise<DecideResult> {
   // while looking like it worked.
   const [stateRead, referenceRead] = await Promise.all([
     loadPositionStates(supabase),
-    loadReferenceAllocations(supabase),
+    loadReferenceAllocations(supabase, reserveStable),
   ]);
 
   /**

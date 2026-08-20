@@ -1,3 +1,5 @@
+import { buildIntentAllocation } from './intentReference.js';
+
 /**
  * WHICH COLUMN ANSWERS WHICH QUESTION — the three allocations of a decision row.
  *
@@ -52,6 +54,13 @@ export interface TargetColumns {
    * see `resolveIntentAllocation`.
    */
   intent_allocation?: unknown;
+  /**
+   * Migration 0004 / 0026 — the PROVENANCE of a divergence between the proposal and the
+   * applied target. Read only when `intent_allocation` is missing, to tell a peak stop
+   * apart from a clamp or a gate refusal; see `resolveIntentAllocation`.
+   */
+  clamped?: unknown;
+  applied_divergence_cause?: unknown;
 }
 
 export type EffectiveTargetSource =
@@ -148,32 +157,76 @@ function usableAllocation(value: unknown): Record<string, number> | null {
  * intention did advance on a refused cycle, only the book did not. That asymmetry is the
  * entire reason rule 1 and rule 2 now read different operands.
  *
- * ── THE FALLBACK ────────────────────────────────────────────────────────────────────
+ * ── WHEN THE COLUMN IS NULL, AND WHY "PRE-0027" IS THE WRONG ANSWER ─────────────────
  *
- * `intent-fallback` means the row predates migration 0027. Falling back to the raw
- * proposal is exactly right for those rows: the stop had never fired on any of them (0
- * gate refusals and 0 applied/target divergences across the 1332 decided rows as of
- * 20/08), so proposal and intention are the same value there — which is what makes this
- * switch provably inert on the corpus. It is a NAMED outcome rather than a `??` for the
- * same reason as above: a caller can log it, count it, or refuse it.
+ * A null `intent_allocation` was first read as "this row predates migration 0027", and
+ * falling back to the raw proposal is exactly right for those rows: the stop had never
+ * fired on any of them (0 gate refusals and 0 applied/target divergences across the 1332
+ * decided rows as of 20/08), so proposal and intention are the same value there.
+ *
+ * But NULL DOES NOT MEAN "OLD". The migration is additive, so it lands before the binary
+ * that writes the column — and it stays in place across a rollback. Any `decided` row
+ * written by a binary without this code, at any point after the migration, is null here
+ * too. If a peak stop fired on such a cycle, the old binary put the emptied line flat in
+ * `applied_allocation` and left the raw proposal carrying its positive weight; a blind
+ * fallback would then forget the stop, refuse the model's honest zero next cycle, and
+ * invite the re-entry the stop contract forbids. Reading "null" as "historical" is the
+ * one assumption this file cannot make, because the project's disaster-recovery posture
+ * makes rolling back a supported move rather than an accident.
+ *
+ * So the fallback RECONSTRUCTS instead of substituting, from the columns such a row does
+ * carry. A line was emptied BY THE CODE exactly when the applied target holds zero while
+ * the proposal holds weight — and the three things that can put those two columns apart
+ * are enumerated rather than guessed at:
+ *
+ *   the CLAMP        `clamped` is true. It trims to a cap, and a cap is not zero; excluded
+ *                    anyway, because a clamped ask is still the model's ask.
+ *   the GATE         `applied_divergence_cause` is set. The applied target is then the
+ *                    PREVIOUS vector, so a zero there means "the book was not in this line",
+ *                    not "the code just emptied it" — and the model's intention to enter it
+ *                    must survive, which is the whole point of a refusal not touching it.
+ *   the STOP         neither of the above, applied at zero, proposal above it. That is a
+ *                    peak-stop exit, and it is the case being recovered.
+ *
+ * The residual blind spot, stated rather than hidden: a stop that fires on a cycle the
+ * gate ALSO refused, written by an old binary. The divergence cause is set, so the
+ * reconstruction stands aside and the raw weight survives. That costs one rejected cycle
+ * and one retry, it is self-healing on the next accepted decision, and it cannot happen at
+ * all once the writing binary carries this code.
+ *
+ * Every branch is a NAMED outcome rather than a `??`, for the same reason as the effective
+ * target: a caller can log it, count it, or refuse it.
  */
 export type IntentSource =
   /** The normal case, from migration 0027 onwards. */
   | 'intent'
-  /** A row written before 0027 — the raw proposal stands in. */
+  /** No intention column, and nothing in the other two suggests the code emptied a line. */
   | 'intent-fallback'
+  /** No intention column, but the applied target shows a peak stop the writer did not record. */
+  | 'intent-reconstructed'
   /** Neither column carries an allocation. */
   | 'none';
 
 export interface IntentAllocation {
   allocation: Record<string, number> | null;
   source: IntentSource;
-  /** True when the persisted intention differs from the raw proposal — i.e. a stop fired. */
+  /** True when the intention differs from the raw proposal — i.e. a stop fired. */
   differsFromProposal: boolean;
+  /** The lines a reconstruction put flat. Empty unless `source` is `intent-reconstructed`. */
+  stoppedAssets: string[];
 }
 
-/** The single definition of "what the model last meant". */
-export function resolveIntentAllocation(row: TargetColumns): IntentAllocation {
+/**
+ * The single definition of "what the model last meant".
+ *
+ * `reserveAsset` is required rather than defaulted: a reconstruction has to move the
+ * emptied line's weight somewhere, and guessing the reserve is how an allocation quietly
+ * stops summing to 100.
+ */
+export function resolveIntentAllocation(
+  row: TargetColumns,
+  reserveAsset: string,
+): IntentAllocation {
   const intent = usableAllocation(row.intent_allocation);
   const proposal = usableAllocation(row.target_allocation);
 
@@ -182,10 +235,48 @@ export function resolveIntentAllocation(row: TargetColumns): IntentAllocation {
       allocation: intent,
       source: 'intent',
       differsFromProposal: proposal != null && !sameAllocation(intent, proposal),
+      stoppedAssets: [],
     };
   }
-  if (proposal != null) {
-    return { allocation: proposal, source: 'intent-fallback', differsFromProposal: false };
+  if (proposal == null) {
+    return { allocation: null, source: 'none', differsFromProposal: false, stoppedAssets: [] };
   }
-  return { allocation: null, source: 'none', differsFromProposal: false };
+
+  const stopped = codeEmptiedLines(row, proposal);
+  if (stopped.length === 0) {
+    return {
+      allocation: proposal,
+      source: 'intent-fallback',
+      differsFromProposal: false,
+      stoppedAssets: [],
+    };
+  }
+  // Rebuilt with the SAME function the writer would have used, so a reconstructed row and
+  // a written one cannot disagree about what a stop does to an intention.
+  return {
+    allocation: buildIntentAllocation({
+      proposal,
+      stoppedAssets: new Set(stopped),
+      reserveAsset,
+    }),
+    source: 'intent-reconstructed',
+    differsFromProposal: true,
+    stoppedAssets: stopped,
+  };
+}
+
+/**
+ * The lines the CODE emptied on a row that did not record its intention — see the
+ * enumeration above. Returns nothing whenever the row cannot answer the question, which is
+ * every row on the historical corpus.
+ */
+function codeEmptiedLines(row: TargetColumns, proposal: Record<string, number>): string[] {
+  // A gate refusal makes `applied_allocation` the PREVIOUS vector, so it says nothing about
+  // what this cycle emptied. A clamp trims to a cap, never to zero. In both cases the
+  // proposal stands as the intention, which is the contract.
+  if (row.applied_divergence_cause != null) return [];
+  if (row.clamped === true) return [];
+  const applied = usableAllocation(row.applied_allocation);
+  if (applied == null) return [];
+  return Object.keys(proposal).filter((asset) => proposal[asset]! > 0 && applied[asset] === 0);
 }
