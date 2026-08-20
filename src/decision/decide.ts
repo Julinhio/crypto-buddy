@@ -609,7 +609,8 @@ export async function decide(): Promise<DecideResult> {
   // Both are derived HERE, before the model is called and long before the transition gate
   // runs. Two reasons, and the second is the load-bearing one:
   //
-  //   1. a reference that cannot be restated is a reason not to spend an LLM call at all;
+  //   1. whether the guard has a usable reference is a fact worth knowing before spending
+  //      an LLM call, even though it never cancels one — see the degradation below;
   //   2. THE COUNTERFACTUAL MUST BE COMPUTED BEFORE THE GATE. Rule 2 asks whether a
   //      change can reach the book by replaying BOTH intentions against it. Computed
   //      after the gate, a frozen asset yields two empty plans — the old one and the new
@@ -629,26 +630,24 @@ export async function decide(): Promise<DecideResult> {
         policy: config,
       })
     : null;
-  if (intentRestatement && !intentRestatement.ok && COHERENCE_GUARD) {
-    // A reference the pipeline refuses is not a reference. Running the guard on it would
-    // not fail loudly — it would silently reject every hold from now on, which is the
-    // single worst failure this guard can have. Same posture as a failed reference READ:
-    // refuse the cycle rather than trade with a guard that only looks armed.
-    const skipReason =
-      `the stored intention reference cannot be restated in this cycle's universe — ` +
-      `${intentRestatement.reason} Refusing to run the coherence guard against a reference ` +
-      'we cannot trust; nothing is booked and the next cycle retries.';
-    console.error(`[CRITICAL] Wake-up skipped: ${skipReason} The LLM was not called.`);
-    const row = makeRow(decisionContext, context.regime, gitSha, {
-      status: 'skipped',
-      skip_reason: skipReason,
-    });
-    const { persisted, id } = await insertDecision(supabase, row);
-    await persistLifecycle(portfolio, []);
-    await observeTransition(id, [], []);
-    await observeMarketDataOutage(id);
-    await alertArmedStopNotFired('skipped');
-    return emptyResult('skipped', persisted, id, row, portfolio, marketData);
+  if (intentRestatement && !intentRestatement.ok) {
+    // DEGRADED, NEVER FROZEN — and the distinction from a failed reference READ is the whole
+    // point. A read that fails is TRANSIENT: skipping the cycle costs one wake-up and the next
+    // one very likely succeeds, so refusing to trade with a guard that only looks armed is the
+    // right trade. A restatement that fails is DETERMINISTIC on the same stored row — skipping
+    // would repeat forever, and the row that could replace the reference is exactly the row a
+    // skipped cycle never writes. The bot would stop trading permanently, without ever calling
+    // the model again.
+    //
+    // So the cycle proceeds with NO reference, which is the bootstrap posture: rules 1 and 2
+    // are not evaluated (there is nothing to have moved), rules 3 and 4 stay armed, and the
+    // decision this cycle writes becomes a clean reference for the next one. One wake-up of
+    // reduced coverage, self-healing, and loud — against a permanent freeze.
+    console.error(
+      `[CRITICAL] the stored intention reference cannot be restated — ${intentRestatement.reason} ` +
+        'This cycle runs WITHOUT a reference: rules 1 and 2 are not evaluated, exactly as on the ' +
+        'first decision ever recorded. The decision written this cycle re-establishes it.',
+    );
   }
   /** Rule 1's operand: the last intention, in this cycle's universe, NEVER clamped. */
   const intentReference = intentRestatement?.ok ? intentRestatement.value.intent : null;

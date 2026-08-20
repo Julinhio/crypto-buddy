@@ -155,14 +155,13 @@ console.log('\n§4 — THE INTENTION IS NEVER CLAMPED, and `bounded` is the only
   ok('the intention operand is invariant to the risk policy, in both directions', true);
 }
 
-console.log('\n§5 — the sum is verified BEFORE anything is built on it');
+console.log('\n§5 — the sum is verified, WITHOUT revalidating history against a mutable setting');
 {
-  // CALIBRATION is checked at the tolerance the SCHEMA validated the emission with. A
-  // stricter bound here would reject the legitimate 99.7% the schema accepts — and would do
-  // it silently, by rejecting every subsequent hold from then on.
-  const tolerance = config.decision.allocationTolerancePercent;
-  const slightlyOff = restate({ BTC: 25, ETH: 20, BNB: 12, XRP: 0, USDT: 43 - tolerance / 2 });
-  ok('a total inside the schema tolerance is accepted', slightlyOff.ok);
+  // CONSERVATION is an assertion about this code: moving a weight cannot change a total.
+  // CALIBRATION is an assertion about the stored data: a total nowhere near 100 was never a
+  // legal allocation, whatever tolerance was in force when it was written.
+  const slightlyOff = restate({ BTC: 25, ETH: 20, BNB: 12, XRP: 0, USDT: 42.7 });
+  ok('a total a hair off 100 is accepted', slightlyOff.ok);
 
   const wayOff = restate({ BTC: 25, ETH: 20, BNB: 12, XRP: 0, USDT: 20 });
   ok('a total the schema would never have accepted is REFUSED', !wayOff.ok);
@@ -171,10 +170,56 @@ console.log('\n§5 — the sum is verified BEFORE anything is built on it');
     !wayOff.ok && wayOff.reason.includes('sums to') && wayOff.reason.includes('77'),
   );
 
-  // The refusal is a REPORT, not a throw: production turns it into a skipped cycle, which
-  // is the same posture as a failed reference read. A guard running on a reference it
-  // cannot trust does not fail loudly — it quietly rejects every hold.
+  // THE FREEZE THIS MUST NOT PRODUCE, and the reason the band is not the schema's tolerance.
+  //
+  // `allocationTolerancePercent` is configuration: it can be tightened between two
+  // deployments. Check a stored total against the CURRENT value and a legally stored 99.7%
+  // becomes "invalid" the day someone sets 0.1 — the reference is refused on every wake-up,
+  // deterministically, on the same row. That is this PR's own defect one layer down:
+  // revalidating history under a policy it was never emitted under.
+  const tightened: AppConfig = {
+    ...config,
+    decision: { ...config.decision, allocationTolerancePercent: 0.1 },
+  };
+  const legalUnderOldTolerance = { BTC: 25, ETH: 20, BNB: 12, XRP: 0, USDT: 42.7 }; // sums to 99.7
+  assert.ok(
+    Math.abs(allocationSum(legalUnderOldTolerance) - 100) > 0.1,
+    'the fixture must be outside the TIGHTENED tolerance, or this case proves nothing',
+  );
+  ok(
+    'tightening the tolerance does NOT invalidate a reference that was legal when written',
+    restate(legalUnderOldTolerance, UNIVERSE, tightened).ok,
+  );
+
+  // And the band FOLLOWS a loosened tolerance rather than fighting it: configuration may
+  // widen what counts as legal, it just may not narrow what counted as legal yesterday.
+  const loosened: AppConfig = {
+    ...config,
+    decision: { ...config.decision, allocationTolerancePercent: 12 },
+  };
+  const veryLoose = { BTC: 25, ETH: 20, BNB: 12, XRP: 0, USDT: 33 }; // sums to 90
+  ok('a widened tolerance widens the band with it', restate(veryLoose, UNIVERSE, loosened).ok);
+  ok('while the same total is refused under the shipped one', !restate(veryLoose).ok);
+
+  // The refusal is a REPORT, never a throw — and the caller degrades rather than freezing.
+  // A read that fails is transient and worth skipping a cycle for; a restatement that fails
+  // is deterministic on the same row, so skipping would repeat forever AND would never write
+  // the decision that replaces the reference. `decide()` therefore runs the cycle with no
+  // reference at all, exactly as on the first decision ever recorded, and heals next wake-up.
   ok('a refused restatement never throws', typeof wayOff === 'object');
+  const decideSource = readFileSync(
+    fileURLToPath(new URL('../decision/decide.ts', import.meta.url)),
+    'utf8',
+  );
+  const branch = decideSource.slice(
+    decideSource.indexOf('if (intentRestatement && !intentRestatement.ok)'),
+    decideSource.indexOf("const intentReference = intentRestatement?.ok"),
+  );
+  assert.ok(branch.length > 0, 'the degradation branch must exist in decide.ts');
+  ok(
+    'and decide() degrades rather than skipping the cycle — no permanent freeze',
+    !branch.includes("status: 'skipped'") && !branch.includes('return emptyResult'),
+  );
 }
 
 /* ── What gets PERSISTED as the intention ─────────────────────────────────────── */

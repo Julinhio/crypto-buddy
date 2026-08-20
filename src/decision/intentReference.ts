@@ -59,15 +59,24 @@ import { zeroOutStopped } from '../transition/apply.js';
  * cannot change the total, so any drift beyond float noise means the pipeline itself is
  * wrong. Checked at 1e-6.
  *
- * CALIBRATION is an assertion about THE STORED DATA: the intention was emitted under a
- * schema that validates the sum to 100 within `allocationTolerancePercent`, so a stored
- * value outside that band was never a legal allocation. Checked at the SAME tolerance the
- * emission was checked at, deliberately — 1e-6 here would reject the legitimate 99.7% the
- * schema accepts, and would do it silently, by rejecting every subsequent hold.
+ * CALIBRATION is an assertion about THE STORED DATA: a total nowhere near 100 was never a
+ * legal allocation, whatever tolerance was in force when it was written.
  *
- * A failure of either is reported, never coerced. A mangled reference does not fail loudly
- * on its own: it quietly rejects every hold from then on, which is the single worst
- * failure this guard can have.
+ * AND IT IS DELIBERATELY NOT CHECKED AT `allocationTolerancePercent`. That setting is
+ * mutable, and checking a stored value against the CURRENT one revalidates history under a
+ * policy it was never emitted under — the exact defect this whole PR removes, reproduced one
+ * layer down. Tighten the tolerance from 0.5 to 0.1 and a legally stored 99.7% becomes
+ * "invalid": the reference is refused, the cycle cannot judge, and the row that would replace
+ * it is never written. That is a permanent freeze, produced by a one-line config edit.
+ *
+ * So the band is the WIDER of the current tolerance and a fixed corruption threshold — it
+ * can be widened by configuration but never narrowed below what any plausible emission could
+ * have been. This is not the schema's contract with the model; it is the line past which a
+ * stored allocation is CORRUPT rather than merely loose.
+ *
+ * A failure of either is REPORTED, never coerced and never fatal — see how the caller treats
+ * it. Both are read-and-understood conditions, not read failures, and the difference decides
+ * everything about the right reaction.
  */
 
 export interface RestatedIntent {
@@ -94,6 +103,16 @@ export type IntentRestatement =
 
 /** Float noise only — this bound asserts our own arithmetic, not the model's. */
 const CONSERVATION_EPSILON = 1e-6;
+
+/**
+ * The half-width past which a stored total is corrupt rather than loose, in points.
+ *
+ * Generous ON PURPOSE. Its job is to catch a mangled or truncated allocation (a total of 77,
+ * of 0, of 240), not to re-adjudicate the schema's tolerance — which lives in configuration,
+ * can move, and must never be able to retroactively invalidate a reference that was legal
+ * when it was written.
+ */
+const CORRUPTION_BAND_PERCENT = 5;
 
 export function restateIntentReference(params: {
   /** The stored intention of the last `decided` cycle, exactly as persisted. */
@@ -129,14 +148,16 @@ export function restateIntentReference(params: {
         'restatement, not bad data.',
     };
   }
-  const tolerance = policy.decision.allocationTolerancePercent;
-  if (Math.abs(sum - 100) > tolerance) {
+  // The WIDER of the two, never the narrower — see CORRUPTION_BAND_PERCENT. A deployment may
+  // loosen what the schema accepts and the band follows; it may tighten it and the band does
+  // not, because a reference that was legal when it was written stays legal.
+  const band = Math.max(policy.decision.allocationTolerancePercent, CORRUPTION_BAND_PERCENT);
+  if (Math.abs(sum - 100) > band) {
     return {
       ok: false,
       reason:
-        `the stored intention sums to ${sum.toFixed(2)}, outside the ±${tolerance} the schema ` +
-        'accepts — it was never a legal allocation, and comparing against it would reject every ' +
-        'subsequent hold in silence.',
+        `the stored intention sums to ${sum.toFixed(2)}, outside the ±${band} corruption band — ` +
+        'it was never a legal allocation, whatever tolerance was in force when it was written.',
     };
   }
 
