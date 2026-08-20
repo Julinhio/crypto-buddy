@@ -38,10 +38,11 @@ import { judgeOrder, type OrderVerdict, type TransitionVerdict } from './gate.js
  *  3. NO DRIFT REBALANCING IS GENERATED DURING THAT REFUSAL. The cycle keeps the last
  *     accepted applied vector. Nothing to compute in observe mode (nothing is suppressed,
  *     so nothing needs replacing), and it is stated here because it is the clause with a
- *     consequence outside this file: the reference the coherence guard reads is
- *     `applied_allocation`, so a blocking implementation has to keep the previous vector
- *     THERE too, or rules 1 and 2 would compare against a target the book never pursued.
- *     That belongs to the blocking PR, which is why the guard is untouched here.
+ *     consequence outside this file: a blocking implementation has to keep the previous
+ *     vector in `applied_allocation` too, or the gate would revert the book to a target it
+ *     never pursued. Since PR #34 that column is no longer the coherence guard's rule-1
+ *     reference — the guard reads `intent_allocation`, and a refusal deliberately leaves
+ *     the model's intention where the model put it.
  *  4. AN ALL-ALLOWED VECTOR PASSES NORMALLY. Atomicity adds nothing when nothing is
  *     refused — it is not a second opinion on legs the gate already cleared.
  */

@@ -48,8 +48,9 @@ import {
   type ValidatedDecision,
 } from './schema.js';
 import { buildRetryPrompt, checkCoherence, type CoherenceViolation } from './coherence.js';
+import { buildIntentAllocation, restateIntentReference } from './intentReference.js';
 import {
-  loadReferenceTarget,
+  loadReferenceAllocations,
   recordGuardEvent,
   type GuardEventInsert,
 } from '../persistence/decisionGuard.js';
@@ -266,7 +267,7 @@ export async function decide(): Promise<DecideResult> {
   // while looking like it worked.
   const [stateRead, referenceRead] = await Promise.all([
     loadPositionStates(supabase),
-    loadReferenceTarget(supabase),
+    loadReferenceAllocations(supabase),
   ]);
 
   /**
@@ -602,6 +603,76 @@ export async function decide(): Promise<DecideResult> {
 
   const presentSymbols = context.market.tradable.map((pair) => pair.symbol);
   const assets = allocatableUniverse(presentSymbols, config);
+
+  // ── THE INTENTION REFERENCE, RESTATED — and the counterfactual it feeds ────────
+  //
+  // Both are derived HERE, before the model is called and long before the transition gate
+  // runs. Two reasons, and the second is the load-bearing one:
+  //
+  //   1. a reference that cannot be restated is a reason not to spend an LLM call at all;
+  //   2. THE COUNTERFACTUAL MUST BE COMPUTED BEFORE THE GATE. Rule 2 asks whether a
+  //      change can reach the book by replaying BOTH intentions against it. Computed
+  //      after the gate, a frozen asset yields two empty plans — the old one and the new
+  //      one both filtered out — and rule 2 would refuse the decision for being
+  //      unexecutable when the only thing making it so is the layer the guard is
+  //      explicitly not marking the homework of. `computeMovements` is pure and
+  //      gate-blind, so "before" costs nothing.
+  //
+  // The restatement is the ONE place allowed to put a stored intention into this cycle's
+  // frame — see `restateIntentReference`. Nothing downstream re-normalises it, which is
+  // what stops the two operands drifting apart again.
+  const intentRestatement = referenceRead.intent
+    ? restateIntentReference({
+        reference: referenceRead.intent,
+        universe: assets,
+        reserveAsset: reserveStable,
+        policy: config,
+      })
+    : null;
+  if (intentRestatement && !intentRestatement.ok && COHERENCE_GUARD) {
+    // A reference the pipeline refuses is not a reference. Running the guard on it would
+    // not fail loudly — it would silently reject every hold from now on, which is the
+    // single worst failure this guard can have. Same posture as a failed reference READ:
+    // refuse the cycle rather than trade with a guard that only looks armed.
+    const skipReason =
+      `the stored intention reference cannot be restated in this cycle's universe — ` +
+      `${intentRestatement.reason} Refusing to run the coherence guard against a reference ` +
+      'we cannot trust; nothing is booked and the next cycle retries.';
+    console.error(`[CRITICAL] Wake-up skipped: ${skipReason} The LLM was not called.`);
+    const row = makeRow(decisionContext, context.regime, gitSha, {
+      status: 'skipped',
+      skip_reason: skipReason,
+    });
+    const { persisted, id } = await insertDecision(supabase, row);
+    await persistLifecycle(portfolio, []);
+    await observeTransition(id, [], []);
+    await observeMarketDataOutage(id);
+    await alertArmedStopNotFired('skipped');
+    return emptyResult('skipped', persisted, id, row, portfolio, marketData);
+  }
+  /** Rule 1's operand: the last intention, in this cycle's universe, NEVER clamped. */
+  const intentReference = intentRestatement?.ok ? intentRestatement.value.intent : null;
+  /**
+   * Rule 2's counterfactual: what the STANDING intention would do to today's book, bounded
+   * by today's policy. Empty when there is no reference yet, and — far more often — empty
+   * in substance because the standing intention already executed and the book is already
+   * where it asked to be.
+   */
+  const previousIntentMovements = intentRestatement?.ok
+    ? computeMovements(
+        portfolio,
+        intentRestatement.value.bounded,
+        priceOf,
+        config.execution.feePercent,
+        config.execution.minMovementPercent,
+      )
+    : [];
+  if (intentRestatement?.ok && intentRestatement.value.droppedAssets.length > 0) {
+    console.warn(
+      `[guard] the intention reference lost ${intentRestatement.value.droppedAssets.join(', ')} ` +
+        'to a universe change; their weight was transferred to the reserve before comparing.',
+    );
+  }
   // v4 replays the last five wake-ups; v5 wants the last decision that ACTUALLY DID
   // something. Fetched by its own query, not filtered out of the five: five holds are
   // enough to bury it, and the bot averaged 785 holds in 47 days — so "more than five
@@ -821,19 +892,16 @@ export async function decide(): Promise<DecideResult> {
           // disaster-recovery posture. See CoherenceInput.strategy.
           strategy: STRATEGY_VERSION,
           actionType: decision.actionType,
-          // The CLAMPED target, not the raw emission: the reference it is compared against
-          // is resolved from `applied_allocation`, so both operands have to be effective
-          // targets. Feeding the raw one would reject an honest hold the day the clamp (or
-          // the transition gate) makes the two differ — the model would re-emit an
-          // unchanged over-cap proposal and be told its hold moved the target, while the
-          // book pursued the same bounded allocation both times.
-          effectiveTarget: clamp.applied,
-          referenceTarget: referenceRead.target,
-          // Today's caps. The guard normalises the stored reference under them before any
-          // rule sees it, so tightening a cap cannot deadlock the chain — see
-          // CoherenceInput.riskPolicy.
-          riskPolicy: config,
+          // THE RAW EMISSION on both sides of rule 1. `intentReference` is the last
+          // intention restated in this cycle's universe and deliberately left unclamped, so
+          // feeding it a bounded candidate would put the two operands in different frames
+          // again — the exact defect this PR removes, one level down. Raw against raw is
+          // invariant to the caps, whichever way they move between two cycles.
+          intentTarget: decision.targetAllocation,
+          intentReference,
           movements,
+          // Rule 2's counterfactual, computed before the gate — see where it is derived.
+          previousIntentMovements,
           reserveAsset: reserveStable,
           notes: decision.positionNotes,
           assetsWithStoredThesis,
@@ -1038,22 +1106,39 @@ export async function decide(): Promise<DecideResult> {
     stopExits,
     clampedAllocation: clamp.applied,
     reserveAsset: reserveStable,
-    // The last ACCEPTED applied vector — the coherence guard's own reference, read at the
-    // top of this cycle. Using the same source means the value the guard will compare
-    // against next cycle is the value we store now, by construction rather than by luck.
-    previousApplied: referenceRead.target,
+    // The last ACCEPTED applied vector, read at the top of this cycle — what the BOOK was
+    // pursuing, which is the only thing a revert may fall back to. Deliberately NOT the
+    // guard's rule-1 reference any more: that one is the model's INTENTION, and reverting
+    // the book to an intention the chain never retained would store a target nothing ever
+    // pursued. The two references are read from the same row for exactly that reason.
+    previousApplied: referenceRead.applied,
   });
   const movements = gateOutcome.movements;
   if (gateOutcome.refused) {
     console.warn(`[transition] ENFORCE — ${gateOutcome.reason}`);
   }
 
+  // THE INTENTION AS THE GUARD WILL REREAD IT (migration 0027) — see
+  // `buildIntentAllocation` for the full contract of what does and does not touch it.
+  //
+  // Derived from `stopExits` rather than from anything `applyGate` returned, and placed
+  // OUTSIDE the refused/accepted distinction on purpose: the stop fires on both branches,
+  // so the intention must be flat on that line either way.
+  const intentAllocation = buildIntentAllocation({
+    proposal: v.targetAllocation,
+    stoppedAssets: new Set(stopExits.map((m) => m.asset)),
+    reserveAsset: reserveStable,
+  });
+
   const row = makeRow(decisionContext, context.regime, gitSha, {
     status: 'decided',
     target_allocation: v.targetAllocation,
+    // The INTENTION. Written only on a `decided` row, which is exactly right: a cycle the
+    // guard refused establishes no reference, so a `guard_failed` row must not carry one.
+    intent_allocation: intentAllocation,
     // The EFFECTIVE target. Normally the clamped proposal; on a refused cycle the PREVIOUS
-    // applied vector, so the guard's reference stays where the book actually is. The row
-    // stays `decided`: the intention advanced, the applied did not.
+    // applied vector, so what the chain reverts to stays where the book actually is. The
+    // row stays `decided`: the intention advanced (column above), the applied did not.
     applied_allocation: gateOutcome.appliedAllocation,
     clamped: clamp.clamped,
     clamp_reason: clamp.reason,
@@ -1208,7 +1293,9 @@ export async function decide(): Promise<DecideResult> {
           notional: toNumericString(m.notional),
           price: priceOf(m.asset)?.toString() ?? null,
           targetPercent: v.targetAllocation[m.asset] ?? null,
-          referencePercent: referenceRead.target?.[m.asset] ?? null,
+          // The APPLIED reference: a refused leg is reported against the weight the book
+          // was actually at, not against what the model had been meaning to reach.
+          referencePercent: referenceRead.applied?.[m.asset] ?? null,
           legVerdict: judged?.verdict ?? 'unknown',
           gate: verdictsByAsset.get(m.asset)?.gate ?? 'unknown',
         };
@@ -1274,6 +1361,7 @@ function makeRow(
     status: over.status,
     skip_reason: over.skip_reason ?? null,
     target_allocation: over.target_allocation ?? null,
+    intent_allocation: over.intent_allocation ?? null,
     applied_allocation: over.applied_allocation ?? null,
     clamped: over.clamped ?? null,
     clamp_reason: over.clamp_reason ?? null,

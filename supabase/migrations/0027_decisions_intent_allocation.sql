@@ -1,0 +1,54 @@
+-- 0027 — `decisions.intent_allocation`: the model's INTENT, as the guard must reread it.
+--
+-- ADDITIVE ONLY. One nullable jsonb column, no CHECK, no backfill, no signature change on
+-- any existing function. The usual order holds: migrate, then deploy. (Contrast with the
+-- 12/08 incident on 0024, where replacing `finish_run`'s signature inverted it.)
+--
+-- ── WHY A THIRD ALLOCATION COLUMN ───────────────────────────────────────────────────
+--
+-- The coherence guard asks two questions that had been reading one operand:
+--
+--   rule 1  did the model CHANGE ITS MIND?      → a question about intention
+--   rule 2  can that change REACH THE BOOK?     → a question about executability
+--
+-- Rule 1's operand has to be the intention, and until now it was `applied_allocation` —
+-- what the deterministic chain retained. That column is lossy for this purpose: it is
+-- bounded by the policy of ITS day, so a relaxed cap (a raised per-asset ceiling, a
+-- lowered cash floor) leaves the stored reference under the old ceiling and the weight
+-- the model had been asking for never comes back. The model re-emits its unchanged ask,
+-- the guard reads a "moved" target, and the first attempt is rejected every cycle.
+--
+-- `target_allocation` is the obvious replacement — it is the raw proposal — but it is
+-- lossy in the OTHER direction: when the peak stop empties a line, the raw proposal keeps
+-- the weight the model asked for on a position that no longer exists. Rereading it would
+-- reject the honest zero the model emits next cycle, and the rejection message ("re-emit
+-- the reference unchanged") would invite a re-entry the stop contract forbids.
+--
+-- So the intention is persisted explicitly instead of being inferred from the other two.
+--
+-- ── THE CONTRACT OF THE THREE COLUMNS ───────────────────────────────────────────────
+--
+--   target_allocation   the model's RAW proposal. Immutable audit trail. Never adjusted.
+--   intent_allocation   the INTENTION the guard rereads next cycle. Equal to
+--                       target_allocation except that a DETERMINISTIC STOP zeroes the
+--                       line it emptied and transfers that weight to the reserve —
+--                       including when the same cycle is also refused by the transition
+--                       gate. A clamp does NOT touch it. A gate refusal ALONE does NOT
+--                       touch it: the model's intention did advance, only the book did not.
+--   applied_allocation  the EFFECTIVE target the chain retained. Unchanged by this
+--                       migration, and still the only allocation any operational path
+--                       (execution, gate revert, drift) reads.
+--
+-- ── LEGACY ROWS ─────────────────────────────────────────────────────────────────────
+--
+-- Left NULL, deliberately. A backfill would have to guess which historical rows had a stop
+-- fire, and the answer is "none" (0 gate refusals and 0 applied/target divergences on the
+-- 1332 decided rows as of 20/08) — so a backfill would write exactly `target_allocation`
+-- into every row and buy nothing but the risk of writing it wrong. NULL is read as an
+-- explicit named fallback to `target_allocation` in `resolveIntentAllocation`, which is a
+-- contract the code states rather than a default it stumbles into.
+alter table public.decisions
+  add column if not exists intent_allocation jsonb;
+
+comment on column public.decisions.intent_allocation is
+  'The model INTENTION the coherence guard rereads as its rule-1 reference. Equals target_allocation except that a deterministic peak-stop exit zeroes the emptied line and transfers its weight to the reserve (including on a cycle the transition gate also refused); the risk clamp and a gate refusal alone leave it untouched. NULL on rows written before migration 0027 — readers fall back to target_allocation explicitly. NOT an execution target: applied_allocation remains the only allocation an operational path may read.';

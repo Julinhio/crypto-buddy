@@ -13,6 +13,8 @@
     "replay:regime": "tsx src/replay/regime.ts",
     "replay:sizing": "tsx src/replay/sizing.ts",
     "replay:coherence": "tsx src/replay/coherence.ts",
+    "replay:intent-split": "tsx src/replay/intentSplit.ts",
+    "replay:policy-change": "tsx src/replay/policyChange.ts",
     "replay:transition": "tsx src/replay/transitionContract.ts",
     "replay:transition-layer": "tsx src/replay/transitionLayerProof.ts",
     "replay:risk-off": "tsx src/replay/riskOffCounterfactual.ts",
@@ -23,7 +25,7 @@
     "backfill:position-state": "tsx src/migrations/backfillPositionState.ts",
     "probe:v5": "tsx src/probes/v5Behaviour.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/test/invariants.ts && tsx src/test/scheduler.ts && tsx src/test/regime.ts && tsx src/test/lifecycle.ts && tsx src/test/strategyVersion.ts && tsx src/test/coherence.ts && tsx src/test/stickyTransition.ts && tsx src/test/transitionLayer.ts && tsx src/test/effectiveTarget.ts && tsx src/test/transitionVector.ts && tsx src/test/marketDataOutage.ts && tsx src/test/transitionEnforce.ts"
+    "test": "tsx src/test/invariants.ts && tsx src/test/scheduler.ts && tsx src/test/regime.ts && tsx src/test/lifecycle.ts && tsx src/test/strategyVersion.ts && tsx src/test/coherence.ts && tsx src/test/intentReference.ts && tsx src/test/stickyTransition.ts && tsx src/test/transitionLayer.ts && tsx src/test/effectiveTarget.ts && tsx src/test/transitionVector.ts && tsx src/test/marketDataOutage.ts && tsx src/test/transitionEnforce.ts"
   },
   "engines": {
     "node": ">=22"

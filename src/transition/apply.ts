@@ -1,5 +1,6 @@
 import type { Movement } from '../execution/movements.js';
 import type { VectorJudgement } from './vector.js';
+import { releaseToReserve } from '../allocation.js';
 
 /**
  * WHAT THE GATE DOES WITH WHAT IT COMPUTED — the one file where observe and enforce differ.
@@ -32,13 +33,16 @@ import type { VectorJudgement } from './vector.js';
  * Points 3 and 4 are the subtle pair, and they are why this returns an allocation rather
  * than just a movement list.
  *
- * On 3: `applied_allocation` is what the coherence guard reads back as its reference. Store
- * the refused proposal there and the next cycle is compared against a target the book never
- * pursued — the guard would then reject an honest hold for "moving" a target that only ever
- * existed as a refusal. Store the previous vector and the reference stays exactly where the
- * book actually is. The row stays `decided`: the INTENTION advanced (`target_allocation`
- * records what the model asked for), the APPLIED did not. That is precisely why the two
- * columns exist.
+ * On 3: `applied_allocation` is what the next cycle reverts to and what every operational
+ * path reads. Store the refused proposal there and the book is described by a target it
+ * never pursued. Store the previous vector and the effective target stays exactly where the
+ * book actually is. The row stays `decided`: the INTENTION advanced, the APPLIED did not.
+ *
+ * And the intention is where it advanced TO. Since PR #34 the coherence guard's rule-1
+ * reference is `intent_allocation`, not this column, precisely so that a refusal costs the
+ * model nothing: re-emitting the refused ask next cycle is a genuine hold, and withdrawing
+ * it is a real decision rule 2 lets through on its counterfactual. That is why the row now
+ * carries three allocations rather than two.
  *
  * On 4: reverting the target must not become a reason to trade. Prices move between
  * cycles, so re-applying yesterday's percentages would generate fresh movements to
@@ -78,10 +82,11 @@ export interface GateOutcome {
 /**
  * Rewrites an allocation to account for lines the peak stop has just emptied.
  *
- * A stop that fires takes its line to ZERO. If `applied_allocation` kept the weight the
- * model asked for, the effective target would describe a book that no longer exists — and
- * `applied_allocation` is exactly what `loadReferenceTarget` reads back as the coherence
- * guard's reference. Three things then go wrong in sequence:
+ * A stop that fires takes its line to ZERO. If the allocation kept the weight the model
+ * asked for, it would describe a book that no longer exists. Three things then go wrong in
+ * sequence — for the EFFECTIVE target, which would misdescribe the book, and identically
+ * for the INTENTION, which is what the coherence guard rereads (`buildIntentAllocation`
+ * calls this same function for exactly that reason):
  *
  *   1. next cycle the model honestly emits a zero weight for the now-flat line;
  *   2. the guard compares it to the stale POSITIVE reference, sees the target "move", and
@@ -100,15 +105,12 @@ export function zeroOutStopped(
   reserveAsset: string,
 ): Record<string, number> {
   if (stoppedAssets.size === 0) return allocation;
-  const next = { ...allocation };
-  let freed = 0;
-  for (const asset of stoppedAssets) {
-    const weight = next[asset];
-    if (typeof weight !== 'number' || !Number.isFinite(weight) || weight === 0) continue;
-    freed += weight;
-    next[asset] = 0;
-  }
-  if (freed !== 0) next[reserveAsset] = (next[reserveAsset] ?? 0) + freed;
+  const { allocation: next, released } = releaseToReserve(allocation, stoppedAssets, reserveAsset);
+  // THE DISPOSITION, which is this wrapper's entire decision and the reason the shared
+  // helper takes no flag: a stopped line still EXISTS in the universe, it is merely empty.
+  // Its key is written back at zero rather than removed — an allocation that stopped
+  // mentioning a tradable asset would be a different kind of statement.
+  for (const asset of released) next[asset] = 0;
   return next;
 }
 

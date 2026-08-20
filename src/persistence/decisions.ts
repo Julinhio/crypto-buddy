@@ -41,6 +41,17 @@ export interface DecisionRow {
   status: DecisionStatus;
   skip_reason: string | null;
   target_allocation: Record<string, number> | null;
+  /**
+   * The model's INTENTION as the coherence guard rereads it next cycle (migration 0027) —
+   * the raw proposal with any peak-stopped line put flat and its weight moved to the
+   * reserve. Written on `decided` rows only: a cycle the guard refused establishes no
+   * reference. Null on every row predating that migration, where readers fall back to
+   * `target_allocation` explicitly (`resolveIntentAllocation`).
+   *
+   * NOT an execution target and NOT a description of the book — `applied_allocation`
+   * remains the only allocation an operational path reads.
+   */
+  intent_allocation: Record<string, number> | null;
   // Risk-wrapper result (migration 0004): what the code kept after bounding the
   // AI's proposal to the caps, written in the same cycle.
   applied_allocation: Record<string, number> | null;

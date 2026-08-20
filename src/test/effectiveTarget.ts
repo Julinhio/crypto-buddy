@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { resolveEffectiveTarget } from '../decision/effectiveTarget.js';
-import { loadReferenceTarget } from '../persistence/decisionGuard.js';
+import { resolveEffectiveTarget, resolveIntentAllocation } from '../decision/effectiveTarget.js';
+import { loadReferenceAllocations } from '../persistence/decisionGuard.js';
 
 /**
  * Invariants of the EFFECTIVE TARGET resolver — run with `npm test` (tsx). No framework.
@@ -105,9 +105,57 @@ const APPLIED = { BTC: 25, ETH: 20, USDT: 55 };
 }
 
 {
-  // THE GUARD'S REFERENCE now resolves through the same function. Stubbed at the client so
-  // the wiring is tested, not just the pure resolver: the whole risk of this PR is a path
-  // that still reads the raw column.
+  // THE INTENT RESOLVER — the third column, and the one the coherence guard now reads.
+  //
+  // `intent_allocation` is the model's proposal with any peak-stopped line put flat. It is
+  // NOT the applied target: a gate refusal leaves the intention where the model put it, and
+  // that asymmetry is the whole point of having a third column rather than reusing one of
+  // the other two.
+  const INTENT = { BTC: 30, ETH: 0, USDT: 70 }; // ETH stopped out; its 20 went to cash
+
+  const stopped = resolveIntentAllocation({
+    target_allocation: PROPOSAL,
+    intent_allocation: INTENT,
+    applied_allocation: APPLIED,
+  });
+  assert.deepEqual(stopped.allocation, INTENT, 'the intention is read from its own column');
+  assert.equal(stopped.source, 'intent');
+  assert.equal(stopped.differsFromProposal, true, 'and a fired stop is reported as a divergence');
+
+  // The ordinary cycle: no stop, so the intention IS the proposal.
+  const ordinary = resolveIntentAllocation({
+    target_allocation: PROPOSAL,
+    intent_allocation: { ...PROPOSAL },
+    applied_allocation: APPLIED,
+  });
+  assert.deepEqual(ordinary.allocation, PROPOSAL);
+  assert.equal(ordinary.source, 'intent', 'still resolved from its own column, not from the proposal');
+  assert.equal(ordinary.differsFromProposal, false);
+
+  // THE FALLBACK: a row written before migration 0027. Falling back to the raw proposal is
+  // exactly right there — the stop had never fired on any corpus row — and it is a NAMED
+  // outcome so a caller can log it, count it, or refuse it.
+  const legacy = resolveIntentAllocation({ target_allocation: PROPOSAL, applied_allocation: APPLIED });
+  assert.deepEqual(legacy.allocation, PROPOSAL, 'a pre-0027 row still yields an intention');
+  assert.equal(legacy.source, 'intent-fallback');
+
+  // AND THE TRAP IT MUST NOT FALL INTO: the fallback is to the PROPOSAL, never to the
+  // applied target. Falling back to `applied` would silently restore the very defect this
+  // PR removes — an intention question answered with a policy-bounded operand.
+  assert.notDeepEqual(legacy.allocation, APPLIED, 'the intent fallback never reaches for applied');
+
+  // A mangled column is refused rather than coerced, same posture as the effective target.
+  const mangled = resolveIntentAllocation({ target_allocation: null, intent_allocation: {} });
+  assert.equal(mangled.allocation, null);
+  assert.equal(mangled.source, 'none');
+  console.log('  ok: the intention resolves from its own column, and falls back to the proposal');
+  passed += 1;
+}
+
+{
+  // THE TWO REFERENCES now come from ONE read of ONE row. Stubbed at the client so the
+  // wiring is tested, not just the pure resolvers: the whole risk of this PR is a path that
+  // still reads the wrong column.
   const rowWith = (row: Record<string, unknown>): SupabaseClient =>
     ({
       from: () => ({
@@ -117,24 +165,29 @@ const APPLIED = { BTC: 25, ETH: 20, USDT: 55 };
       }),
     }) as unknown as SupabaseClient;
 
-  const applied = await loadReferenceTarget(
-    rowWith({ target_allocation: PROPOSAL, applied_allocation: APPLIED }),
+  const INTENT = { BTC: 30, ETH: 0, USDT: 70 };
+  const both = await loadReferenceAllocations(
+    rowWith({ target_allocation: PROPOSAL, intent_allocation: INTENT, applied_allocation: APPLIED }),
   );
-  assert.equal(applied.ok, true);
-  assert.deepEqual(
-    applied.target,
-    APPLIED,
-    'the guard compares against what the chain retained, not what the model asked for',
-  );
+  assert.equal(both.ok, true);
+  assert.deepEqual(both.intent, INTENT, 'rule 1 compares against what the model last MEANT');
+  assert.deepEqual(both.applied, APPLIED, 'the gate reverts to what the book last PURSUED');
+  assert.notDeepEqual(both.intent, both.applied, 'and the two are genuinely different values');
 
-  const legacy = await loadReferenceTarget(rowWith({ target_allocation: PROPOSAL, applied_allocation: null }));
+  const legacy = await loadReferenceAllocations(
+    rowWith({ target_allocation: PROPOSAL, applied_allocation: null }),
+  );
   assert.equal(legacy.ok, true);
-  assert.deepEqual(legacy.target, PROPOSAL, 'a legacy row still yields a reference');
+  assert.deepEqual(legacy.intent, PROPOSAL, 'a pre-0027 row still yields an intention reference');
+  assert.deepEqual(legacy.applied, PROPOSAL, 'and a pre-0004 row still yields an applied one');
 
-  // A row whose columns are both unusable is a read the guard must refuse, not paper over.
-  const mangled = await loadReferenceTarget(rowWith({ target_allocation: {}, applied_allocation: null }));
+  // A row whose columns are all unusable is a read the guard must refuse, not paper over.
+  const mangled = await loadReferenceAllocations(
+    rowWith({ target_allocation: {}, intent_allocation: null, applied_allocation: null }),
+  );
   assert.equal(mangled.ok, false, 'an unusable reference fails the read rather than returning nonsense');
-  assert.equal(mangled.target, null);
+  assert.equal(mangled.intent, null);
+  assert.equal(mangled.applied, null);
 
   // No row at all is genuinely "the first decision on record", which is not a failure.
   const empty = {
@@ -142,10 +195,11 @@ const APPLIED = { BTC: 25, ETH: 20, USDT: 55 };
       select: () => ({ eq: () => ({ order: () => ({ limit: async () => ({ data: [], error: null }) }) }) }),
     }),
   } as unknown as SupabaseClient;
-  const first = await loadReferenceTarget(empty);
+  const first = await loadReferenceAllocations(empty);
   assert.equal(first.ok, true);
-  assert.equal(first.target, null);
-  console.log('  ok: the coherence guard reads its reference through the resolver');
+  assert.equal(first.intent, null);
+  assert.equal(first.applied, null);
+  console.log('  ok: one read of one row answers both references, through the two resolvers');
   passed += 1;
 }
 

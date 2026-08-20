@@ -10,7 +10,11 @@ import {
   type ValidatedDecision,
 } from '../decision/schema.js';
 import { checkCoherence, type CoherenceViolation } from '../decision/coherence.js';
-import { resolveEffectiveTarget } from '../decision/effectiveTarget.js';
+import { restateIntentReference } from '../decision/intentReference.js';
+import {
+  resolveEffectiveTarget,
+  resolveIntentAllocation,
+} from '../decision/effectiveTarget.js';
 
 /**
  * Rebuilding one journaled cycle into the exact inputs the guard would have seen.
@@ -72,6 +76,8 @@ export interface StoredCycle {
    * The row is the fact; the recomputation is a guess that happens to be right for now.
    */
   target_allocation: unknown;
+  /** Migration 0027. Null on every corpus row — the resolver falls back to the proposal. */
+  intent_allocation?: unknown;
   applied_allocation: unknown;
 }
 
@@ -141,18 +147,55 @@ export function thesesOf(ctx: StoredContext): Set<string> {
   );
 }
 
+/**
+ * THE TWO REFERENCES a replayed cycle is judged against, mirroring what production reads
+ * back from the last `decided` row.
+ *
+ *   `intent`   the last INTENTION — the coherence guard's rule-1 operand.
+ *   `applied`  the last EFFECTIVE target — what the book pursued. Carried because the
+ *              LEGACY operand mode needs it, and because it is what the transition gate
+ *              reverts to; the split guard never reads it.
+ */
+export interface ReplayReferences {
+  intent: Record<string, number> | null;
+  applied: Record<string, number> | null;
+}
+
+/**
+ * WHICH OPERANDS the guard is fed — the mechanism that makes "prove it is neutral" a
+ * measurement rather than an argument.
+ *
+ * `split` is production. `legacy` reproduces the PRE-PR guard EXACTLY, using the same
+ * `checkCoherence` rather than a second copy of the rules:
+ *
+ *   rule 1  bounded candidate against a bounded, restated APPLIED reference — which is
+ *           literally what the old code computed inside the guard;
+ *   rule 2  no counterfactual at all, i.e. an empty previous plan, which collapses the
+ *           new disjunction back to "does the new plan trade this line".
+ *
+ * Reproducing the old behaviour through the new function is deliberate. A second
+ * implementation of the rules would only prove that the two implementations agree, and the
+ * question being asked is whether the OPERANDS moved a verdict.
+ */
+export type GuardOperands = 'split' | 'legacy';
+
 export type CycleVerdict =
   | {
       kind: 'accepted';
       decision: ValidatedDecision;
       /**
        * What production would have written to `applied_allocation` for this cycle — the
-       * risk-clamped target. Carried so the reference chain can be established from the
-       * EFFECTIVE target rather than from the raw proposal, exactly as production reads it
-       * back. Identical to `decision.targetAllocation` on the whole corpus (the clamp has
-       * never fired), which is what makes this change provably inert.
+       * risk-clamped target, or the value the row actually holds. Carried so the applied
+       * chain advances on the same value production read back.
        */
       appliedAllocation: Record<string, number>;
+      /**
+       * What production would have written to `intent_allocation` — the raw proposal, since
+       * no replayed cycle can have a peak stop firing (the corpus predates enforcement, and
+       * the replay has no stop state to apply). Carried so the intent chain advances the way
+       * production advances it.
+       */
+      intentAllocation: Record<string, number>;
     }
   | { kind: 'rejected'; decision: ValidatedDecision; violations: CoherenceViolation[] }
   | { kind: 'unusable'; reason: string };
@@ -188,6 +231,14 @@ export function decodeResponse(
     : { ok: false, reason: validation.error };
 }
 
+export interface JudgeResult {
+  ok: boolean;
+  violations: CoherenceViolation[];
+  appliedAllocation: Record<string, number>;
+  /** The counterfactual plan rule 2 was given, reported so a diff can explain itself. */
+  previousIntentMovements: number;
+}
+
 /**
  * Runs one decision through the guard with that cycle's real book — bounding it to the
  * caps and sizing the movements exactly as the executor would, 2% floor included.
@@ -195,7 +246,7 @@ export function decodeResponse(
 export function judge(
   decision: ValidatedDecision,
   ctx: StoredContext,
-  referenceTarget: Record<string, number> | null,
+  references: ReplayReferences,
   /**
    * That cycle's PERSISTED `applied_allocation`, when the decision being judged is the one
    * the row actually recorded.
@@ -206,35 +257,22 @@ export function judge(
    *
    * Without it the replay judges the CURRENT cycle against a clamp recomputed with today's
    * caps while comparing it to a reference taken from history — the same asymmetry as
-   * raw-versus-applied, one level down. Tighten a cap and a historical hold whose 40% was
-   * applied at 35% against a 35% reference gets replayed at 30% and rejected for moving a
-   * target it never moved, with its movements resized to match.
+   * raw-versus-applied, one level down.
    */
   storedApplied?: unknown,
-): { ok: boolean; violations: CoherenceViolation[]; appliedAllocation: Record<string, number> } {
+  operands: GuardOperands = 'split',
+): JudgeResult {
   const book = bookOf(ctx);
-  const clamp = clampAllocation(decision.targetAllocation, book.reserveAsset, config);
+  const reserveAsset = book.reserveAsset;
+  const universe = universeOf(ctx);
+  const clamp = clampAllocation(decision.targetAllocation, reserveAsset, config);
   // The row is the fact; the recomputation is a guess that happens to be right today. The
   // resolver doubles as the validator — an unusable stored value falls back to the clamp
   // rather than poisoning the judgement.
   const stored = resolveEffectiveTarget({ applied_allocation: storedApplied });
-  // NORMALISED UNDER TODAY'S POLICY, like the reference the guard will compare it to.
-  //
-  // The persisted value carries the caps of ITS day. `checkCoherence` normalises the
-  // reference under the current policy, so leaving the candidate in its historical frame
-  // would recreate — inside the replay — exactly the mismatch this PR removes from
-  // production: an old accepted hold with both operands stored at 35% would be replayed
-  // as candidate 35% against reference 30% once a cap is tightened, reported as a false
-  // rejection, and the corpus chain would stop advancing.
-  //
-  // Production is symmetric for free (its candidate is `clampAllocation(raw, config)`);
-  // the replay has to ask for it, because its candidate comes from the database. Both
-  // sides then answer the same question: what would TODAY's guard, under TODAY's policy,
-  // make of these responses. Idempotent while the policy holds still, so the corpus
-  // verdicts do not move.
   const effective = clampAllocation(
     stored.source === 'applied' ? stored.allocation! : clamp.applied,
-    book.reserveAsset,
+    reserveAsset,
     config,
   ).applied;
   const movements = computeMovements(
@@ -244,31 +282,65 @@ export function judge(
     config.execution.feePercent,
     config.execution.minMovementPercent,
   );
+
+  // THE RESTATEMENT, through the one production pipeline. Which value goes into it is the
+  // whole difference between the two modes — the intention for `split`, the applied target
+  // for `legacy`, exactly as the old guard did.
+  const source = operands === 'split' ? references.intent : references.applied;
+  const restated = source
+    ? restateIntentReference({ reference: source, universe, reserveAsset, policy: config })
+    : null;
+  if (restated && !restated.ok) {
+    // Production skips the cycle here. The replay cannot skip — a missing verdict would
+    // silently shrink the corpus — so it surfaces the reason as an unusable reference and
+    // lets the caller count it.
+    throw new Error(`replay: the stored reference cannot be restated — ${restated.reason}`);
+  }
+
+  const intentReference = restated?.ok
+    ? // `split` compares raw intentions; `legacy` compared the BOUNDED reference against a
+      // BOUNDED candidate, which is where the relaxed-policy loss came from.
+      operands === 'split'
+      ? restated.value.intent
+      : restated.value.bounded
+    : null;
+  const previousIntentMovements =
+    operands === 'split' && restated?.ok
+      ? computeMovements(
+          book,
+          restated.value.bounded,
+          pricesOf(ctx),
+          config.execution.feePercent,
+          config.execution.minMovementPercent,
+        )
+      : [];
+
   const verdict = checkCoherence({
     // The corpus is v5 by construction (`loadCorpus` filters on prompt_version).
     strategy: 'v5',
     actionType: decision.actionType,
-    // The same operand production feeds the guard, and the same one the movements were
-    // sized from — so the replay cannot judge on a different basis from the live path.
-    effectiveTarget: effective,
-    referenceTarget,
-    // The same policy the clamp above used, so both operands land in one frame.
-    riskPolicy: config,
+    // Raw under `split` — the same operand production feeds the guard. Bounded under
+    // `legacy`, which is what the old code compared.
+    intentTarget: operands === 'split' ? decision.targetAllocation : effective,
+    intentReference,
     movements,
-    reserveAsset: book.reserveAsset,
+    previousIntentMovements,
+    reserveAsset,
     notes: decision.positionNotes,
     assetsWithStoredThesis: thesesOf(ctx),
   });
-  // Returned rather than discarded: this is the value production would have written to
-  // `applied_allocation`, so `replayInOrder` establishes the next reference from it — one
-  // resolution point for the whole chain instead of one per caller.
-  return { ...verdict, appliedAllocation: effective };
+  return {
+    ...verdict,
+    appliedAllocation: effective,
+    previousIntentMovements: previousIntentMovements.length,
+  };
 }
 
 /** One journaled cycle, decoded and judged. */
 export function replayCycle(
   cycle: StoredCycle,
-  referenceTarget: Record<string, number> | null,
+  references: ReplayReferences,
+  operands: GuardOperands = 'split',
 ): CycleVerdict {
   const assets = universeOf(cycle.market_context);
   const decoded = decodeResponse(cycle.raw_response, assets);
@@ -277,56 +349,66 @@ export function replayCycle(
   const verdict = judge(
     decoded.decision,
     cycle.market_context,
-    referenceTarget,
+    references,
     // This IS the response the row recorded, so its persisted applied allocation applies.
     cycle.applied_allocation,
+    operands,
   );
-  return verdict.ok
-    ? { kind: 'accepted', decision: decoded.decision, appliedAllocation: verdict.appliedAllocation }
-    : { kind: 'rejected', decision: decoded.decision, violations: verdict.violations };
+  if (!verdict.ok) {
+    return { kind: 'rejected', decision: decoded.decision, violations: verdict.violations };
+  }
+  // The intention this cycle would have established. `resolveIntentAllocation` is the same
+  // resolver production reads with, so a corpus row that predates migration 0027 falls back
+  // to its raw proposal here exactly as it would there.
+  const storedIntent = resolveIntentAllocation({
+    intent_allocation: cycle.intent_allocation,
+    target_allocation: cycle.target_allocation,
+  });
+  return {
+    kind: 'accepted',
+    decision: decoded.decision,
+    appliedAllocation: verdict.appliedAllocation,
+    intentAllocation: storedIntent.allocation ?? decoded.decision.targetAllocation,
+  };
 }
 
 export interface ReplayStep {
   cycle: StoredCycle;
   verdict: CycleVerdict;
-  /** The reference target this cycle was judged against. */
-  referenceTarget: Record<string, number> | null;
+  /** The references this cycle was judged against. */
+  references: ReplayReferences;
 }
 
 /**
  * Feeds the corpus through the guard IN ORDER.
  *
- * The ordering is load-bearing and is the correction the brief's §4.2 needed: the
- * reference is the last target the guard ACCEPTED, not the previous cycle's target. A
- * rejected cycle books nothing and establishes nothing, so it must not move the
- * reference — which is exactly what production does, where the reference is read from the
- * last `decided` row and a rejected cycle is journaled `guard_failed`.
+ * The ordering is load-bearing: the reference is the last decision the guard ACCEPTED, not
+ * the previous cycle's. A rejected cycle books nothing and establishes nothing, so it must
+ * not move either reference — which is exactly what production does, where both are read
+ * from the last `decided` row and a rejected cycle is journaled `guard_failed`.
  *
- * And it is the EFFECTIVE target that carries forward, not the raw proposal — the same
- * definition `loadReferenceTarget` now resolves in production, so the two cannot drift.
- * Production writes `applied_allocation = clamp.applied` and reads that column back; the
- * replay rebuilds the same value from the same clamp and feeds it through the same
- * `resolveEffectiveTarget`. On this corpus the clamp has never fired, so the reference is
- * unchanged cycle for cycle — which is exactly why the change can be made now and proven
- * inert, instead of on the day the transition gate makes the two columns diverge.
+ * TWO CHAINS ADVANCE TOGETHER, from the same accepted cycle, because production writes
+ * both columns on the same row. The intention chain is the one the guard reads; the applied
+ * chain is carried so the `legacy` mode can be replayed against the operand it actually
+ * used, which is what makes the before/after diff a measurement.
  *
- * Read the difference on the real corpus: 946/948/957 propose BNB at 11% against a
- * standing 12% and are rejected; 947/949/958 re-emit 12% and pass. Under "compare to the
- * previous cycle" those three would be rejected too, and the verdict would be 8, not 5.
+ * Read the difference the ordering makes on the real corpus: 946/948/957 propose BNB at 11%
+ * against a standing 12% and are rejected; 947/949/958 re-emit 12% and pass. Under "compare
+ * to the previous cycle" those three would be rejected too, and the verdict would be 8, not 5.
  */
-export function replayInOrder(cycles: StoredCycle[]): ReplayStep[] {
-  let reference: Record<string, number> | null = null;
+export function replayInOrder(
+  cycles: StoredCycle[],
+  operands: GuardOperands = 'split',
+): ReplayStep[] {
+  let references: ReplayReferences = { intent: null, applied: null };
   const steps: ReplayStep[] = [];
   for (const cycle of cycles) {
-    const referenceTarget = reference;
-    const verdict = replayCycle(cycle, referenceTarget);
-    steps.push({ cycle, verdict, referenceTarget });
-    // `judge` already resolved this cycle's effective target from the persisted column
-    // (falling back to the recomputed clamp only when the row has none), and judged it
-    // against that same value. Reading it back here keeps ONE resolution point for the
-    // whole chain: the candidate the guard saw and the reference the next cycle gets are
-    // the same object, so they cannot drift apart through a second fallback written twice.
-    if (verdict.kind === 'accepted') reference = verdict.appliedAllocation;
+    const judgedAgainst = references;
+    const verdict = replayCycle(cycle, judgedAgainst, operands);
+    steps.push({ cycle, verdict, references: judgedAgainst });
+    if (verdict.kind === 'accepted') {
+      references = { intent: verdict.intentAllocation, applied: verdict.appliedAllocation };
+    }
   }
   return steps;
 }
@@ -341,7 +423,9 @@ export async function loadCorpus(
   for (let from = 0; ; from += PAGE) {
     let query = supabase
       .from('decisions')
-      .select('id, created_at, raw_response, market_context, target_allocation, applied_allocation')
+      .select(
+        'id, created_at, raw_response, market_context, target_allocation, intent_allocation, applied_allocation',
+      )
       .eq('status', 'decided')
       .eq('prompt_version', 'v5')
       .not('raw_response', 'is', null)

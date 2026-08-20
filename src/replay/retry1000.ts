@@ -57,7 +57,7 @@ async function main(): Promise<void> {
     );
   }
 
-  const { cycle, referenceTarget } = step;
+  const { cycle, references } = step;
   const violations = step.verdict.violations;
   const ctx = cycle.market_context;
   const assets = universeOf(ctx);
@@ -91,7 +91,7 @@ async function main(): Promise<void> {
   console.log('Rejected on:');
   for (const v of violations) console.log(`  [${v.rule}] ${v.detail}`);
   console.log('');
-  console.log(`Reference target the guard compared against: ${JSON.stringify(referenceTarget)}`);
+  console.log(`Reference intention the guard compared against: ${JSON.stringify(references.intent)}`);
   console.log('');
 
   const systemPrompt = buildSystemPromptV5();
@@ -140,7 +140,7 @@ async function main(): Promise<void> {
   let verdictDetail = 'not evaluated (the response was unusable).';
   let verdictOk = false;
   if (decoded.ok) {
-    const verdict = judge(decoded.decision, ctx, referenceTarget);
+    const verdict = judge(decoded.decision, ctx, references);
     verdictOk = verdict.ok;
     verdictDetail = verdict.ok
       ? `accepted. action_type=${decoded.decision.actionType}, target=${JSON.stringify(decoded.decision.targetAllocation)}, ` +

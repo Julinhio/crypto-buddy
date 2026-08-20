@@ -1,6 +1,5 @@
 import type { ActionType, PositionNote } from './schema.js';
-import type { AppConfig, StrategyVersion } from '../config/index.js';
-import { clampAllocation } from '../risk/clamp.js';
+import type { StrategyVersion } from '../config/index.js';
 import type { Movement } from '../execution/movements.js';
 import { mayWriteThesis } from '../portfolio/lifecycle.js';
 
@@ -17,20 +16,42 @@ import { mayWriteThesis } from '../portfolio/lifecycle.js';
  * guard that parses prose is a guard that fails on a rephrasing, and a guard that fails
  * on a rephrasing turns every awkward sentence into a dead cycle.
  *
- * ── THE TWO TRAPS THIS FILE EXISTS TO NOT FALL INTO ──────────────────────────────
+ * ── THE TWO QUESTIONS, AND THE TWO OPERANDS THEY NEED ────────────────────────────
  *
- * 1. TARGET IS COMPARED TO THE PREVIOUS TARGET, NEVER TO THE VALUED BOOK. If the
- *    emitted target were compared to the current valuation, every hold would fail: BTC
- *    is worth 24.46% against a 25% target purely because the price moved. A model
- *    re-emitting 25 has changed nothing. This is the single most likely way to build a
- *    guard that kills the bot.
+ * Rules 1 and 2 are not two rules about the same thing. They are two different questions:
  *
- * 2. EXECUTABILITY IS THE OPPOSITE — it can only be judged against the book, because an
- *    order is born from the gap between the target and what is actually held. So rule 2
- *    takes the movements the real pipeline computed (clamp → computeMovements, 2% floor
- *    included) rather than re-deriving them. Two different references, on purpose: "did
- *    you change your mind" is a target-to-target question, "will anything happen" is a
- *    book question. Collapsing them into one comparison breaks one or the other.
+ *   rule 1  did the model CHANGE ITS MIND?      an INTENTION question
+ *   rule 2  can that change REACH THE BOOK?     an EXECUTABILITY question
+ *
+ * They read different operands, and until this PR they did not. That is the defect this
+ * file was rewritten to close.
+ *
+ * RULE 1 READS INTENTION AGAINST INTENTION, RAW, UNCLAMPED. `intentTarget` is what the
+ * model just wrote; `intentReference` is what it last wrote, restated in this cycle's
+ * universe by the one pipeline allowed to do so (`restateIntentReference`). Neither is
+ * bounded by the caps, and that is the whole point:
+ *
+ *   - a BOUNDED reference is lossy when the policy RELAXES. Raise BTC's ceiling from 35
+ *     to 40 and a reference stored at 35 is compared to a candidate the clamp now lets
+ *     through at 40. The model's unchanged 40% ask reads as a moved target, the first
+ *     attempt is rejected, and the retry pays for it every cycle for as long as the model
+ *     keeps asking;
+ *   - the symmetric case — a TIGHTENED policy — was an outright interlock, closed by
+ *     PR #28 by clamping the reference too. Raw-against-raw closes BOTH at once and
+ *     structurally, because a comparison between two unclamped intentions is invariant to
+ *     the policy by construction. There is no coordinate system left to disagree about.
+ *
+ * RULE 2 IS THE OPPOSITE — it can only be judged against the book, because an order is
+ * born from the gap between the target and what is actually held. So it takes the
+ * movements the real pipeline computed (clamp → computeMovements, 2% floor included)
+ * rather than re-deriving them.
+ *
+ * ── THE FIRST TRAP, AND IT STILL STANDS ──────────────────────────────────────────
+ *
+ * TARGET IS COMPARED TO THE PREVIOUS TARGET, NEVER TO THE VALUED BOOK. If the emitted
+ * target were compared to the current valuation, every hold would fail: BTC is worth
+ * 24.46% against a 25% target purely because the price moved. A model re-emitting 25 has
+ * changed nothing. This is the single most likely way to build a guard that kills the bot.
  *
  * ── AND THE FALSE POSITIVE THAT COST THE MOST TO SEE ─────────────────────────────
  *
@@ -74,55 +95,64 @@ export interface CoherenceInput {
    * "cannot trade at all", which is the opposite of a safety net.
    *
    * Rules 1 and 2 stay armed under both: a hold that moves its target, and a target that
-   * cannot produce an order, are incoherent whatever the mandate.
+   * cannot reach the book, are incoherent whatever the mandate.
    */
   strategy: StrategyVersion;
   actionType: ActionType;
   /**
-   * This cycle's EFFECTIVE target — the risk-bounded allocation the chain will actually
-   * pursue, not the model's raw emission.
+   * THIS CYCLE'S INTENTION — the model's RAW emission, exactly as it wrote it.
    *
-   * It must be the same KIND of value as `referenceTarget`, and that symmetry is the
-   * whole point. The reference is read back from `applied_allocation`, so comparing a raw
-   * proposal against it would reject an honest hold the moment the two diverge: a model
-   * that re-emits an over-cap proposal unchanged would see raw 40% measured against
-   * applied 35% and be told its "hold moved the target", when the book pursued 35% both
-   * times. Effective on one side, effective on the other.
-   *
-   * Identical to the raw emission on the whole corpus (the clamp has never fired), which
-   * is why this can be corrected now at zero behavioural cost.
+   * Raw, not clamped, and it must be the same KIND of value as `intentReference`. That
+   * symmetry is what makes rule 1 policy-invariant: two unclamped intentions compared to
+   * each other cannot land in two different coordinate systems, whichever way a cap moves
+   * between the two cycles.
    */
-  effectiveTarget: Record<string, number>;
+  intentTarget: Record<string, number>;
   /**
-   * The last target the guard ACCEPTED — read from the DB every cycle, never carried
-   * in memory (the bot runs one process per wake-up under Cron Schedule, so there is
-   * no memory to carry it in). Resolved from `applied_allocation` (see
-   * `resolveEffectiveTarget`). Null only when no decision has ever been recorded.
+   * THE LAST INTENTION THE GUARD ACCEPTED — read from the DB every cycle, never carried
+   * in memory (the bot runs one process per wake-up under Cron Schedule, so there is no
+   * memory to carry it in). Resolved from `intent_allocation`, falling back to the raw
+   * proposal on rows predating migration 0027. Null only when no decision has ever been
+   * recorded.
    *
-   * Passed RAW, as stored. `checkCoherence` normalises it under `riskPolicy` before any
-   * rule sees it — see the note there. Callers must not clamp it themselves: two callers
-   * normalising separately is how the operands drift apart again.
+   * ALREADY RESTATED, and this input is the reason `restateIntentReference` exists as a
+   * single entry point: the caller hands over a value that is in this cycle's universe,
+   * whose total has been verified, and which has NOT been clamped. Callers must not
+   * normalise it themselves — two callers normalising separately is exactly how the
+   * operands drifted apart in the first place.
    */
-  referenceTarget: Record<string, number> | null;
+  intentReference: Record<string, number> | null;
   /**
-   * The risk policy IN FORCE THIS CYCLE — the caps the clamp applies.
-   *
-   * A guard that took no config was the right shape until the reference became an
-   * `applied_allocation`. A stored applied target was bounded by the policy of ITS day;
-   * the candidate is bounded by today's. Tighten a cap and the two live in different
-   * coordinate systems: a reference at 35% is compared to a candidate the clamp can no
-   * longer take above 30%, every `hold` is rejected for "moving" 35 → 30, no `decided`
-   * row is written, the reference never advances, and the risk-mandated reduction never
-   * executes. An interlock, and a regression — before the reference became the applied
-   * allocation, raw-versus-raw survived a cap change and the clamp quietly applied 30.
-   *
-   * So the policy is an INPUT to the judgement now. Passed in rather than imported, which
-   * keeps the function pure and — the reason that actually matters — lets a test run it
-   * under a synthetic tightened cap without touching the real configuration.
+   * The movements the real pipeline produced for THIS cycle's effective target. The 2%
+   * floor already applied.
    */
-  riskPolicy: AppConfig;
-  /** The movements the real pipeline produced for this target. The 2% floor already applied. */
   movements: Movement[];
+  /**
+   * THE COUNTERFACTUAL — the movements the PREVIOUS intention would produce, bounded by
+   * TODAY's policy, against TODAY's book. Rule 2 reads it, and nothing else does.
+   *
+   * A decision reaches the book by creating an order, by modifying one, or BY CANCELLING
+   * ONE. The third case was invisible while rule 2 looked only at the new plan: a decision
+   * whose entire effect is "do not do what I was about to do" produces no movement of its
+   * own and read as void. It is not void — it changes what happens.
+   *
+   * That case became reachable the day the transition gate started blocking. A refused
+   * cycle advances the INTENTION and leaves the book where it was, so the standing
+   * intention is a plan that has not executed; withdrawing it is a real decision with a
+   * real effect, and rejecting it would trap the model inside a plan the gate will not let
+   * through.
+   *
+   * COMPUTED BEFORE THE GATE, and that ordering is load-bearing. Computed after, a frozen
+   * asset yields two empty plans — the old one and the new one both filtered out — and
+   * rule 2 would reject a decision for being unexecutable when the only thing making it
+   * unexecutable is the layer the guard is explicitly not marking the homework of.
+   * `computeMovements` is pure and gate-blind, which is what makes "before" cheap.
+   *
+   * Empty is a legitimate value: there is no previous intention on the first decision on
+   * record, and an intention that already executed produces nothing new against the book
+   * it produced.
+   */
+  previousIntentMovements: Movement[];
   /**
    * The reserve stable. Rule 2 needs it: cash moves on EVERY trade (it is the other side
    * of every leg) but is never traded directly — `computeMovements` skips it outright.
@@ -149,58 +179,13 @@ export interface CoherenceVerdict {
 const TARGET_EPSILON = 0.01;
 
 /**
- * The reference, RESTATED in this cycle's universe.
+ * The assets whose INTENTION moved, comparing ONLY the keys both allocations share.
  *
- * This cycle's allocatable universe comes from the pairs that actually returned data, so
- * an asset can vanish between two wake-ups when its feed drops. Two things then happen at
- * once, and only handling the first is a trap:
- *
- *   1. the vanished key is absent from the target. Comparing over the union would read
- *      that as the model changing its mind — handled by comparing the intersection;
- *
- *   2. THE VANISHED ASSET'S WEIGHT HAS TO GO SOMEWHERE. The schema is strict and still
- *      requires the remaining allocations to sum to 100, so a line that was at 8% leaves
- *      8 points that the model MUST reassign. The neutral place is cash. Compared
- *      naively, the reserve then looks like it moved by 8 points, rule 1 rejects a
- *      perfectly genuine hold, and the retry cannot fix it either — re-emitting the old
- *      target is impossible, its key is now forbidden. Every cycle would die for as long
- *      as the feed stayed down.
- *
- * So the dropped weight is credited to the reserve before comparing: parking an orphaned
- * line's weight in cash is what the code itself would do, and it is not a decision. Note
- * what this deliberately does NOT absolve — a model that reassigns that weight into
- * another COIN has made a real allocation choice, the coin still reads as moved, and a
- * `hold` claiming otherwise is still rejected.
- *
- * THE ORPHANED KEY IS DROPPED, not merely credited. Keeping it while also adding its
- * weight to cash leaves an allocation summing past 100, and that used to be invisible:
- * `movedAssets` walks the TARGET's keys, so a key the target no longer has was never
- * looked at. It stopped being invisible the moment the restated reference started going
- * through the clamp — `clampAllocation` counts every non-reserve key, so the ghost would
- * take its own cap surplus and inflate the `coinTotal` the cash-floor pass scales by,
- * giving the reference a different scaling from the candidate and rejecting honest holds
- * for as long as the feed stayed down. Transferring a weight means moving it, not copying
- * it.
+ * A key present in one and not the other is not comparable and is not a change of mind.
+ * The universe restatement upstream has already removed the keys this cycle no longer
+ * offers, so what reaches here is a genuine intersection rather than an accident of the
+ * feed.
  */
-function referenceInCurrentUniverse(
-  target: Record<string, number>,
-  reference: Record<string, number>,
-  reserveAsset: string,
-): Record<string, number> {
-  const orphanedWeight = Object.entries(reference)
-    .filter(([asset]) => !(asset in target))
-    .reduce((sum, [, value]) => sum + value, 0);
-  if (orphanedWeight === 0) return reference;
-
-  const restated: Record<string, number> = {};
-  for (const [asset, value] of Object.entries(reference)) {
-    if (asset in target || asset === reserveAsset) restated[asset] = value;
-  }
-  restated[reserveAsset] = (restated[reserveAsset] ?? 0) + orphanedWeight;
-  return restated;
-}
-
-/** The assets whose target moved, comparing ONLY the keys both allocations share. */
 function movedAssets(
   target: Record<string, number>,
   reference: Record<string, number>,
@@ -222,16 +207,21 @@ const fmt = (allocation: Record<string, number>): string =>
 /**
  * Checks one candidate decision. Pure: no I/O, no clock, no config lookup — every input
  * is passed in, so every rule below is directly testable and the replay harness can feed
- * it 139 real production responses without touching the network.
+ * it the whole production corpus without touching the network.
+ *
+ * IT NO LONGER CLAMPS ANYTHING, and it no longer takes a risk policy. The bounding rule 2
+ * needs happens upstream, where the movements are computed; the bounding rule 1 used to
+ * need went away with the defect. A guard whose verdict depends on today's caps is a guard
+ * that cannot answer an intention question, and rule 1 is an intention question.
  */
 export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   const {
     strategy,
     actionType,
-    effectiveTarget,
-    referenceTarget,
-    riskPolicy,
+    intentTarget,
+    intentReference,
     movements,
+    previousIntentMovements,
     reserveAsset,
     notes,
     assetsWithStoredThesis,
@@ -248,36 +238,13 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   // A full exit is exempt from rule 4 — see below.
   const fullExitAssets = new Set(movements.filter((m) => m.fullExit).map((m) => m.asset));
 
-  // THE REFERENCE, PUT IN THIS CYCLE'S FRAME. Two corrections, in this order, and then
-  // every rule below reads the SAME result — none of them clamps, and none of them ever
-  // sees the raw value.
-  //
-  //   1. THE UNIVERSE. A feed that dropped an asset forces its weight to be reassigned,
-  //      and that reassignment is the code's doing, not the model's.
-  //   2. THE RISK POLICY. The reference is a stored `applied_allocation`, bounded by the
-  //      caps of its day; the candidate is bounded by today's. Comparing them across a
-  //      cap change compares two different coordinate systems — see `riskPolicy`.
-  //
-  // Restate THEN clamp, so the two operands are built the same way: the candidate is the
-  // clamp of an allocation expressed in this cycle's universe, and now so is the
-  // reference. Idempotent while the policy holds still — clamping an already-bounded
-  // allocation under the same caps returns it unchanged — which is why this corrects the
-  // interlock without moving a single verdict on the existing corpus.
-  //
-  // Only ONE place derives `reference`, and rules 1 and 2 both read it from here. Rules 3
-  // and 4 are about theses and never touch the reference at all, so there is no rule left
-  // that could read an unnormalised value.
-  const reference = referenceTarget
-    ? clampAllocation(
-        referenceInCurrentUniverse(effectiveTarget, referenceTarget, reserveAsset),
-        reserveAsset,
-        riskPolicy,
-      ).applied
-    : null;
-  const moved = reference ? movedAssets(effectiveTarget, reference) : [];
-  const targetChanged = moved.length > 0;
+  // THE INTENTION COMPARISON. One derivation, read by rules 1 and 2 — rules 3 and 4 are
+  // about theses and never touch it, so there is no rule left that could hold a different
+  // notion of "moved".
+  const intentMoved = intentReference ? movedAssets(intentTarget, intentReference) : [];
+  const intentChanged = intentMoved.length > 0;
 
-  // ── Rule 1 — a hold cannot modify the reference target ────────────────────────
+  // ── Rule 1 — a hold cannot modify the reference intention ─────────────────────
   //
   // The cycle-987 family, in the direction that loses a trade: the model reasons its way
   // to a move and labels it a hold, or reasons its way to a hold and leaves a moved
@@ -286,18 +253,18 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   //
   // Not evaluated at all when there is no reference (the very first decision on record):
   // there is nothing to have modified.
-  if (actionType === 'hold' && targetChanged && reference) {
+  if (actionType === 'hold' && intentChanged && intentReference) {
     violations.push({
       rule: 'hold_moved_target',
-      assets: moved,
+      assets: intentMoved,
       detail:
-        `action_type is "hold" but the target moved on ${moved.join(', ')}: ` +
-        `reference [${fmt(reference)}] → emitted [${fmt(effectiveTarget)}]. ` +
+        `action_type is "hold" but the target moved on ${intentMoved.join(', ')}: ` +
+        `reference [${fmt(intentReference)}] → emitted [${fmt(intentTarget)}]. ` +
         'A hold keeps the reference target; a changed target is not a hold.',
     });
   }
 
-  // ── Rule 2 — a moved target that cannot produce an order is an invalid target ──
+  // ── Rule 2 — an intention that cannot reach the book is an invalid intention ───
   //
   // Cycles 946, 948 and 957: the emitted allocation proposes BNB at 11% while the
   // standing reference is 12%. One point on a ~$1000 book is ~$10, under the 2% plumbing
@@ -315,24 +282,37 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   // BTC would trade, and the intent would be lost — the exact class of silent discard
   // this guard exists to stop.
   //
-  // TWO deliberate calibrations:
+  // ASKED IN COUNTERFACTUAL, and this is what changed. The question is not "does the new
+  // plan trade this line" but "does this line's fate DIFFER because of the decision" —
+  // which is answered by replaying BOTH intentions against the same book. A decision that
+  // cancels an order the standing intention would have fired reaches the book just as
+  // surely as one that places a new order, and is refused only when NEITHER plan can touch
+  // the lines it claims to move. Judging on the new plan alone was too strict in exactly
+  // the case a blocking gate creates: an intention that never executed stays standing, and
+  // withdrawing it is a real decision.
+  //
+  // TWO deliberate calibrations, both unchanged:
   //   - the RESERVE is excluded. Cash moves on every trade (it is the other side of
   //     every leg) and is never traded directly, so requiring a movement for it would
   //     reject every legitimate rebalance;
-  //   - "at least one" moved coin must trade, not "all of them". A target that moves BNB
-  //     by 6 points and ETH by 1 does execute the decision; the sub-floor ETH leg is the
-  //     documented, measured residual of the 2% floor (see isBelowFloor), not an
-  //     incoherence. Demanding all of them would fight a rail the project accepted on
+  //   - "at least one" moved coin must be reachable, not "all of them". A target that
+  //     moves BNB by 6 points and ETH by 1 does execute the decision; the sub-floor ETH
+  //     leg is the documented, measured residual of the 2% floor (see isBelowFloor), not
+  //     an incoherence. Demanding all of them would fight a rail the project accepted on
   //     purpose.
-  const movedCoins = moved.filter((asset) => asset !== reserveAsset);
+  const movedCoins = intentMoved.filter((asset) => asset !== reserveAsset);
   const tradedAssets = new Set(movements.map((m) => m.asset));
-  if (targetChanged && movedCoins.length > 0 && !movedCoins.some((asset) => tradedAssets.has(asset))) {
+  const previouslyTradedAssets = new Set(previousIntentMovements.map((m) => m.asset));
+  const reachable = (asset: string): boolean =>
+    tradedAssets.has(asset) || previouslyTradedAssets.has(asset);
+  if (intentChanged && movedCoins.length > 0 && !movedCoins.some(reachable)) {
     violations.push({
       rule: 'target_not_executable',
       assets: movedCoins,
       detail:
-        `the target moved on ${movedCoins.join(', ')} but not one of those lines produces an ` +
-        'executable order (each sits under the 2% plumbing floor)' +
+        `the target moved on ${movedCoins.join(', ')} but neither this target nor the reference ` +
+        'one produces an executable order on those lines against the current book (each sits ' +
+        'under the 2% plumbing floor, whichever of the two is replayed)' +
         (movements.length > 0
           ? `. The ${[...tradedAssets].join(', ')} movement this cycle comes from book drift on an ` +
             'UNCHANGED target — it is not the decision you just wrote'
@@ -350,6 +330,10 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   //
   // Reusing the predicate is also what keeps cycle 879 passing: four theses on four
   // untouched lines, every one of them legitimate because no line had a thesis yet.
+  //
+  // Judged on the REAL movements, never on the counterfactual: a thesis records why a line
+  // is being traded NOW, and a line only the withdrawn plan would have touched is not
+  // being traded at all.
   const refusedNotes = !thesisRulesApply
     ? []
     : notes.filter(
@@ -409,6 +393,13 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
  * without being told that dropping the note is a legitimate answer, the model tries to
  * justify the note instead. A failed cycle is zero trading — we already carry one
  * failure mode of that family since PR #20 and are not adding a second.
+ *
+ * The "reference target" option 2 names is the REFERENCE INTENTION, quoted verbatim in
+ * the rule-1 detail above. That is the amendment this PR makes explicit to PR #27's
+ * contract: the model's intention may be reread by the guard and by its rejection
+ * messages, as immutable history. Never as an execution target, and never as a
+ * description of the book — `applied_allocation` remains the only allocation an
+ * operational path reads.
  */
 export function buildRetryPrompt(violations: CoherenceViolation[]): string {
   return [
