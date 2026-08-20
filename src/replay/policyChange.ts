@@ -1,9 +1,13 @@
 import 'dotenv/config';
 import { pathToFileURL } from 'node:url';
 import { config, type AppConfig } from '../config/index.js';
+import { dec, ZERO } from '../money.js';
+import type { PriceLookup, VirtualPortfolio } from '../portfolio/derive.js';
+import { computeMovements } from '../execution/movements.js';
 import { clampAllocation } from '../risk/clamp.js';
 import { restateIntentReference } from '../decision/intentReference.js';
 import { checkCoherence, type CoherenceRule } from '../decision/coherence.js';
+import type { PositionNote } from '../decision/schema.js';
 
 /**
  * THE POLICY-CHANGE COUNTERFACTUAL — what a cap moving costs the bot, before and after.
@@ -24,20 +28,36 @@ import { checkCoherence, type CoherenceRule } from '../decision/coherence.js';
  *              reference bounded at the old ceiling never recovers the weight a raised
  *              ceiling would now allow, so the model's unchanged ask reads as a moved
  *              target and the first attempt is rejected. Not a deadlock — the retry
- *              catches it — which is exactly why it was survivable and easy to leave. The
- *              cost is one extra LLM call PER CYCLE, for as long as the model keeps asking.
+ *              catches it — which is exactly why it was survivable and easy to leave.
  *
  * ── WHAT IS SIMULATED, AND WHAT IS NOT ──────────────────────────────────────────
  *
- * The model is reduced to the only two behaviours the retry contract needs: it keeps
- * asking for the allocation it wants, and when the guard rejects it, it takes option 2 of
- * the retry prompt — "re-emit the reference target UNCHANGED, with action_type hold".
- * That is the cheapest honest model of a correction, and it is the one that makes the cost
- * measurable: whichever value the guard PRINTS as the reference is what comes back.
+ * A REAL BOOK, and that is the correction the review caught. An earlier version of this
+ * file handed the guard an empty movement list, which silently assumed a book already
+ * sitting on its target. True in the steady state, and FALSE on the very cycle a cap
+ * moves — the book is still at the old bounded allocation, so the new one produces a
+ * genuine leg. Assuming it away hid a retry production really does pay, and made the
+ * headline number one call per cycle too good.
  *
- * The rules themselves are not simulated at all — this drives the real `checkCoherence`
- * and the real `clampAllocation`, with the two operand sets exactly as production and the
- * pre-PR code build them.
+ * So the book is carried explicitly: it starts at the allocation the old policy applied,
+ * every accepted cycle moves it to what the chain retained, and the movements the guard
+ * judges come from the real `computeMovements`, 2% floor included. Prices are held still
+ * on purpose — drift is a different phenomenon and would only add noise to a measurement
+ * about caps.
+ *
+ * THE MODEL is reduced to the three behaviours the retry contract needs, and no more:
+ *
+ *   1. it keeps asking for the allocation it wants, as a `hold`, with no notes — because
+ *      from where it sits nothing changed;
+ *   2. rejected on rule 1 or 2, it takes option 2 of the retry prompt: re-emit the
+ *      reference UNCHANGED. Whichever value the guard PRINTS as the reference is what
+ *      comes back, which is what makes the cost measurable;
+ *   3. rejected on rule 4, it takes option 1: keep the move, and give the moving lines
+ *      their `position_notes` entry.
+ *
+ * The rules themselves are not simulated at all — this drives the real `checkCoherence`,
+ * the real `clampAllocation` and the real `computeMovements`, with the two operand sets
+ * exactly as production and the pre-PR code build them.
  *
  * Run with `npm run replay:policy-change`. Exits non-zero if any criterion fails.
  */
@@ -47,6 +67,11 @@ const UNIVERSE = ['BTC', 'ETH', 'BNB', 'XRP', 'USDT'];
 /** What the model wants, and keeps wanting. Cash sits on the floor, so nothing rescales. */
 const ASK = { BTC: 40, ETH: 18, BNB: 12, XRP: 0, USDT: 30 };
 const CYCLES = 10;
+const EQUITY = 1000;
+/** Held still: this measures a cap moving, not the market. */
+const PRICES: Record<string, number> = { BTC: 60000, ETH: 3000, BNB: 600, XRP: 0.5, USDT: 1 };
+
+const priceOf: PriceLookup = (asset) => (PRICES[asset] != null ? dec(PRICES[asset]!) : null);
 
 const withCaps = (perAsset: Record<string, number>): AppConfig => ({
   ...config,
@@ -54,6 +79,51 @@ const withCaps = (perAsset: Record<string, number>): AppConfig => ({
     ...config.execution,
     caps: { ...config.execution.caps, perAsset: { ...config.execution.caps.perAsset, ...perAsset } },
   },
+});
+
+/** A book holding exactly `allocation` at `EQUITY`, valued at the frozen prices. */
+function bookAt(allocation: Record<string, number>): VirtualPortfolio {
+  const equity = dec(EQUITY);
+  const positions = Object.entries(allocation)
+    .filter(([asset]) => asset !== RESERVE)
+    .map(([asset, percent]) => {
+      const value = equity.times(percent).div(100);
+      const price = dec(PRICES[asset] ?? 1);
+      return {
+        asset,
+        qty: price.gt(0) ? value.div(price) : ZERO,
+        avgCost: price,
+        price,
+        priceStale: false,
+        value,
+        unrealizedPnl: ZERO,
+        weightPercent: dec(percent),
+      };
+    });
+  const cash = equity.times(allocation[RESERVE] ?? 0).div(100);
+  return {
+    reserveAsset: RESERVE,
+    startingCapital: equity,
+    cash,
+    equity,
+    deployedPercent: equity.minus(cash).div(equity).times(100),
+    realizedPnl: ZERO,
+    unrealizedPnl: ZERO,
+    totalPnl: ZERO,
+    positions,
+  };
+}
+
+const weightOf = (book: VirtualPortfolio, asset: string): number => {
+  const position = book.positions.find((p) => p.asset === asset);
+  return position ? Number(position.weightPercent.toFixed(2)) : 0;
+};
+
+const noteFor = (asset: string): PositionNote => ({
+  asset,
+  thesis: 'the ceiling moved and the line follows it',
+  invalidation: 'the thesis stops holding',
+  replace: true,
 });
 
 interface Criterion {
@@ -74,9 +144,9 @@ interface RunOutcome {
   calls: number;
   /** Cycles whose first attempt was rejected. */
   rejectedFirstAttempts: number[];
-  /** Cycles that were still incoherent after the retry — a dead cycle, zero trading. */
+  /** Cycles still incoherent after the single retry — a dead cycle, zero trading. */
   deadCycles: number[];
-  /** The weight the chain ended up pursuing on the line the policy moved. */
+  /** The weight the BOOK ends up holding on the line the policy moved. */
   finalBtc: number;
   rules: CoherenceRule[];
 }
@@ -91,18 +161,22 @@ interface RunOutcome {
  */
 function run(policy: AppConfig, operands: 'split' | 'legacy'): RunOutcome {
   // The chain starts where a bot running under the OLD policy left it: the model had been
-  // asking for 40, the old 35 cap applied 35. Both references are seeded from that cycle,
-  // each from the column it reads.
+  // asking for 40, the old 35 ceiling applied 35, and the BOOK is sitting on that 35.
   const oldPolicy = withCaps({ BTC: 35 });
   const seededApplied = clampAllocation(ASK, RESERVE, oldPolicy).applied;
   let reference: Record<string, number> = operands === 'split' ? { ...ASK } : seededApplied;
+  let book = bookAt(seededApplied);
+  // A bot that has been running carries a thesis on every line it holds. That matters for
+  // rule 3: it is what makes a note on an UNMOVED line a violation rather than a first
+  // thesis, so the model cannot dodge rule 4 by noting everything.
+  const assetsWithStoredThesis = new Set(['BTC', 'ETH', 'BNB']);
 
   let calls = 0;
   const rejectedFirstAttempts: number[] = [];
   const deadCycles: number[] = [];
   const rules: CoherenceRule[] = [];
 
-  const judge = (emitted: Record<string, number>) => {
+  const judge = (emitted: Record<string, number>, notes: PositionNote[]) => {
     const restated = restateIntentReference({
       reference,
       universe: UNIVERSE,
@@ -110,51 +184,85 @@ function run(policy: AppConfig, operands: 'split' | 'legacy'): RunOutcome {
       policy,
     });
     if (!restated.ok) throw new Error(`the seeded reference is not restatable: ${restated.reason}`);
-    return checkCoherence({
+    const applied = clampAllocation(emitted, RESERVE, policy).applied;
+    const movements = computeMovements(
+      book,
+      applied,
+      priceOf,
+      policy.execution.feePercent,
+      policy.execution.minMovementPercent,
+    );
+    // The counterfactual, from the same book — exactly as `decide()` derives it, before the
+    // gate. Under `legacy` it did not exist, so the disjunction collapses to the new plan.
+    const previousIntentMovements =
+      operands === 'split'
+        ? computeMovements(
+            book,
+            restated.value.bounded,
+            priceOf,
+            policy.execution.feePercent,
+            policy.execution.minMovementPercent,
+          )
+        : [];
+    const verdict = checkCoherence({
       strategy: 'v5',
       actionType: 'hold',
       // The operand split, in one line. `legacy` compared two BOUNDED values; `split`
       // compares two raw intentions.
-      intentTarget: operands === 'split' ? emitted : clampAllocation(emitted, RESERVE, policy).applied,
+      intentTarget: operands === 'split' ? emitted : applied,
       intentReference: operands === 'split' ? restated.value.intent : restated.value.bounded,
-      movements: [],
-      previousIntentMovements: [],
+      movements,
+      previousIntentMovements,
       reserveAsset: RESERVE,
-      notes: [],
-      assetsWithStoredThesis: new Set<string>(),
+      notes,
+      assetsWithStoredThesis,
     });
+    return { verdict, applied, movements };
   };
 
   for (let cycle = 1; cycle <= CYCLES; cycle += 1) {
     calls += 1;
     let emitted: Record<string, number> = { ...ASK };
-    let verdict = judge(emitted);
+    let notes: PositionNote[] = [];
+    let attempt = judge(emitted, notes);
 
-    if (!verdict.ok) {
+    if (!attempt.verdict.ok) {
       rejectedFirstAttempts.push(cycle);
-      rules.push(...verdict.violations.map((v) => v.rule));
-      // OPTION 2 OF THE RETRY PROMPT: re-emit the reference unchanged. Whatever the guard
-      // printed as the reference is what comes back — which is the whole point. Under
-      // `legacy` that value is the BOUNDED one, so the correction silently costs the model
-      // the weight it had been asking for.
+      const fired = attempt.verdict.violations.map((v) => v.rule);
+      rules.push(...fired);
       calls += 1;
-      const restated = restateIntentReference({
-        reference,
-        universe: UNIVERSE,
-        reserveAsset: RESERVE,
-        policy,
-      });
-      if (!restated.ok) throw new Error(restated.reason);
-      emitted = operands === 'split' ? restated.value.intent : restated.value.bounded;
-      verdict = judge(emitted);
-      if (!verdict.ok) deadCycles.push(cycle);
+
+      if (fired.includes('hold_moved_target') || fired.includes('target_not_executable')) {
+        // OPTION 2: re-emit the reference unchanged. Whatever the guard printed as the
+        // reference is what comes back — which is the whole point. Under `legacy` that
+        // value is the BOUNDED one, so the correction silently costs the model the weight
+        // it had been asking for.
+        const restated = restateIntentReference({
+          reference,
+          universe: UNIVERSE,
+          reserveAsset: RESERVE,
+          policy,
+        });
+        if (!restated.ok) throw new Error(restated.reason);
+        emitted = operands === 'split' ? restated.value.intent : restated.value.bounded;
+        notes = [];
+      } else {
+        // OPTION 1: keep the move and give the moving lines their note. This is the branch
+        // a moved ceiling reaches under the split operands — the INTENTION did not change,
+        // but the newly permitted weight moves the BOOK, and a line that trades has to say
+        // what it is now betting on.
+        emitted = { ...ASK };
+        notes = attempt.movements.filter((m) => !m.fullExit).map((m) => noteFor(m.asset));
+      }
+      attempt = judge(emitted, notes);
+      if (!attempt.verdict.ok) deadCycles.push(cycle);
     }
 
-    // What production writes, and reads back next cycle: the INTENTION for the split
-    // guard, the APPLIED allocation for the legacy one.
-    if (verdict.ok) {
-      reference =
-        operands === 'split' ? { ...emitted } : clampAllocation(emitted, RESERVE, policy).applied;
+    if (attempt.verdict.ok) {
+      // What production writes and reads back next cycle: the INTENTION for the split
+      // guard, the APPLIED allocation for the legacy one. And the book follows the chain.
+      reference = operands === 'split' ? { ...emitted } : attempt.applied;
+      book = bookAt(attempt.applied);
     }
   }
 
@@ -162,7 +270,7 @@ function run(policy: AppConfig, operands: 'split' | 'legacy'): RunOutcome {
     calls,
     rejectedFirstAttempts,
     deadCycles,
-    finalBtc: clampAllocation(reference, RESERVE, policy).applied.BTC ?? 0,
+    finalBtc: weightOf(book, 'BTC'),
     rules: [...new Set(rules)],
   };
 }
@@ -171,8 +279,8 @@ function main(): void {
   console.log('='.repeat(96));
   console.log('POLICY-CHANGE REPLAY — what a moved cap costs, with the old operands and the new');
   console.log(
-    `${CYCLES} consecutive wake-ups, the model asking for BTC ${ASK.BTC}% every time, ` +
-      'seeded from a chain that ran under a 35% ceiling.',
+    `${CYCLES} consecutive wake-ups, the model asking for BTC ${ASK.BTC}% every time, on a ` +
+      `$${EQUITY} book seeded at the allocation a 35% ceiling applied.`,
   );
   console.log('='.repeat(96));
 
@@ -185,20 +293,30 @@ function main(): void {
     const split = run(relaxed, 'split');
     const ok =
       legacy.rejectedFirstAttempts.length === CYCLES &&
-      split.rejectedFirstAttempts.length === 0 &&
-      split.calls === CYCLES &&
-      legacy.calls === 2 * CYCLES;
-    record('P1', 'a RELAXED cap no longer costs a retry — and used to cost one every cycle', ok, [
+      legacy.finalBtc === 35 &&
+      split.rejectedFirstAttempts.length === 1 &&
+      split.deadCycles.length === 0 &&
+      split.finalBtc === 40 &&
+      split.calls < legacy.calls;
+    record('P1', 'a RELAXED cap stops costing a retry EVERY cycle, and the weight arrives', ok, [
       `BEFORE: ${legacy.calls} LLM calls over ${CYCLES} cycles · ` +
         `${legacy.rejectedFirstAttempts.length} first attempts rejected ` +
-        `(${legacy.rules.join(', ') || 'none'}) · ${legacy.deadCycles.length} dead cycles.`,
+        `(${legacy.rules.join(', ') || 'none'}) · ${legacy.deadCycles.length} dead cycles · ` +
+        `book ends at BTC ${legacy.finalBtc}%.`,
       `AFTER:  ${split.calls} LLM calls over ${CYCLES} cycles · ` +
-        `${split.rejectedFirstAttempts.length} first attempts rejected · ` +
-        `${split.deadCycles.length} dead cycles.`,
-      `Saved: ${legacy.calls - split.calls} calls over ${CYCLES} cycles — exactly one per cycle, ` +
-        'for as long as the model keeps asking for the weight the new ceiling allows.',
-      `And the chain now pursues BTC ${split.finalBtc}% instead of ${legacy.finalBtc}%: the retry ` +
-        'did not merely cost a call, it talked the model down to the OLD ceiling every time.',
+        `${split.rejectedFirstAttempts.length} first attempt rejected, on cycle ` +
+        `${split.rejectedFirstAttempts.join(', ') || '—'} (${split.rules.join(', ') || 'none'}) · ` +
+        `${split.deadCycles.length} dead cycles · book ends at BTC ${split.finalBtc}%.`,
+      `Saved: ${legacy.calls - split.calls} calls over ${CYCLES} cycles.`,
+      'THE ONE RETRY THAT REMAINS IS NOT THE DEFECT, and it is why this harness carries a ' +
+        'real book. On the cycle the ceiling moves, the intention has not changed but the ' +
+        'BOOK does — the newly permitted weight is a real leg — so rule 4 asks the line that ' +
+        'trades to say what it is now betting on. The model supplies the note and the trade ' +
+        'lands. That is the guard working, once, not the reference being stale every cycle.',
+      `AND THE WEIGHT ACTUALLY ARRIVES: the book ends at BTC ${split.finalBtc}% instead of ` +
+        `${legacy.finalBtc}%. Before, the retry did not merely cost a call — it talked the ` +
+        'model back down to the OLD ceiling every single cycle, so the weight the new ceiling ' +
+        'permits never reached the book at all.',
     ]);
   }
 
@@ -207,17 +325,18 @@ function main(): void {
     const legacy = run(tightened, 'legacy');
     const split = run(tightened, 'split');
     const ok =
-      split.rejectedFirstAttempts.length === 0 &&
       split.deadCycles.length === 0 &&
       legacy.deadCycles.length === 0 &&
-      split.finalBtc === 30;
+      split.finalBtc === 30 &&
+      legacy.finalBtc === 30;
     record('P2', 'a TIGHTENED cap still deadlocks nothing — PR #28 stays closed', ok, [
       `AFTER:  ${split.calls} LLM calls · ${split.rejectedFirstAttempts.length} rejected first ` +
-        `attempts · ${split.deadCycles.length} dead cycles.`,
+        `attempt(s) (${split.rules.join(', ') || 'none'}) · ${split.deadCycles.length} dead cycles · ` +
+        `book ends at BTC ${split.finalBtc}%.`,
       `BEFORE: ${legacy.calls} LLM calls · ${legacy.rejectedFirstAttempts.length} rejected first ` +
-        `attempts · ${legacy.deadCycles.length} dead cycles (PR #28 had already closed this side).`,
-      `The chain applies BTC ${split.finalBtc}%, which is the new ceiling — the risk-mandated ` +
-        'reduction executes, which is the whole point of tightening a cap.',
+        `attempt(s) · ${legacy.deadCycles.length} dead cycles · book ends at BTC ${legacy.finalBtc}%.`,
+      'The risk-mandated reduction executes in both, which is the whole point of tightening a ' +
+        'cap. Here too the single rejection is rule 4, on the cycle the book actually moves.',
       'Note the asymmetry the split removes: #28 closed this direction by CLAMPING the ' +
         'reference, which is what made the relaxed direction lossy. Comparing two unclamped ' +
         'intentions closes both at once, structurally.',
@@ -231,11 +350,17 @@ function main(): void {
     const stable = withCaps({ BTC: 35 });
     const legacy = run(stable, 'legacy');
     const split = run(stable, 'split');
-    const ok = legacy.calls === CYCLES && split.calls === CYCLES;
+    const ok =
+      legacy.calls === CYCLES &&
+      split.calls === CYCLES &&
+      legacy.finalBtc === 35 &&
+      split.finalBtc === 35;
     record('P3', 'with the policy holding still, both operand sets cost the same', ok, [
-      `BEFORE: ${legacy.calls} calls · AFTER: ${split.calls} calls · ${CYCLES} cycles.`,
-      'The control. A difference here would mean the relaxed-case saving above comes from the ' +
-        'harness, not from the operands.',
+      `BEFORE: ${legacy.calls} calls · AFTER: ${split.calls} calls · ${CYCLES} cycles · ` +
+        `book steady at BTC ${split.finalBtc}%.`,
+      'The control. A difference here would mean the numbers above come from the harness ' +
+        'rather than from the operands — and it pins the steady state: a book already on its ' +
+        'target produces no movement, so no rule fires at all.',
     ]);
   }
 

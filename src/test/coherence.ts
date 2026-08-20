@@ -630,6 +630,50 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   );
 }
 
+{
+  // ── THE BOUNDARY BETWEEN THE TWO, pinned because the review argued for moving it.
+  //
+  // Codex proposed restricting the counterfactual to a FULL cancellation back to the book,
+  // on the grounds that a partial withdrawal leaves an intention that is itself
+  // unexecutable. The case: the book holds BNB at 12%, the standing intention the gate
+  // refused wants 15% (an executable 3-point buy), and the model now says 13% — one point
+  // above the book, suppressed by the floor.
+  //
+  // IT IS ACCEPTED, deliberately, and the argument is what rule 2 actually asks. The
+  // question is not "is the new intention reachable on its own" — it is "does this line's
+  // fate differ because of the decision". It does: without this cycle a 3-point buy fires,
+  // with it nothing does. Cancelling an order is reaching the book, and a de-escalation the
+  // gate has already blocked is exactly the decision the model must be allowed to make.
+  // Demanding a full retreat to the book would refuse it and re-trap the model inside a
+  // plan it can neither execute nor withdraw — the failure the "too strict" case above
+  // exists to prevent.
+  const partialWithdrawal = input({
+    actionType: 'rebalance',
+    intentReference: { ...REFERENCE, BNB: 15, USDT: 40 },
+    intentTarget: { ...REFERENCE, BNB: 13, USDT: 42 }, // one point above the book at 12
+    movements: [], // the 1-point buy is under the floor
+    previousIntentMovements: [movement('BNB', 'buy')], // the 3-point buy was not
+  });
+  ok('a PARTIAL withdrawal of a refused plan is accepted too', checkCoherence(partialWithdrawal).ok);
+
+  // AND THE PERMISSIVENESS IS EXACTLY ONE CYCLE WIDE, which is the half of the argument
+  // that actually needed evidence. Next cycle the reference is 13 and the book is still 12,
+  // so the standing plan is sub-floor as well — both plans are void and the guard bites. The
+  // intention cannot be walked away from the book one sub-floor step at a time.
+  ok(
+    'and the NEXT sub-floor nibble is refused — the intention cannot drift step by step',
+    rules(
+      input({
+        actionType: 'rebalance',
+        intentReference: { ...REFERENCE, BNB: 13, USDT: 42 },
+        intentTarget: { ...REFERENCE, BNB: 14, USDT: 41 },
+        movements: [],
+        previousIntentMovements: [], // 13 against a book at 12 is itself under the floor
+      }),
+    ).includes('target_not_executable'),
+  );
+}
+
 /* ── RULE 1 IS POLICY-INVARIANT — the defect this PR closes, both directions ───
  *
  * Rule 1 asks whether the model changed its mind. Its two operands are raw, unclamped
