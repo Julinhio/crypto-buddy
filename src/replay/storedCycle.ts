@@ -80,11 +80,10 @@ export interface StoredCycle {
   intent_allocation?: unknown;
   applied_allocation: unknown;
   /**
-   * The PROVENANCE of a proposal/applied divergence, carried so the replay resolves an
-   * intention exactly the way production does — including the reconstruction branch for a
-   * row written without one. Both are null on every corpus row.
+   * Set only when the transition gate refused the vector — carried so the replay resolves an
+   * intention exactly the way production does, reconstruction branch included. Null on every
+   * corpus row.
    */
-  clamped?: unknown;
   applied_divergence_cause?: unknown;
 }
 
@@ -374,7 +373,6 @@ export function replayCycle(
       intent_allocation: cycle.intent_allocation,
       target_allocation: cycle.target_allocation,
       applied_allocation: cycle.applied_allocation,
-      clamped: cycle.clamped,
       applied_divergence_cause: cycle.applied_divergence_cause,
     },
     cycle.market_context.account.portfolio.reserveAsset,
@@ -440,7 +438,7 @@ export async function loadCorpus(
       .from('decisions')
       .select(
         'id, created_at, raw_response, market_context, target_allocation, intent_allocation, ' +
-          'applied_allocation, clamped, applied_divergence_cause',
+          'applied_allocation, applied_divergence_cause',
       )
       .eq('status', 'decided')
       .eq('prompt_version', 'v5')

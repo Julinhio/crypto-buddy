@@ -86,7 +86,7 @@ export async function loadReferenceAllocations(
       // pursue", and `target_allocation` is the named fallback for rows written before
       // migration 0027 — never a value either resolver reaches for otherwise.
       .select(
-        'target_allocation, applied_allocation, intent_allocation, clamped, applied_divergence_cause',
+        'target_allocation, applied_allocation, intent_allocation, applied_divergence_cause',
       )
       .eq('status', 'decided')
       .order('created_at', { ascending: false })

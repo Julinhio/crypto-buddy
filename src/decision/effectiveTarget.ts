@@ -55,11 +55,12 @@ export interface TargetColumns {
    */
   intent_allocation?: unknown;
   /**
-   * Migration 0004 / 0026 — the PROVENANCE of a divergence between the proposal and the
-   * applied target. Read only when `intent_allocation` is missing, to tell a peak stop
-   * apart from a clamp or a gate refusal; see `resolveIntentAllocation`.
+   * Migration 0026 — set only when the TRANSITION GATE refused the cycle's vector, which is
+   * the one cause that makes `applied_allocation` describe a different cycle entirely. Read
+   * when `intent_allocation` is missing, to tell a peak stop apart from a refusal; see
+   * `resolveIntentAllocation`. `clamped` is deliberately absent: it is portfolio-wide, and a
+   * per-line question must not be answered with a portfolio-wide flag.
    */
-  clamped?: unknown;
   applied_divergence_cause?: unknown;
 }
 
@@ -176,23 +177,41 @@ function usableAllocation(value: unknown): Record<string, number> | null {
  *
  * So the fallback RECONSTRUCTS instead of substituting, from the columns such a row does
  * carry. A line was emptied BY THE CODE exactly when the applied target holds zero while
- * the proposal holds weight — and the three things that can put those two columns apart
- * are enumerated rather than guessed at:
+ * the proposal holds weight — and the three things that can put those two columns apart are
+ * enumerated rather than guessed at:
  *
- *   the CLAMP        `clamped` is true. It trims to a cap, and a cap is not zero; excluded
- *                    anyway, because a clamped ask is still the model's ask.
- *   the GATE         `applied_divergence_cause` is set. The applied target is then the
- *                    PREVIOUS vector, so a zero there means "the book was not in this line",
- *                    not "the code just emptied it" — and the model's intention to enter it
- *                    must survive, which is the whole point of a refusal not touching it.
- *   the STOP         neither of the above, applied at zero, proposal above it. That is a
- *                    peak-stop exit, and it is the case being recovered.
+ *   the GATE    `applied_divergence_cause` is set. The applied target is then the PREVIOUS
+ *               vector, so a zero there means "the book was not in this line", not "the code
+ *               just emptied it" — and the model's intention to ENTER it must survive, which
+ *               is the whole point of a refusal not touching the intention.
+ *   the CLAMP   it trims to a cap, and a cap is a positive weight, so it cannot produce the
+ *               zero this predicate looks for. The cash-floor pass cannot either: its scale
+ *               is `(coinTotal − deficit) / coinTotal`, which startup validation keeps
+ *               strictly positive by requiring `minCashPercent < 100`. `clamped` is
+ *               DELIBERATELY not consulted — it is a portfolio-wide flag, so reading it
+ *               would let a cap firing on BTC silently suppress the recovery of a stop on
+ *               ETH, which is the review's finding and the reason this reads per line.
+ *   the STOP    no divergence cause, applied at zero, proposal above it. That is a peak-stop
+ *               exit, and it is the case being recovered.
  *
- * The residual blind spot, stated rather than hidden: a stop that fires on a cycle the
- * gate ALSO refused, written by an old binary. The divergence cause is set, so the
- * reconstruction stands aside and the raw weight survives. That costs one rejected cycle
- * and one retry, it is self-healing on the next accepted decision, and it cannot happen at
- * all once the writing binary carries this code.
+ * TWO RESIDUAL AMBIGUITIES, stated rather than hidden. Both are confined to the same narrow
+ * window — a row written by a binary without this code, after the migration — and in both
+ * the direction of the error was chosen, not stumbled into.
+ *
+ *   1. A STOP ON A CYCLE THE GATE ALSO REFUSED. The divergence cause is set, the
+ *      reconstruction stands aside, and the raw weight survives. Costs one rejected cycle
+ *      and one retry, self-healing on the next accepted decision.
+ *   2. A PER-ASSET CAP SET TO EXACTLY ZERO — permitted by the config validator (`[0, 100]`),
+ *      though no shipped cap is anywhere near it. That clamps a positive ask to zero and is
+ *      indistinguishable, on the row alone, from a stop; the caps in force when the row was
+ *      written are not recorded anywhere, and consulting TODAY's would be this PR's own
+ *      defect all over again. So it reads as a stop, and that is the SAFE direction:
+ *      mistaking a retired asset for a stopped one forgets an intention and costs one retry,
+ *      while mistaking a stopped one for a retired asset invites a re-entry the stop contract
+ *      forbids. A retry against a broken stop is not a close call.
+ *
+ * Neither can happen once the writing binary carries this code, which is the point of
+ * persisting the intention rather than inferring it.
  *
  * Every branch is a NAMED outcome rather than a `??`, for the same reason as the effective
  * target: a caller can log it, count it, or refuse it.
@@ -272,10 +291,13 @@ export function resolveIntentAllocation(
  */
 function codeEmptiedLines(row: TargetColumns, proposal: Record<string, number>): string[] {
   // A gate refusal makes `applied_allocation` the PREVIOUS vector, so it says nothing about
-  // what this cycle emptied. A clamp trims to a cap, never to zero. In both cases the
-  // proposal stands as the intention, which is the contract.
+  // what THIS cycle emptied — the proposal stands as the intention, which is the contract.
+  //
+  // The clamp needs no exclusion at all, and reading `clamped` for one would be actively
+  // wrong: the flag is portfolio-wide, so a cap firing on BTC would suppress the recovery of
+  // a stop on ETH. The predicate is per line instead, and per line the clamp cannot produce
+  // a zero — see the enumeration above.
   if (row.applied_divergence_cause != null) return [];
-  if (row.clamped === true) return [];
   const applied = usableAllocation(row.applied_allocation);
   if (applied == null) return [];
   return Object.keys(proposal).filter((asset) => proposal[asset]! > 0 && applied[asset] === 0);

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { resolveEffectiveTarget, resolveIntentAllocation } from '../decision/effectiveTarget.js';
 import { loadReferenceAllocations } from '../persistence/decisionGuard.js';
+import { clampAllocation } from '../risk/clamp.js';
+import { config, type AppConfig } from '../config/index.js';
 
 /**
  * Invariants of the EFFECTIVE TARGET resolver — run with `npm test` (tsx). No framework.
@@ -167,12 +169,11 @@ const APPLIED = { BTC: 25, ETH: 20, USDT: 55 };
   const PROPOSED = { BTC: 30, ETH: 20, USDT: 50 };
 
   // A MIXED-VERSION ROW WITH A STOP: ETH flat in the applied target, positive in the
-  // proposal, and neither the clamp nor the gate to explain it.
+  // proposal, and no gate refusal to explain it.
   const recovered = resolveIntentAllocation(
     {
       target_allocation: PROPOSED,
       applied_allocation: { BTC: 30, ETH: 0, USDT: 70 },
-      clamped: false,
       applied_divergence_cause: null,
     },
     'USDT',
@@ -194,7 +195,6 @@ const APPLIED = { BTC: 25, ETH: 20, USDT: 55 };
     {
       target_allocation: PROPOSED,
       applied_allocation: { BTC: 30, ETH: 0, USDT: 70 },
-      clamped: false,
       applied_divergence_cause: 'ETH is frozen — 1 strategic leg dropped',
     },
     'USDT',
@@ -202,23 +202,51 @@ const APPLIED = { BTC: 25, ETH: 20, USDT: 55 };
   assert.equal(refused.source, 'intent-fallback', 'a refused vector leaves the intention alone');
   assert.deepEqual(refused.allocation, PROPOSED, 'and the model still means to enter ETH');
 
-  // A CLAMP IS NOT A STOP EITHER. It trims to a cap, and a cap is not zero; a clamped ask is
-  // still the model's ask, which is the whole reason rule 1 reads an unclamped operand.
-  const clamped = resolveIntentAllocation(
+  // A CLAMP ON AN UNRELATED LINE MUST NOT SUPPRESS THE RECOVERY — the review's second finding
+  // on this branch, and the reason the predicate is per line rather than per row. `clamped` is
+  // portfolio-wide: a cap firing on BTC says nothing whatsoever about ETH, and consulting it
+  // would restore the positive ETH weight on a line the stop had just emptied.
+  const clampedElsewhere = resolveIntentAllocation(
     {
-      target_allocation: PROPOSED,
-      applied_allocation: { BTC: 30, ETH: 0, USDT: 70 },
-      clamped: true,
+      target_allocation: { BTC: 45, ETH: 20, USDT: 35 }, // BTC over its cap
+      applied_allocation: { BTC: 35, ETH: 0, USDT: 65 }, // BTC trimmed, ETH stopped out
       applied_divergence_cause: null,
     },
     'USDT',
   );
-  assert.equal(clamped.source, 'intent-fallback', 'a clamped row leaves the intention alone');
+  assert.equal(
+    clampedElsewhere.source,
+    'intent-reconstructed',
+    'a cap on BTC does not hide a stop on ETH',
+  );
+  assert.deepEqual(clampedElsewhere.stoppedAssets, ['ETH'], 'and only ETH is treated as stopped');
+  assert.deepEqual(
+    clampedElsewhere.allocation,
+    { BTC: 45, ETH: 0, USDT: 55 },
+    "BTC keeps the model's over-cap ASK — a clamped line is still what the model meant",
+  );
+
+  // AND THE CLAMP CANNOT PRODUCE THE ZERO the predicate looks for, which is why it needs no
+  // exclusion of its own. A cap is a positive weight, and the cash-floor pass scales by
+  // `(coinTotal − deficit) / coinTotal`, kept strictly positive by `minCashPercent < 100` at
+  // startup. Demonstrated against the real clamp rather than asserted.
+  const extreme: AppConfig = {
+    ...config,
+    execution: {
+      ...config.execution,
+      caps: { ...config.execution.caps, minCashPercent: 99, defaultPerAsset: 1, perAsset: {} },
+    },
+  };
+  const squeezed = clampAllocation({ BTC: 60, ETH: 20, USDT: 20 }, 'USDT', extreme).applied;
+  assert.ok(
+    (squeezed.BTC ?? 0) > 0 && (squeezed.ETH ?? 0) > 0,
+    'even at a 99% cash floor and a 1% per-asset cap, no positive line is driven to zero',
+  );
 
   // AND IT IS A NO-OP ON EVERY HISTORICAL ROW, which is what keeps the corpus replay inert:
   // applied equals target there, so no line is flat on one side and positive on the other.
   const historical = resolveIntentAllocation(
-    { target_allocation: PROPOSED, applied_allocation: { ...PROPOSED }, clamped: false },
+    { target_allocation: PROPOSED, applied_allocation: { ...PROPOSED } },
     'USDT',
   );
   assert.equal(historical.source, 'intent-fallback');
@@ -230,7 +258,6 @@ const APPLIED = { BTC: 25, ETH: 20, USDT: 55 };
     {
       target_allocation: { BTC: 30, XRP: 0, USDT: 70 },
       applied_allocation: { BTC: 30, XRP: 0, USDT: 70 },
-      clamped: false,
     },
     'USDT',
   );
