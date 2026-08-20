@@ -559,10 +559,24 @@ All knobs live in [`src/config/index.ts`](src/config/index.ts):
 
 Before anything is persisted or executed, deterministic code compares the structured
 parts of the model's answer to each other: a `hold` may not move the reference target, a
-moved target must be able to produce an order, a thesis may only be written for a line
+moved target must be able to reach the book, a thesis may only be written for a line
 that moves (or has none yet), and a line that moves must supply its thesis. It never
 reads prose. An invalid response gets **one** retry naming the valid ways out; a second
 failure journals the cycle as `guard_failed`, places no order and sends a Telegram alert.
+
+The first two rules ask **different questions and read different operands**, which is why
+a decision row carries three allocations rather than two:
+
+| column | what it is | who reads it |
+| --- | --- | --- |
+| `target_allocation` | the model's raw proposal, immutable | the audit trail |
+| `intent_allocation` | the model's **intention** — the proposal with any peak-stopped line put flat | rule 1: *did it change its mind?* |
+| `applied_allocation` | the **effective target** the chain retained | execution, the transition gate's revert |
+
+Rule 1 compares two raw intentions, so it is invariant to the risk policy: moving a cap in
+either direction can neither deadlock the chain nor cost a retry. Rule 2 asks whether the
+change can reach the book, replaying **both** the standing intention and the new one
+against the current book — cancelling a pending order counts as reaching it.
 
 | `COHERENCE_GUARD` | Behaviour |
 | --- | --- |
@@ -577,8 +591,10 @@ reintroduce the bug that lost the 30/07 trade.
 
 Traces land in `decision_guard_events`; the three counters are read from
 `decision_guard_counters`. Verify the guard's verdict against every real production
-response with `npm run replay:coherence`, and its recovery behaviour on a single cycle
-with `npm run replay:retry-1000` (this one makes a real LLM call).
+response with `npm run replay:coherence`; that the intent/executability split moves no
+historical verdict with `npm run replay:intent-split`; what a moved cap costs, before and
+after, with `npm run replay:policy-change` (offline); and its recovery behaviour on a
+single cycle with `npm run replay:retry-1000` (this one makes a real LLM call).
 
 The set of balance-tracked assets — and the AI's allocation universe — are both
 derived from `tradablePairs` via `tradableAssets()`; there's no separate asset
@@ -628,8 +644,12 @@ src/
 ├── context/
 │   ├── build.ts             # assembles MarketContext
 │   └── print.ts             # human-readable context output
+├── allocation.ts            # allocation arithmetic: move a weight to the reserve, keep the sum
 └── decision/
     ├── schema.ts            # structured-output schema + business validation
+    ├── coherence.ts         # the coherence guard: intention vs intention, executability vs the book
+    ├── intentReference.ts   # the ONE pipeline that restates a stored intention into this cycle
+    ├── effectiveTarget.ts   # which allocation column answers which question
     ├── prompt.ts            # frozen mandate v2 (caps + portfolio) + per-run user prompt
     ├── context.ts           # decision context: portfolio in place of testnet balances
     ├── llm.ts               # Anthropic client, structured call, token/latency capture

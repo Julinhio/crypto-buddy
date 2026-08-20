@@ -432,41 +432,66 @@ console.log('\n§7 — THE PAYLOAD IS GATED: observe is byte-identical to today 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────
-console.log('\n§8 — THE GUARD ACCEPTS A RE-EMITTED TARGET WHILE STILL FROZEN');
+console.log('\n§8 — THE GUARD ACCEPTS A RE-EMITTED INTENTION WHILE STILL FROZEN');
 // The consequence the brief asks to be frozen in a test so nobody reads it as a bug later.
-// On a refused cycle `applied_allocation` keeps the PREVIOUS vector. If the model then
-// re-emits the SAME target next cycle while the asset is still frozen, its intention has
-// not moved — so rule 1 ("a hold must not move the target") must ACCEPT.
+//
+// On a refused cycle `applied_allocation` keeps the PREVIOUS vector while
+// `intent_allocation` records what the model actually asked for — the intention advanced,
+// the book did not. If the model then re-emits the SAME target next cycle while the asset
+// is still frozen, its intention has not moved, and rule 1 must ACCEPT.
+//
+// Reading the guard's reference from the INTENTION rather than from the applied vector is
+// what makes this hold cleanly: under the old operand the model was compared against the
+// vector the gate reverted to, so re-emitting its own refused ask read as a MOVE and the
+// hold was rejected — the model trapped between an intention it could not execute and a
+// re-emission the guard would not accept.
 {
-  const reference = { BTC: 5, ETH: 20, USDT: 75 };
+  const refusedIntention = { BTC: 12, ETH: 20, USDT: 68 };
+  const previousApplied = { BTC: 5, ETH: 20, USDT: 75 };
   const verdict = checkCoherence({
     strategy: 'v5',
     actionType: 'hold',
-    effectiveTarget: { ...reference },
-    referenceTarget: reference,
-    riskPolicy: config,
+    intentTarget: { ...refusedIntention },
+    intentReference: refusedIntention,
     movements: [],
+    previousIntentMovements: [],
     reserveAsset: 'USDT',
     notes: [],
     assetsWithStoredThesis: new Set<string>(),
   });
-  ok('re-emitting the unchanged target on a hold is ACCEPTED by rule 1 — not a bug',
+  ok('re-emitting the unchanged intention on a hold is ACCEPTED by rule 1 — not a bug',
     verdict.ok, JSON.stringify(verdict.violations));
 
-  // And the mirror, so the test is not vacuous: a hold that DOES move the target is still
-  // rejected, exactly as before this PR.
+  // THE OLD OPERAND, shown failing on the same cycle. Compared against the vector the gate
+  // reverted to, the model's unchanged ask reads as a 5 → 12 move and the hold dies.
+  const againstApplied = checkCoherence({
+    strategy: 'v5',
+    actionType: 'hold',
+    intentTarget: { ...refusedIntention },
+    intentReference: previousApplied,
+    movements: [],
+    previousIntentMovements: [],
+    reserveAsset: 'USDT',
+    notes: [],
+    assetsWithStoredThesis: new Set<string>(),
+  });
+  ok('and judged against the APPLIED vector instead, the same cycle would be rejected',
+    !againstApplied.ok);
+
+  // And the mirror, so the test is not vacuous: a hold that DOES move the intention is
+  // still rejected, exactly as before this PR.
   const moved = checkCoherence({
     strategy: 'v5',
     actionType: 'hold',
-    effectiveTarget: { BTC: 12, ETH: 20, USDT: 68 },
-    referenceTarget: reference,
-    riskPolicy: config,
+    intentTarget: { BTC: 18, ETH: 20, USDT: 62 },
+    intentReference: refusedIntention,
     movements: [],
+    previousIntentMovements: [],
     reserveAsset: 'USDT',
     notes: [],
     assetsWithStoredThesis: new Set<string>(),
   });
-  ok('a hold that genuinely moves the target is still rejected', !moved.ok);
+  ok('a hold that genuinely moves the intention is still rejected', !moved.ok);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────

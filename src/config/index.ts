@@ -577,13 +577,67 @@ export const config: AppConfig = {
 };
 
 /**
- * Fails fast on an incoherent execution config so the risk wrapper's invariants
- * hold BY CONSTRUCTION. In particular, the cash-floor pass can only produce a
- * negative scale when `minCashPercent >= 100` (since the allocation sums to 100,
- * `coinTotal − deficit = 100 − minCashPercent`); forbidding that here is cleaner
- * than guarding an impossible case at runtime.
+ * The half-width, in points, past which a stored allocation is CORRUPT rather than merely
+ * loose — and the ceiling on `allocationTolerancePercent`, which is why it lives here.
+ *
+ * `restateIntentReference` judges a stored intention against the WIDER of the current
+ * tolerance and this band, so that loosening the tolerance can never make a reference look
+ * corrupt. That only holds while the tolerance cannot itself exceed the band: set it to 12,
+ * persist an allocation summing to 90, tighten back to 0.5, and a legally written reference
+ * suddenly reads as corrupt. The band would then be narrower than the rule that accepted the
+ * value, which is the whole thing it exists to prevent.
+ *
+ * So the invariant is CLOSED AT THE BOOT rather than argued about: a tolerance wider than
+ * this is not a loose tolerance, it is the absence of one. Five points means the schema would
+ * accept anything from 95 to 105; the shipped value is 0.5.
+ *
+ * ── AND IT IS THE FLOOR UNDER THE CASH FLOOR, TOO ──────────────────────────────────
+ *
+ * The same number bounds `caps.minCashPercent`, because the two questions turn out to be
+ * one. An allocation reaching the clamp sums to some S, and S is only ever guaranteed to be
+ * `100 − band`: the schema accepts a proposal within its tolerance of 100, and a stored
+ * intention is accepted within this band. The cash-floor pass then scales the coins by
+ * `(S − minCashPercent) / coinTotal`, so the scale is positive if and only if
+ * `minCashPercent < S`.
+ *
+ * Bounding the floor to `100 − band` therefore makes "the clamp cannot drive a positive line
+ * to zero" TRUE BY CONSTRUCTION rather than true by arithmetic that happens to hold when the
+ * total lands on exactly 100. It matters well beyond tidiness: `resolveIntentAllocation`
+ * reads a line that is flat in the applied target while the proposal holds weight as a
+ * PEAK STOP. Let the cash floor zero a line and that reading becomes wrong — a clamped line
+ * would be reconstructed as stopped, and the model's intention for it would be lost for good.
  */
-function validateExecutionConfig(cfg: ExecutionConfig): void {
+export const ALLOCATION_CORRUPTION_BAND_PERCENT = 5;
+
+/**
+ * Fails fast on an incoherent execution config so the risk wrapper's invariants hold BY
+ * CONSTRUCTION rather than by luck.
+ *
+ * THE CASH FLOOR AND THE ZERO SCALE — corrected here, because the previous version of this
+ * comment was wrong in a way that propagated. It read: "the cash-floor pass can only produce
+ * a negative scale when `minCashPercent >= 100`, since the allocation sums to 100". The
+ * allocation does NOT sum to 100. It sums to S, anywhere inside the tolerance the schema
+ * accepts — 99.5 is a perfectly legal proposal today.
+ *
+ * The scale is `(S − minCashPercent) / coinTotal`, so it collapses to zero as soon as
+ * `minCashPercent >= S`, and EVERY positive coin line is written to exactly zero. With the
+ * old bound alone, a floor of 99.6 against a proposal summing to 99.5 was a legal
+ * configuration that did precisely that.
+ *
+ * That is not merely a strange allocation. `resolveIntentAllocation` reads "flat in the
+ * applied target, positive in the proposal" as a PEAK STOP, so a cash-floor zeroing would be
+ * reconstructed as a stop and the model's intention for those lines would be destroyed —
+ * silently, and permanently as far as a later policy relaxation is concerned. So the floor is
+ * bounded BELOW the smallest total any allocation can carry into the clamp
+ * (`100 − ALLOCATION_CORRUPTION_BAND_PERCENT`), which makes a zero scale unreachable instead
+ * of unlikely.
+ *
+ * The bound is deliberately not `100 − allocationTolerancePercent`, even though that is the
+ * tighter statement for a model proposal: a stored intention is admitted at the wider
+ * corruption band, so the band is the binding case. `validateDecisionConfig` keeps the
+ * tolerance at or under the band, which is what lets one number stand for both.
+ */
+export function validateExecutionConfig(cfg: ExecutionConfig): void {
   const { startingCapitalUsd, feePercent, caps } = cfg;
   const problems: string[] = [];
   if (!(startingCapitalUsd > 0)) {
@@ -597,8 +651,14 @@ function validateExecutionConfig(cfg: ExecutionConfig): void {
   if (!(cfg.minMovementPercent > 0 && cfg.minMovementPercent < 100)) {
     problems.push(`minMovementPercent must be in (0, 100) (got ${cfg.minMovementPercent})`);
   }
-  if (!(caps.minCashPercent > 0 && caps.minCashPercent < 100)) {
-    problems.push(`caps.minCashPercent must be in (0, 100) (got ${caps.minCashPercent})`);
+  const cashCeiling = 100 - ALLOCATION_CORRUPTION_BAND_PERCENT;
+  if (!(caps.minCashPercent > 0 && caps.minCashPercent < cashCeiling)) {
+    problems.push(
+      `caps.minCashPercent must be in (0, ${cashCeiling}) (got ${caps.minCashPercent}) — at or ` +
+        'above that, an allocation legally summing to less than 100 makes the cash-floor scale ' +
+        'collapse to zero and writes every coin line flat, which the intention resolver would ' +
+        'then read as a peak stop',
+    );
   }
   if (!(caps.defaultPerAsset >= 0 && caps.defaultPerAsset <= 100)) {
     problems.push(`caps.defaultPerAsset must be in [0, 100] (got ${caps.defaultPerAsset})`);
@@ -690,12 +750,34 @@ validateSchedulerConfig(config.scheduler);
  * its trace — which is the one place this codebase refuses to be sloppy. Asserted at
  * STARTUP, with the env overrides (MAX_CYCLE_SECONDS) in scope, rather than discovered at
  * runtime on the one cycle that needed the retry. Exported for the offline test.
+ *
+ * It also bounds `allocationTolerancePercent`, which is not a timing concern but belongs to
+ * the same startup gate: an unbounded tolerance is what would let the intention pipeline's
+ * corruption band become narrower than the rule that accepted a stored reference. See
+ * ALLOCATION_CORRUPTION_BAND_PERCENT above.
  */
-export function validateDecisionTimingConfig(
+
+export function validateDecisionConfig(
   decision: DecisionConfig,
   scheduler: SchedulerConfig,
 ): void {
   const problems: string[] = [];
+  // Bounded at BOTH ends, and the upper one is load-bearing rather than cosmetic — see
+  // ALLOCATION_CORRUPTION_BAND_PERCENT. A tolerance above the corruption band lets a legally
+  // stored allocation become unreadable the day someone tightens it back.
+  if (
+    !(
+      Number.isFinite(decision.allocationTolerancePercent) &&
+      decision.allocationTolerancePercent > 0 &&
+      decision.allocationTolerancePercent <= ALLOCATION_CORRUPTION_BAND_PERCENT
+    )
+  ) {
+    problems.push(
+      `allocationTolerancePercent must be in (0, ${ALLOCATION_CORRUPTION_BAND_PERCENT}] ` +
+        `(got ${decision.allocationTolerancePercent}) — a tolerance wider than the corruption ` +
+        'band would let a legally stored reference read as corrupt once it is tightened back',
+    );
+  }
   if (!(decision.attemptTimeoutSeconds > 0)) {
     problems.push(`attemptTimeoutSeconds must be > 0 (got ${decision.attemptTimeoutSeconds})`);
   }
@@ -716,7 +798,7 @@ export function validateDecisionTimingConfig(
   }
 }
 
-validateDecisionTimingConfig(config.decision, config.scheduler);
+validateDecisionConfig(config.decision, config.scheduler);
 
 /**
  * Fails fast when the outage observability could push a cycle into the watchdog.

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { Decimal } from '../money.js';
 import {
   resolveCoherenceGuard,
-  validateDecisionTimingConfig,
+  validateDecisionConfig,
   config,
   type AppConfig,
   type DecisionConfig,
@@ -20,6 +20,7 @@ import {
   type CoherenceInput,
   type CoherenceRule,
 } from '../decision/coherence.js';
+import { restateIntentReference } from '../decision/intentReference.js';
 import type { Movement } from '../execution/movements.js';
 import type { PositionNote } from '../decision/schema.js';
 
@@ -63,11 +64,12 @@ const movement = (asset: string, side: 'buy' | 'sell' = 'sell', fullExit = false
 const input = (over: Partial<CoherenceInput> = {}): CoherenceInput => ({
   strategy: 'v5',
   actionType: 'hold',
-  effectiveTarget: { ...REFERENCE },
-  referenceTarget: { ...REFERENCE },
-  // The shipped policy by default; the cap-change cases override it with a synthetic one.
-  riskPolicy: config,
+  intentTarget: { ...REFERENCE },
+  intentReference: { ...REFERENCE },
   movements: [],
+  // No standing plan by default: the previous intention already executed, so replaying it
+  // against today's book produces nothing. The rule-2 cases that need one pass it in.
+  previousIntentMovements: [],
   reserveAsset: 'USDT',
   notes: [],
   assetsWithStoredThesis: new Set<string>(),
@@ -87,7 +89,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // target to the VALUATION would reject every hold the bot ever makes.
   ok(
     'the guard never looks at the book valuation, only at the previous target',
-    checkCoherence(input({ effectiveTarget: { ...REFERENCE } })).ok,
+    checkCoherence(input({ intentTarget: { ...REFERENCE } })).ok,
   );
 }
 
@@ -96,13 +98,13 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
 {
   // The 946 / 948 / 957 shape, one point of BNB.
   const moved = input({
-    effectiveTarget: { ...REFERENCE, BNB: 11, USDT: 44 },
+    intentTarget: { ...REFERENCE, BNB: 11, USDT: 44 },
   });
   ok('a hold that moved the target is rejected', rules(moved).includes('hold_moved_target'));
 
   ok(
     'a NON-hold that moves the target is not rejected by rule 1',
-    !rules(input({ actionType: 'rebalance', effectiveTarget: { ...REFERENCE, BNB: 11, USDT: 44 }, movements: [movement('BNB')], notes: [note('BNB')] })).includes(
+    !rules(input({ actionType: 'rebalance', intentTarget: { ...REFERENCE, BNB: 11, USDT: 44 }, movements: [movement('BNB')], notes: [note('BNB')] })).includes(
       'hold_moved_target',
     ),
   );
@@ -110,25 +112,44 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // No reference at all — the very first decision on record. Nothing to have modified.
   ok(
     'a hold with no reference target at all is not rejected (the first decision ever)',
-    checkCoherence(input({ referenceTarget: null, effectiveTarget: { BTC: 30, USDT: 70 } })).ok,
+    checkCoherence(input({ intentReference: null, intentTarget: { BTC: 30, USDT: 70 } })).ok,
   );
 
   // Float noise must not read as intent. A deliberate move is points, not hundredths.
   ok(
     'a re-emitted target with float noise is the same target',
-    checkCoherence(input({ effectiveTarget: { ...REFERENCE, BTC: 25.001 } })).ok,
+    checkCoherence(input({ intentTarget: { ...REFERENCE, BTC: 25.001 } })).ok,
   );
   ok(
     'half a point IS a change and is caught',
-    rules(input({ effectiveTarget: { ...REFERENCE, BTC: 25.5, USDT: 42.5 } })).includes('hold_moved_target'),
+    rules(input({ intentTarget: { ...REFERENCE, BTC: 25.5, USDT: 42.5 } })).includes('hold_moved_target'),
   );
 
-  // THE UNIVERSE-CHANGE FALSE POSITIVE. A pair can drop out of the tradable universe
-  // between two wake-ups (a dead feed). The target then legitimately omits that key, and
-  // comparing over the UNION would read the code's own universe change as the model
-  // changing its mind — rejecting every hold for as long as the feed stayed down.
+  // THE UNIVERSE-CHANGE FALSE POSITIVE, now proven END TO END — the restatement pipeline
+  // feeding the guard, which is the composition production runs.
+  //
+  // A pair can drop out of the tradable universe between two wake-ups (a dead feed). The
+  // target then legitimately omits that key, and comparing over the UNION would read the
+  // code's own universe change as the model changing its mind — rejecting every hold for
+  // as long as the feed stayed down.
+  //
+  // The guard itself no longer restates anything: `restateIntentReference` is the single
+  // entry point, and passing it a raw reference is now the caller's job. Testing the two
+  // together is deliberate — the property that matters is not "the pipeline drops a key",
+  // it is "an honest hold survives a dead feed".
+  const restated = (
+    reference: Record<string, number>,
+    universe: readonly string[],
+  ): Record<string, number> => {
+    const result = restateIntentReference({ reference, universe, reserveAsset: 'USDT', policy: config });
+    assert.ok(result.ok, 'the restatement must succeed on a legal allocation');
+    return result.ok ? result.value.intent : {};
+  };
+  const SHRUNK_UNIVERSE = ['BTC', 'ETH', 'BNB', 'USDT'];
+
   const shrunk = input({
-    effectiveTarget: { BTC: 25, ETH: 20, BNB: 12, USDT: 43 }, // XRP (at 0) gone
+    intentReference: restated(REFERENCE, SHRUNK_UNIVERSE),
+    intentTarget: { BTC: 25, ETH: 20, BNB: 12, USDT: 43 }, // XRP (at 0) gone
   });
   ok('an asset leaving the universe is not the model changing its mind', checkCoherence(shrunk).ok);
 
@@ -141,8 +162,8 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // would die on every cycle for as long as the feed stayed down.
   const heldReference = { BTC: 25, ETH: 20, BNB: 12, XRP: 8, USDT: 35 };
   const feedLost = input({
-    referenceTarget: heldReference,
-    effectiveTarget: { BTC: 25, ETH: 20, BNB: 12, USDT: 43 }, // XRP's 8 parked in cash
+    intentReference: restated(heldReference, SHRUNK_UNIVERSE),
+    intentTarget: { BTC: 25, ETH: 20, BNB: 12, USDT: 43 }, // XRP's 8 parked in cash
   });
   ok(
     'a dropped feed whose line held real weight still reads as a hold',
@@ -150,14 +171,14 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   );
 
   // But reassigning that orphaned weight into a COIN is a real allocation decision, and a
-  // `hold` claiming otherwise is still caught. The normalisation absolves the forced move
-  // to cash, not every redistribution.
+  // `hold` claiming otherwise is still caught. The restatement absolves the forced move to
+  // cash, not every redistribution.
   ok(
     'parking the orphaned weight in a coin instead of cash is still a decision',
     rules(
       input({
-        referenceTarget: heldReference,
-        effectiveTarget: { BTC: 33, ETH: 20, BNB: 12, USDT: 35 }, // XRP's 8 → BTC
+        intentReference: restated(heldReference, SHRUNK_UNIVERSE),
+        intentTarget: { BTC: 33, ETH: 20, BNB: 12, USDT: 35 }, // XRP's 8 → BTC
       }),
     ).includes('hold_moved_target'),
   );
@@ -169,7 +190,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // 946 again, from the other angle: the target moved AND no order can come of it.
   const inexecutable = input({
     actionType: 'rebalance',
-    effectiveTarget: { ...REFERENCE, BNB: 11, USDT: 44 },
+    intentTarget: { ...REFERENCE, BNB: 11, USDT: 44 },
     movements: [],
     notes: [],
   });
@@ -183,7 +204,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
     !rules(
       input({
         actionType: 'rebalance',
-        effectiveTarget: { ...REFERENCE, BNB: 8, USDT: 47 },
+        intentTarget: { ...REFERENCE, BNB: 8, USDT: 47 },
         movements: [movement('BNB')],
         notes: [note('BNB')],
       }),
@@ -208,7 +229,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // the decision, trade only BTC, and silently discard the intent.
   const unrelated = input({
     actionType: 'rebalance',
-    effectiveTarget: { ...REFERENCE, BNB: 11, USDT: 44 }, // one point — under the floor
+    intentTarget: { ...REFERENCE, BNB: 11, USDT: 44 }, // one point — under the floor
     movements: [movement('BTC', 'buy')], // BTC drifted; BTC's target did NOT move
     notes: [note('BTC')],
     assetsWithStoredThesis: new Set(['BTC']),
@@ -224,7 +245,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // reject every legitimate rebalance the bot ever makes.
   const realTrim = input({
     actionType: 'de_risk',
-    effectiveTarget: { ...REFERENCE, BNB: 8, USDT: 47 }, // BNB -4, USDT +4
+    intentTarget: { ...REFERENCE, BNB: 8, USDT: 47 }, // BNB -4, USDT +4
     movements: [movement('BNB')], // only BNB trades; USDT never does
     notes: [note('BNB')],
     assetsWithStoredThesis: new Set(['BNB']),
@@ -236,7 +257,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // documented, measured residual of the 2% floor, not an incoherence.
   const withResidual = input({
     actionType: 'de_risk',
-    effectiveTarget: { ...REFERENCE, BNB: 6, ETH: 19, USDT: 50 },
+    intentTarget: { ...REFERENCE, BNB: 6, ETH: 19, USDT: 50 },
     movements: [movement('BNB')], // ETH's one point stays under the floor
     notes: [note('BNB')],
     assetsWithStoredThesis: new Set(['BNB']),
@@ -277,7 +298,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
     checkCoherence(
       input({
         actionType: 'rebalance',
-        effectiveTarget: { ...REFERENCE, BNB: 8, USDT: 47 },
+        intentTarget: { ...REFERENCE, BNB: 8, USDT: 47 },
         movements: [movement('BNB')],
         notes: [note('BNB')],
         assetsWithStoredThesis: new Set(['BNB']),
@@ -291,7 +312,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
 {
   const silent = input({
     actionType: 'rebalance',
-    effectiveTarget: { ...REFERENCE, BNB: 8, USDT: 47 },
+    intentTarget: { ...REFERENCE, BNB: 8, USDT: 47 },
     movements: [movement('BNB')],
     notes: [],
     assetsWithStoredThesis: new Set(['BNB']),
@@ -303,7 +324,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // contractually about to discard.
   const exit = input({
     actionType: 'rotate',
-    effectiveTarget: { ...REFERENCE, XRP: 0 },
+    intentTarget: { ...REFERENCE, XRP: 0 },
     movements: [movement('XRP', 'sell', true)],
     notes: [],
   });
@@ -332,7 +353,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   const v4Move = input({
     strategy: 'v4',
     actionType: 'rebalance',
-    effectiveTarget: { ...REFERENCE, BNB: 8, USDT: 47 },
+    intentTarget: { ...REFERENCE, BNB: 8, USDT: 47 },
     movements: [movement('BNB')],
     notes: [], // v4 CANNOT produce notes — the schema has no such field
     assetsWithStoredThesis: new Set(['BNB']),
@@ -347,7 +368,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
         // A buy: the line whose target moved is the line that trades. (Moving BNB's
         // target while BTC is what trades is a DIFFERENT decision, and rule 2 rejects
         // it under v4 exactly as it does under v5 — that rule is strategy-agnostic.)
-        effectiveTarget: { ...REFERENCE, BTC: 31, USDT: 37 },
+        intentTarget: { ...REFERENCE, BTC: 31, USDT: 37 },
         movements: [movement('BTC', 'buy')],
       }).ok,
   );
@@ -356,7 +377,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // target that cannot produce an order, are incoherent under any mandate.
   ok(
     'v4: rule 1 stays armed',
-    rules(input({ strategy: 'v4', effectiveTarget: { ...REFERENCE, BNB: 11, USDT: 44 } })).includes(
+    rules(input({ strategy: 'v4', intentTarget: { ...REFERENCE, BNB: 11, USDT: 44 } })).includes(
       'hold_moved_target',
     ),
   );
@@ -366,7 +387,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
       input({
         strategy: 'v4',
         actionType: 'rebalance',
-        effectiveTarget: { ...REFERENCE, BNB: 11, USDT: 44 },
+        intentTarget: { ...REFERENCE, BNB: 11, USDT: 44 },
         movements: [],
       }),
     ).includes('target_not_executable'),
@@ -377,7 +398,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
 
 {
   const both = input({
-    effectiveTarget: { ...REFERENCE, BNB: 11, USDT: 44 },
+    intentTarget: { ...REFERENCE, BNB: 11, USDT: 44 },
     notes: [note('ETH')],
     assetsWithStoredThesis: new Set(['ETH']),
   });
@@ -486,7 +507,7 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   });
 
   // The shipped values must fit, or the assertion below is theatre.
-  validateDecisionTimingConfig(config.decision, config.scheduler);
+  validateDecisionConfig(config.decision, config.scheduler);
   ok(
     'the shipped timing fits the cycle budget with room to spare',
     2 * config.decision.attemptTimeoutSeconds + config.decision.retryReserveSeconds <=
@@ -497,18 +518,18 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   // otherwise be force-exited by the watchdog MID-EXECUTION — after a booking, possibly
   // before its trace.
   assert.throws(
-    () => validateDecisionTimingConfig(decision(140, 45), scheduler(300)),
+    () => validateDecisionConfig(decision(140, 45), scheduler(300)),
     /must fit inside maxCycleSeconds/,
     'two attempts that overflow the budget must fail the boot',
   );
   assert.throws(
-    () => validateDecisionTimingConfig(decision(90, 0), scheduler(300)),
+    () => validateDecisionConfig(decision(90, 0), scheduler(300)),
     /retryReserveSeconds must be > 0/,
     'a zero post-decision reserve must fail the boot',
   );
   // And it must react to the MAX_CYCLE_SECONDS override, not just to the default.
   assert.throws(
-    () => validateDecisionTimingConfig(decision(90, 45), scheduler(120)),
+    () => validateDecisionConfig(decision(90, 45), scheduler(120)),
     /must fit inside maxCycleSeconds/,
     'a shrunk cycle budget must fail the boot too',
   );
@@ -516,19 +537,160 @@ const rules = (i: CoherenceInput): CoherenceRule[] => checkCoherence(i).violatio
   passed += 1;
 }
 
-/* ── The reference, normalised under the CURRENT risk policy ──────────────────
+
+/* ── Rule 2, THE TWO CONTRADICTORY TESTS ─────────────────────────────────────
  *
- * The reference is a stored `applied_allocation`, bounded by the caps of its day. The
- * candidate is bounded by today's. Let a deployment tighten a cap and the two stop living
- * in the same coordinate system — and the failure is not a bad verdict, it is an
- * INTERLOCK: every hold is rejected for "moving" the target, no `decided` row is written,
- * the reference never advances, and the risk-mandated reduction never executes.
+ * Rule 2 has refused exactly once in the bot's entire history (decision 1072, 03/08,
+ * recovered on the retry), and the response that was refused is not even replayable —
+ * `raw_response` keeps the CORRECTED answer, not the rejected one. So the rule is not
+ * validated by measurement, and it never will be at this rate. It holds by its invariant.
  *
- * So the bar these cases hold is deliberately higher than "does not crash": the cycle must
- * be ACCEPTED, and the chain must keep advancing over several cycles.
+ * An invariant that only one test defends is not defended. A single test pins one side of
+ * the boundary and says nothing about the other: a rule that accepts EVERYTHING passes the
+ * "must accept" test, a rule that refuses everything passes the "must refuse" test. So both
+ * sides are pinned here, deliberately as a pair, and each one names the mutation it kills.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+{
+  // ── TOO PERMISSIVE — the test that fails if the counterfactual becomes an escape hatch.
+  //
+  // The 946 shape, replayed under the new rule: BNB moves by one point, and NEITHER plan
+  // can touch it — the new target sits one point from the book, the standing intention
+  // sits ON the book. One point of a ~$1000 book is ~$10, under the 2% floor, in both
+  // directions. Nothing about this decision can reach the book, so it must be refused.
+  //
+  // This is the case that dies if rule 2 is weakened to "accept whenever a previous plan
+  // exists", or to "accept whenever anything at all moves this cycle".
+  const voidChange = input({
+    actionType: 'rebalance',
+    intentTarget: { ...REFERENCE, BNB: 11, USDT: 44 },
+    movements: [],
+    previousIntentMovements: [],
+  });
+  ok(
+    'too permissive: a change neither plan can execute is still REFUSED',
+    rules(voidChange).includes('target_not_executable'),
+  );
+
+  // And it stays refused when the cycle trades something ELSE. An unrelated drift order on
+  // BTC is not the decision the model just wrote, and counting it would silently discard
+  // the BNB intent while reporting success.
+  ok(
+    'too permissive: an unrelated drift order does not rescue it',
+    rules({
+      ...voidChange,
+      movements: [movement('BTC', 'buy')],
+      previousIntentMovements: [movement('BTC', 'buy')],
+      notes: [note('BTC')],
+      assetsWithStoredThesis: new Set(['BTC']),
+    }).includes('target_not_executable'),
+  );
+}
+
+{
+  // ── TOO STRICT — the test that fails if rule 2 keeps judging on the new plan alone.
+  //
+  // THE CANCELLATION. The standing intention wants BNB at 20% while the book holds 12%;
+  // the transition gate refused that vector, so the buy never executed and the intention
+  // is still standing. The model now withdraws it and re-emits 12% — the weight the book
+  // actually holds. The new plan produces NOTHING on BNB, because 12% is where the line
+  // already is.
+  //
+  // Judged on the new plan alone that reads as void and is refused, which would trap the
+  // model inside a plan the gate will not let through: it cannot execute the 20%, and it
+  // is not allowed to withdraw it either. Judged in counterfactual it is exactly what it
+  // is — a decision that cancels a pending order, which reaches the book as surely as one
+  // that places a new one.
+  const withdrawal = input({
+    actionType: 'rebalance',
+    intentReference: { ...REFERENCE, BNB: 20, USDT: 35 },
+    intentTarget: { ...REFERENCE }, // back to BNB 12 — where the book already sits
+    movements: [], // nothing to do: the book is already at 12%
+    previousIntentMovements: [movement('BNB', 'buy')], // ...but the standing plan WOULD have bought
+  });
+  ok(
+    'too strict: withdrawing a standing plan the gate refused is ACCEPTED',
+    checkCoherence(withdrawal).ok,
+  );
+
+  // The proof that the acceptance comes from the counterfactual and not from somewhere
+  // else: drop the standing plan and the very same decision is refused again.
+  ok(
+    'and without a standing plan to cancel, the identical decision IS refused',
+    rules({ ...withdrawal, previousIntentMovements: [] }).includes('target_not_executable'),
+  );
+
+  // The counterfactual is read PER LINE, not as a global "something was pending". A
+  // standing plan on ETH says nothing about whether the BNB change can reach the book.
+  ok(
+    'a standing plan on ANOTHER line does not rescue an unexecutable change',
+    rules({ ...withdrawal, previousIntentMovements: [movement('ETH', 'buy')] }).includes(
+      'target_not_executable',
+    ),
+  );
+}
+
+{
+  // ── THE BOUNDARY BETWEEN THE TWO, pinned because the review argued for moving it.
+  //
+  // Codex proposed restricting the counterfactual to a FULL cancellation back to the book,
+  // on the grounds that a partial withdrawal leaves an intention that is itself
+  // unexecutable. The case: the book holds BNB at 12%, the standing intention the gate
+  // refused wants 15% (an executable 3-point buy), and the model now says 13% — one point
+  // above the book, suppressed by the floor.
+  //
+  // IT IS ACCEPTED, deliberately, and the argument is what rule 2 actually asks. The
+  // question is not "is the new intention reachable on its own" — it is "does this line's
+  // fate differ because of the decision". It does: without this cycle a 3-point buy fires,
+  // with it nothing does. Cancelling an order is reaching the book, and a de-escalation the
+  // gate has already blocked is exactly the decision the model must be allowed to make.
+  // Demanding a full retreat to the book would refuse it and re-trap the model inside a
+  // plan it can neither execute nor withdraw — the failure the "too strict" case above
+  // exists to prevent.
+  const partialWithdrawal = input({
+    actionType: 'rebalance',
+    intentReference: { ...REFERENCE, BNB: 15, USDT: 40 },
+    intentTarget: { ...REFERENCE, BNB: 13, USDT: 42 }, // one point above the book at 12
+    movements: [], // the 1-point buy is under the floor
+    previousIntentMovements: [movement('BNB', 'buy')], // the 3-point buy was not
+  });
+  ok('a PARTIAL withdrawal of a refused plan is accepted too', checkCoherence(partialWithdrawal).ok);
+
+  // AND THE PERMISSIVENESS IS EXACTLY ONE CYCLE WIDE, which is the half of the argument
+  // that actually needed evidence. Next cycle the reference is 13 and the book is still 12,
+  // so the standing plan is sub-floor as well — both plans are void and the guard bites. The
+  // intention cannot be walked away from the book one sub-floor step at a time.
+  ok(
+    'and the NEXT sub-floor nibble is refused — the intention cannot drift step by step',
+    rules(
+      input({
+        actionType: 'rebalance',
+        intentReference: { ...REFERENCE, BNB: 13, USDT: 42 },
+        intentTarget: { ...REFERENCE, BNB: 14, USDT: 41 },
+        movements: [],
+        previousIntentMovements: [], // 13 against a book at 12 is itself under the floor
+      }),
+    ).includes('target_not_executable'),
+  );
+}
+
+/* ── RULE 1 IS POLICY-INVARIANT — the defect this PR closes, both directions ───
  *
- * The synthetic policies below never touch the real configuration — they are spreads over
- * it, built per case.
+ * Rule 1 asks whether the model changed its mind. Its two operands are raw, unclamped
+ * intentions, so no cap and no cash floor appears anywhere in its verdict. That is not a
+ * convenience — it is what makes BOTH failure directions impossible at once:
+ *
+ *   TIGHTENED  (closed by PR #28, and it must stay closed) a reference bounded at 35 was
+ *              compared against a candidate the clamp now holds at 30. Every hold was
+ *              rejected, no `decided` row was written, the reference never advanced, and
+ *              the risk-mandated reduction never executed. An interlock, not a bad verdict.
+ *   RELAXED    (the case this PR closes) a reference bounded at 35 under a ceiling that has
+ *              since been raised to 40. The model re-emits its unchanged 40% ask, the guard
+ *              reads a moved target, and the first attempt is rejected — every cycle, for
+ *              as long as the model keeps asking.
+ *
+ * The cases below run the guard under synthetic policies built as spreads over the shipped
+ * config. They never mutate the real one.
  * ──────────────────────────────────────────────────────────────────────────── */
 
 /** The shipped config with some caps replaced. Never mutates the real one. */
@@ -545,87 +707,111 @@ const withCaps = (perAsset: Record<string, number>, minCashPercent?: number): Ap
 });
 
 {
-  // A CAP TIGHTENED BELOW THE LAST APPLIED TARGET. The stored reference held BTC at 35%,
-  // which was that day's cap; today's cap is 30%. The model re-emits its unchanged
-  // proposal, the clamp bounds it to 30%, and the guard must accept the hold — the book
-  // pursued the same bounded allocation, and the 35% it is compared against is a number
-  // the policy no longer permits anyone to hold.
-  const policy = withCaps({ BTC: 30 });
-  const storedReference = { BTC: 35, ETH: 20, BNB: 12, XRP: 0, USDT: 33 };
-  const candidate = clampAllocation({ BTC: 40, ETH: 20, BNB: 12, XRP: 0, USDT: 28 }, 'USDT', policy).applied;
+  // THE RELAXED CASE, reproduced. The model has been asking for BTC 40 all along; the cap
+  // was 35, so the chain applied 35. The cap is raised to 40 today.
+  const relaxed = withCaps({ BTC: 40 });
+  const rawAsk = { BTC: 40, ETH: 18, BNB: 12, XRP: 0, USDT: 30 };
 
-  assert.equal(candidate.BTC, 30, 'the candidate is bounded by the new cap');
+  // What the OLD reference would have been — the applied allocation of that day, bounded
+  // at 35. Kept here to state precisely what changed.
+  const oldStyleReference = clampAllocation(rawAsk, 'USDT', withCaps({ BTC: 35 })).applied;
+  assert.equal(oldStyleReference.BTC, 35, 'the stored applied target was bounded at the old cap');
+
   const verdict = checkCoherence(
-    input({ actionType: 'hold', effectiveTarget: candidate, referenceTarget: storedReference, riskPolicy: policy }),
+    input({ actionType: 'hold', intentReference: { ...rawAsk }, intentTarget: { ...rawAsk } }),
   );
-  ok('a hold under a tightened cap is ACCEPTED, not merely non-fatal', verdict.ok);
-  ok('and it reports no violation at all', verdict.violations.length === 0);
+  ok('relaxed cap: the unchanged 40% ask is a HOLD and is accepted on the first attempt', verdict.ok);
+  ok('relaxed cap: no violation at all, so no retry is consumed', verdict.violations.length === 0);
 
-  // The proof that this is the normalisation and not an accident: with the OLD policy in
-  // force, the very same operands are a genuine move and are correctly rejected.
-  const underOldPolicy = checkCoherence(
-    input({
-      actionType: 'hold',
-      effectiveTarget: candidate,
-      referenceTarget: storedReference,
-      riskPolicy: config,
-    }),
+  // And the clamp does now let the weight through, which is the point of raising the cap.
+  assert.equal(
+    clampAllocation(rawAsk, 'USDT', relaxed).applied.BTC,
+    40,
+    'the relaxed policy applies the full 40%',
   );
+
+  // THE MIRROR that makes the assertion above non-vacuous: judged the OLD way — bounded
+  // reference against bounded candidate — the same cycle is rejected.
   ok(
-    'under the unchanged policy the same 35 → 30 IS a moved target, and is rejected',
-    !underOldPolicy.ok && rules(input({
-      actionType: 'hold',
-      effectiveTarget: candidate,
-      referenceTarget: storedReference,
-      riskPolicy: config,
-    })).includes('hold_moved_target'),
+    'relaxed cap: judged against the old BOUNDED reference, the identical cycle IS rejected',
+    rules(
+      input({
+        actionType: 'hold',
+        intentReference: oldStyleReference,
+        intentTarget: clampAllocation(rawAsk, 'USDT', relaxed).applied,
+      }),
+    ).includes('hold_moved_target'),
   );
   passed += 1;
 }
 
 {
-  // THE CASH FLOOR DOES IT TOO. Raising the sacred reserve rescales every coin, so a
-  // reference written under a 30% floor is unreachable under a 50% one — the same
-  // interlock through a different door, which is why normalisation goes through the real
-  // clamp rather than re-implementing "cap each asset".
-  const policy = withCaps({}, 50);
-  const candidate = clampAllocation({ ...REFERENCE }, 'USDT', policy).applied;
+  // THE TIGHTENED CASE — PR #28's closure, which must not regress. Same operands, cap
+  // moved the other way: 35 → 30. Raw against raw, the model has not changed its mind and
+  // the hold is accepted, exactly as #28 made it.
+  const rawAsk = { BTC: 40, ETH: 18, BNB: 12, XRP: 0, USDT: 30 };
+  const tightened = withCaps({ BTC: 30 });
 
-  assert.equal(candidate.USDT, 50, 'the floor was raised and the coins rescaled');
-  assert.ok((candidate.BTC ?? 0) < 25, 'BTC no longer fits at its old weight');
+  assert.equal(
+    clampAllocation(rawAsk, 'USDT', tightened).applied.BTC,
+    30,
+    'the tightened policy bounds the same ask to 30',
+  );
   ok(
-    'a hold under a raised cash floor is accepted',
+    'tightened cap: the hold is still accepted (PR #28 stays closed)',
     checkCoherence(
-      input({ actionType: 'hold', effectiveTarget: candidate, referenceTarget: { ...REFERENCE }, riskPolicy: policy }),
+      input({ actionType: 'hold', intentReference: { ...rawAsk }, intentTarget: { ...rawAsk } }),
     ).ok,
+  );
+
+  // THE CASH FLOOR DOES IT TOO. Raising the sacred reserve rescales every coin, so a
+  // reference written under a 30% floor was unreachable under a 50% one — the same
+  // interlock through a different door. Raw-against-raw does not notice either.
+  const raisedFloor = withCaps({}, 50);
+  assert.equal(
+    clampAllocation({ ...REFERENCE }, 'USDT', raisedFloor).applied.USDT,
+    50,
+    'the floor was raised and the coins rescaled',
+  );
+  ok(
+    'raised cash floor: the hold is still accepted',
+    checkCoherence(input({ actionType: 'hold' })).ok,
   );
   passed += 1;
 }
 
 {
   // THE CHAIN KEEPS ADVANCING. One accepted cycle proves the rejection is gone; it does
-  // not prove the reference moves. So the chain is walked: each accepted cycle writes its
-  // applied allocation, the next cycle reads it back as the reference, and all of them
-  // must pass. If normalisation were not idempotent, cycle 2 or 3 would fail here.
-  const policy = withCaps({ BTC: 30 });
-  const rawProposal = { BTC: 40, ETH: 20, BNB: 12, XRP: 0, USDT: 28 };
+  // not prove the reference moves. So the chain is walked: each accepted cycle's INTENTION
+  // becomes the next cycle's reference, and all of them must pass — under a policy that
+  // changed direction halfway through, which is the scenario neither the tightened nor the
+  // relaxed case alone covers.
+  const rawAsk = { BTC: 40, ETH: 18, BNB: 12, XRP: 0, USDT: 30 };
   let reference: Record<string, number> = { BTC: 35, ETH: 20, BNB: 12, XRP: 0, USDT: 33 };
   const accepted: boolean[] = [];
   const references: string[] = [];
 
   for (let cycle = 0; cycle < 4; cycle += 1) {
-    const candidate = clampAllocation(rawProposal, 'USDT', policy).applied;
     const verdict = checkCoherence(
-      input({ actionType: 'hold', effectiveTarget: candidate, referenceTarget: reference, riskPolicy: policy }),
+      input({
+        // The first cycle genuinely changes its mind (35 → 40), so it is not labelled a
+        // hold; from the second on, the model re-emits the same ask and holds.
+        actionType: cycle === 0 ? 'rebalance' : 'hold',
+        intentReference: reference,
+        intentTarget: { ...rawAsk },
+        movements: cycle === 0 ? [movement('BTC', 'buy')] : [],
+        notes: cycle === 0 ? [note('BTC')] : [],
+        assetsWithStoredThesis: new Set(['BTC']),
+      }),
     );
     accepted.push(verdict.ok);
     references.push(JSON.stringify(reference));
-    // What production does with an accepted cycle: the applied allocation becomes the
-    // next reference.
-    if (verdict.ok) reference = candidate;
+    // What production does with an accepted cycle: its INTENTION becomes the next
+    // reference — never its bounded allocation.
+    if (verdict.ok) reference = { ...rawAsk };
   }
 
-  ok('four consecutive cycles under the tightened cap are all accepted', accepted.every(Boolean));
+  ok('four consecutive cycles across a policy change are all accepted', accepted.every(Boolean));
   ok(
     'and the reference actually ADVANCED off the stale value rather than standing still',
     references[0] !== references[1] && references[1] === references[3],
@@ -634,95 +820,81 @@ const withCaps = (perAsset: Record<string, number>, minCashPercent?: number): Ap
 }
 
 {
-  // EVERY RULE READS THE NORMALISED REFERENCE, rule 2 included.
+  // ── AND THE OTHER SIDE OF THAT BOUNDARY, argued a second time in review.
   //
-  // `referenceTarget` has exactly one consumer inside `checkCoherence` — the `reference`
-  // derivation — and rules 1 and 2 both read it from there (rules 3 and 4 are about theses
-  // and never touch it). This case demonstrates rule 2 specifically, because it is the one
-  // the brief asked about: `rebalance` keeps rule 1 out of the way, and a candidate that
-  // produces NO movement would trip `target_not_executable` if the reference were still
-  // the un-normalised 35%.
-  const policy = withCaps({ BTC: 30 });
-  const storedReference = { BTC: 35, ETH: 20, BNB: 12, XRP: 0, USDT: 33 };
-  const candidate = clampAllocation({ BTC: 40, ETH: 20, BNB: 12, XRP: 0, USDT: 28 }, 'USDT', policy).applied;
+  // Codex then proposed requiring the two counterfactual plans to genuinely DIFFER —
+  // comparing side and notional rather than mere presence — on the evidence that a cap can
+  // collapse both plans onto the same order. The case: the ceiling is 35, the standing
+  // intention is 40, the model now asks 45. Both clamp to 35, so against a book at 30 both
+  // plans hold the SAME buy, and the five-point intention change moves no order.
+  //
+  // IT IS ACCEPTED, and tightening it here would resurrect this PR's own defect wearing a
+  // different hat. Refuse the cycle and the retry tells the model to re-emit the reference;
+  // it drops back to 40, the intention never records the revision, and the model asks 45
+  // again next wake-up — ONE EXTRA CALL EVERY CYCLE, for as long as the ceiling binds and
+  // the model holds its view. That is precisely the treadmill the relaxed-cap case was
+  // written to remove, triggered from the other direction.
+  //
+  // What makes accepting it defensible rather than merely convenient: the line IS trading
+  // this cycle, toward the bound the policy allows, and the revised intention is not
+  // discarded — `intent_allocation` records it, unclamped, which is the entire point of a
+  // third column. A decision the caps absorb is not a decision nothing came of.
+  const policy = withCaps({ BTC: 35 });
+  const standing = { BTC: 40, ETH: 18, BNB: 12, XRP: 0, USDT: 30 };
+  const revised = { BTC: 45, ETH: 15, BNB: 10, XRP: 0, USDT: 30 };
 
-  const normalised = rules(
-    input({ actionType: 'rebalance', effectiveTarget: candidate, referenceTarget: storedReference, riskPolicy: policy, movements: [] }),
-  );
-  ok('rule 2 sees the normalised reference — no phantom move to be executable about', !normalised.includes('target_not_executable'));
+  // The premise, demonstrated rather than assumed: the ceiling collapses both asks onto
+  // the same bounded target, so the two plans really are the same order.
+  assert.equal(clampAllocation(standing, 'USDT', policy).applied.BTC, 35);
+  assert.equal(clampAllocation(revised, 'USDT', policy).applied.BTC, 35);
 
-  // The mirror, under the unchanged policy: the same inputs DO trip rule 2, which is what
-  // makes the assertion above meaningful rather than vacuous.
-  const unnormalised = rules(
-    input({ actionType: 'rebalance', effectiveTarget: candidate, referenceTarget: storedReference, riskPolicy: config, movements: [] }),
+  const capAbsorbed = input({
+    actionType: 'rebalance',
+    intentReference: standing,
+    intentTarget: revised,
+    // The same buy in both plans — the book is at 30 and both bounded targets are 35.
+    movements: [movement('BTC', 'buy')],
+    previousIntentMovements: [movement('BTC', 'buy')],
+    notes: [note('BTC')],
+    assetsWithStoredThesis: new Set(['BTC']),
+  });
+  ok('a revision the CAP absorbs is accepted, not refused', checkCoherence(capAbsorbed).ok);
+
+  // And the reason it must be: the refusal would repeat forever. Judged the strict way —
+  // "the plans must differ" — this identical cycle recurs every wake-up, because the retry
+  // can only walk the model back to the reference it just came from.
+  ok(
+    'the strict reading would refuse the same cycle again and again, one retry per wake-up',
+    capAbsorbed.movements.length > 0 &&
+      capAbsorbed.previousIntentMovements.length > 0 &&
+      capAbsorbed.movements[0]!.asset === capAbsorbed.previousIntentMovements[0]!.asset &&
+      capAbsorbed.movements[0]!.side === capAbsorbed.previousIntentMovements[0]!.side,
   );
-  ok('and it does fire when the reference genuinely is in another frame', unnormalised.includes('target_not_executable'));
-  passed += 1;
+
+  // The guarantee that keeps this from being a hole: a cap-absorbed revision is accepted
+  // only while the line is ACTUALLY TRADING. Put the book on its bounded target and both
+  // plans go empty — nothing reaches the line, and rule 2 refuses exactly as it should.
+  ok(
+    'but with the book already ON the bound, the same revision is refused',
+    rules({ ...capAbsorbed, movements: [], previousIntentMovements: [], notes: [] }).includes(
+      'target_not_executable',
+    ),
+  );
 }
 
 {
-  // A DROPPED FEED **AND** A POLICY CHANGE AT ONCE — the case where the orphaned key bites.
+  // NEUTRAL ON THE CORPUS — the property the replay proof rests on, stated locally.
   //
-  // `referenceInCurrentUniverse` transfers a vanished line's weight to cash. While the
-  // reference was only ever compared key-by-key that transfer could afford to be sloppy:
-  // `movedAssets` walks the TARGET's keys, so a key the target no longer has was never
-  // looked at, and leaving the ghost behind was invisible. Sending the restated reference
-  // through the clamp makes it visible — the ghost takes its own cap surplus and inflates
-  // the `coinTotal` the cash-floor pass scales by, so the reference gets a different
-  // scaling from the candidate and an honest hold is rejected until the feed returns.
-  const policy = withCaps({}, 50);
-  const storedReference = { BTC: 25, ETH: 20, BNB: 12, XRP: 8, USDT: 35 };
-  // XRP's feed died: the model must reassign its 8 points, and cash is the neutral place.
-  const rawProposal = { BTC: 25, ETH: 20, BNB: 12, USDT: 43 };
-  const candidate = clampAllocation(rawProposal, 'USDT', policy).applied;
-
-  ok(
-    'a hold survives a dropped feed and a raised cash floor arriving together',
-    checkCoherence(
-      input({ actionType: 'hold', effectiveTarget: candidate, referenceTarget: storedReference, riskPolicy: policy }),
-    ).ok,
-  );
-
-  // The same coincidence with a tightened per-asset cap rather than the floor.
-  const capPolicy = withCaps({ BTC: 20 });
-  ok(
-    'and the same with a tightened per-asset cap',
-    checkCoherence(
-      input({
-        actionType: 'hold',
-        effectiveTarget: clampAllocation(rawProposal, 'USDT', capPolicy).applied,
-        referenceTarget: storedReference,
-        riskPolicy: capPolicy,
-      }),
-    ).ok,
-  );
-
-  // And the guarantee that keeps the earlier rule intact: reassigning the orphaned weight
-  // into a COIN is still a real decision, cap change or not.
-  ok(
-    'parking the orphaned weight in a coin is still caught, even under a changed policy',
-    rules(
-      input({
-        actionType: 'hold',
-        effectiveTarget: clampAllocation({ BTC: 33, ETH: 20, BNB: 12, USDT: 35 }, 'USDT', policy).applied,
-        referenceTarget: storedReference,
-        riskPolicy: policy,
-      }),
-    ).includes('hold_moved_target'),
-  );
-  passed += 1;
-}
-
-{
-  // NEUTRAL WHILE THE POLICY HOLDS STILL — the property the corpus proof rests on.
-  // Clamping an already-bounded allocation under the same caps returns it unchanged, so
-  // normalisation cannot move a verdict on any of the 1083 recorded cycles.
+  // `applied_allocation` is byte-identical to `target_allocation` on all 1332 decided
+  // rows (0 clamps, 0 gate refusals as of 20/08), so swapping rule 1's reference from one
+  // column to the other cannot move a single historical verdict. That is what makes this
+  // change provable rather than argued.
   const alreadyBounded = clampAllocation({ ...REFERENCE }, 'USDT', config);
   assert.equal(alreadyBounded.clamped, false, 'the corpus reference is within the shipped caps');
   assert.deepEqual(
-    clampAllocation(alreadyBounded.applied, 'USDT', config).applied,
     alreadyBounded.applied,
-    'clamping is idempotent under an unchanged policy',
+    { ...REFERENCE },
+    'while the clamp never fires, the applied allocation IS the raw intention',
   );
   ok(
     'an unchanged hold is still accepted, exactly as before',
