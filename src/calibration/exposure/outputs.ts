@@ -96,6 +96,33 @@ export function gitIsDirty(): boolean | null {
   }
 }
 
+/**
+ * Is this file COMMITTED, with exactly this content, at HEAD?
+ *
+ * Compares the working file's blob hash to the one git has at HEAD. A digest the file
+ * computes about itself proves it was not edited AFTER being frozen; it proves nothing
+ * about it ever having BEEN frozen — regenerate the file and the digest regenerates with
+ * it. Only git can answer the temporal question.
+ *
+ * Null when git cannot answer, which callers must treat as a refusal rather than a pass.
+ */
+export function isCommittedAtHead(file: string): boolean | null {
+  try {
+    const relative = path.relative(process.cwd(), path.resolve(file)).split(path.sep).join('/');
+    const committed = execFileSync('git', ['rev-parse', `HEAD:${relative}`], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    const working = execFileSync('git', ['hash-object', file], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return committed.length > 0 && committed === working;
+  } catch {
+    return null;
+  }
+}
+
 export interface WrittenFile {
   file: string;
   sha256: string;

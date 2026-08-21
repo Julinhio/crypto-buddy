@@ -9,6 +9,7 @@ import {
   buildManifest,
   currentSourceTreeSha,
   gitIsDirty,
+  isCommittedAtHead,
   sha256Of,
   writeArtefact,
   type WrittenFile,
@@ -116,9 +117,10 @@ export function loadSelection(
    * only run on a clean checkout would silently stop asserting anything the moment a developer
    * had an edit in flight, which is precisely when a seal matters.
    */
-  env: { sourceTreeSha: string | null; dirty: boolean | null } = {
+  env: { sourceTreeSha: string | null; dirty: boolean | null; committed: boolean | null } = {
     sourceTreeSha: currentSourceTreeSha(),
     dirty: gitIsDirty(),
+    committed: file ? isCommittedAtHead(file) : null,
   },
 ): SelectionFile {
   if (!file || file.trim() === '') {
@@ -159,6 +161,27 @@ export function loadSelection(
    * A DIRTY source is refused too. `rev-parse` reads the committed tree, so uncommitted
    * engine edits would slip past a tree comparison while genuinely changing what runs.
    */
+  /*
+   * THE SELECTION MUST BE COMMITTED, with exactly this content.
+   *
+   * The decisions digest is SELF-COMPUTABLE: it proves the file was not edited after being
+   * written, and nothing at all about when it was written. An operator could look at the
+   * calibration results, regenerate or hand-write a selection, and hand it straight to
+   * validation — digest valid, bundle matching, seal defeated.
+   *
+   * `gitIsDirty()` cannot cover this either: it deliberately ignores `out/`, which is
+   * exactly where the selection is written. So the temporal seal rests on git having the
+   * file, at HEAD, byte for byte.
+   */
+  if (env.committed !== true) {
+    throw new SealBrokenError(
+      `the selection file "${file}" is not committed at HEAD with this exact content ` +
+        `(${env.committed === null ? 'git could not say' : 'it differs, or is untracked'}). ` +
+        'A decisions digest the file computes about itself proves it was not edited AFTER ' +
+        'freezing; only the commit proves it was frozen BEFORE the window was opened.',
+    );
+  }
+
   const currentTree = env.sourceTreeSha;
   if (parsed.source_tree_sha == null || currentTree == null) {
     throw new SealBrokenError(
@@ -310,6 +333,38 @@ export function validateConfiguration(
   };
 }
 
+/**
+ * THE ASYMMETRY'S THIRD CONDITION, which only the sealed window can judge.
+ *
+ * Calibration answers the first two (CAGR at least +1 pt, drawdown degraded by less than
+ * 2 pt). The third is out-of-sample and cumulative with them: the asymmetric variant's net
+ * return must be AT LEAST the symmetric one's.
+ *
+ * Judging each configuration only against its own witness would let an asymmetric variant
+ * be reported as passing while it underperformed the symmetric run it was supposed to beat —
+ * the two are pre-registered as a PAIR, and the pair is the comparison.
+ */
+export function enforceAsymmetryPairing(
+  verdicts: ValidationVerdict[],
+  configurations: readonly ValidableConfiguration[],
+): void {
+  const byName = new Map(configurations.map((c) => [c.name, c]));
+  const symmetric = verdicts.find((v) => byName.get(v.name)?.freeze === 'symmetric');
+  const asymmetric = verdicts.find((v) => byName.get(v.name)?.freeze === 'asymmetric');
+  // Nothing to pair when only one variant was registered — the common case.
+  if (!symmetric || !asymmetric) return;
+
+  const asymNet = asymmetric.validationMetrics.netReturnPercent;
+  const symNet = symmetric.validationMetrics.netReturnPercent;
+  if (asymNet < symNet) {
+    asymmetric.rejected = true;
+    asymmetric.reasons.push(
+      `out-of-sample net return ${asymNet.toFixed(2)}% is below the symmetric variant's ` +
+        `${symNet.toFixed(2)}% — the asymmetry's third pre-registered condition, judged only here`,
+    );
+  }
+}
+
 async function main(): Promise<number> {
   const selectionPath = process.argv[2];
   const outDir = path.resolve(process.cwd(), 'out', 'exposure-validation');
@@ -329,6 +384,8 @@ async function main(): Promise<number> {
 
   const t0 = Date.now();
   const verdicts = selection.configurations.map((cfg) => validateConfiguration(shared, cfg));
+  // The pair check runs AFTER every verdict exists: it compares two of them.
+  enforceAsymmetryPairing(verdicts, selection.configurations);
   const validationMs = Date.now() - t0;
 
   for (const v of verdicts) {

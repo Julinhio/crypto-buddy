@@ -74,16 +74,31 @@ export function feasibleInterval(
   caps: Readonly<Record<string, number>>,
 ): FeasibleInterval {
   let floor = 0;
-  let headroom = 0;
+  let ceiling = 0;
   for (const line of lines) {
-    if (!line.canReduce) floor += line.currentPercent;
-    if (line.canIncrease) {
-      const cap = caps[line.asset] ?? 0;
-      // A line already above its cap contributes no headroom; it cannot be bought further.
-      headroom += Math.max(0, cap - line.currentPercent);
-    }
+    const cap = caps[line.asset] ?? 0;
+
+    // MINIMUM reachable for this line: zero if it may be sold (or must be), otherwise the
+    // weight it is stuck at.
+    if (!(line.forceExit || line.canReduce)) floor += line.currentPercent;
+
+    // MAXIMUM reachable for this line — a TOTAL, never a headroom.
+    //
+    // The distinction is the whole bug this replaced. Summing `cap - current` measures how
+    // much MORE could be bought and then adds it to a floor that deliberately excludes every
+    // reducible line — so an all-actionable book holding 70 % against caps totalling 105 %
+    // came out with a ceiling of 35 %. Its own current weight was in neither term. "Do
+    // nothing" was then declared infeasible and projected DOWN to 35 %, selling half the book
+    // on a bar where nothing should have moved.
+    //
+    //   forceExit     → 0        the stop takes the line out whatever the band wants
+    //   canIncrease   → max(cap, current)   it may be bought to its cap; already above it,
+    //                                        it simply stays there (the ceiling never sells)
+    //   otherwise     → current  it cannot go higher than where it already is
+    if (line.forceExit) continue;
+    ceiling += line.canIncrease ? Math.max(cap, line.currentPercent) : line.currentPercent;
   }
-  return { lowPercent: floor, highPercent: Math.min(100, floor + headroom) };
+  return { lowPercent: floor, highPercent: Math.min(100, ceiling) };
 }
 
 export function projectOntoFeasible(targetPercent: number, interval: FeasibleInterval): number {

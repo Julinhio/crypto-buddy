@@ -93,12 +93,23 @@ function median(values: number[]): number {
  * says how long a single bad run lasted. A strategy can look calm on one and brutal on the
  * other, and an operator who has to live with it cares about the second.
  */
-function drawdown(bars: BarRecord[]): {
+function drawdown(bars: BarRecord[], openingEquity: number): {
   maxDrawdownPercent: number;
   timeUnderWaterDays: number;
   longestUnderWaterDays: number;
 } {
-  let peak = -Infinity;
+  /*
+   * THE PEAK IS SEEDED FROM THE OPENING EQUITY, not from the first recorded bar.
+   *
+   * On a RESUMED window the two are different: the first bar is measured AFTER the boundary
+   * order has been filled and after a full candle has moved. Seeding from that bar would make
+   * the drop that produced it invisible — carry 1000 across the boundary, land at 900 on the
+   * first bar, and 900 becomes the peak, so a real 10 % drawdown is silently erased.
+   *
+   * That is not cosmetic here: the out-of-sample gate is a drawdown limit, so the metric that
+   * decides a verdict would be the one under-reporting.
+   */
+  let peak = openingEquity > 0 ? openingEquity : -Infinity;
   let maxDd = 0;
   let underMs = 0;
   let longestMs = 0;
@@ -196,7 +207,7 @@ export function computeMetrics(result: EngineResult, assets: readonly string[]):
     closingEquity,
     netReturnPercent,
     cagrPercent,
-    ...drawdown(bars),
+    ...drawdown(bars, openingEquity),
     meanExposurePercent,
     medianExposurePercent: median(exposures),
     turnoverRatio: meanEquity > 0 ? tradedNotional / meanEquity : 0,

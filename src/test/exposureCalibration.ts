@@ -16,7 +16,7 @@ import {
   deterministicBasket,
   experimentConfigSha256,
 } from '../calibration/exposure/config.js';
-import { allocate, feasibleInterval, type LineConstraint } from '../calibration/exposure/allocate.js';
+import { allocate, feasibleInterval, projectOntoFeasible, type LineConstraint } from '../calibration/exposure/allocate.js';
 import { constraintFromGate, runReplay, type AssetTape } from '../calibration/exposure/engine.js';
 import { prepareTape, CALIBRATION_WINDOW, VALIDATION_WINDOW } from '../calibration/exposure/tape.js';
 import { applyRsiBrake, MissingMedianRsiError } from '../calibration/exposure/controller.js';
@@ -140,7 +140,11 @@ console.log('\nProof 5 — overrides apply BEFORE classification, and the interv
   ];
   const riskOffInterval = feasibleInterval(underRiskOff, cfg.caps);
   ok('under risk_off the floor is 0 — every line may be reduced', riskOffInterval.lowPercent === 0);
-  ok('…and the ceiling is 0 too — nothing may be bought', riskOffInterval.highPercent === 0);
+  // CORRECTED. This used to assert a ceiling of 0, which encoded the headroom bug: it meant
+  // "the book must be liquidated", when risk_off only says nothing may be BOUGHT. The book
+  // may stay exactly where it is — 30 + 20 = 50.
+  ok('…and the ceiling is the 50 % already held — risk_off forbids buying, it does not force selling',
+    riskOffInterval.highPercent === 50);
 
   const frozenLines: LineConstraint[] = [
     { asset: 'BTC', currentPercent: 30, canReduce: false, canIncrease: false, reason: 'frozen' },
@@ -148,20 +152,24 @@ console.log('\nProof 5 — overrides apply BEFORE classification, and the interv
   ];
   const frozenInterval = feasibleInterval(frozenLines, cfg.caps);
   ok('a frozen line pins the FLOOR at its weight', frozenInterval.lowPercent === 30);
-  ok('…and an actionable line lifts the ceiling by its remaining cap', frozenInterval.highPercent === 30 + 35);
+  ok('…and the ceiling is its own weight plus the actionable line’s cap', frozenInterval.highPercent === 30 + 35);
 
-  // A no_regime line pins no floor (it may be reduced) and lifts no ceiling.
+  // A no_regime line pins no floor (it may be reduced) and cannot rise above where it is.
   const noRegimeLines: LineConstraint[] = [
     { asset: 'BTC', currentPercent: 30, canReduce: true, canIncrease: false, reason: 'no_regime' },
   ];
   const nr = feasibleInterval(noRegimeLines, cfg.caps);
-  ok('no_regime pins no floor and lifts no ceiling', nr.lowPercent === 0 && nr.highPercent === 0);
+  ok('no_regime pins no floor, and caps the ceiling at its current weight',
+    nr.lowPercent === 0 && nr.highPercent === 30);
 
-  // A line already above its cap contributes NO headroom.
+  // CORRECTED. A line above its cap cannot be bought further — but it is still HELD, so it
+  // contributes its current weight to the ceiling. Asserting 0 here said the book could not
+  // stay where it already was.
   const overCap: LineConstraint[] = [
     { asset: 'XRP', currentPercent: 50, canReduce: true, canIncrease: true, reason: 'free' },
   ];
-  ok('a line above its cap adds no headroom', feasibleInterval(overCap, cfg.caps).highPercent === 0);
+  ok('a line above its cap contributes its CURRENT weight, not zero',
+    feasibleInterval(overCap, cfg.caps).highPercent === 50);
 }
 
 // ── THE RSI BRAKE — one-way, and every clause of it ─────────────────────────────────
@@ -239,8 +247,12 @@ console.log('\nThe RSI brake — a one-way brake against buying into an overboug
     band: { lowPercent: 0, highPercent: 25 },
     rsiBrake: { medianH4Rsi: 99, thresholdRsi: T, atMs: 0 },
   });
+  // CORRECTED. This used to assert a projection of 0 — which only held because the ceiling
+  // bug forced liquidation. The property that actually matters is that the REDUCTION happens:
+  // the band asks for 25 % against a 60 % book, and the brake does not stand in its way.
   ok('under risk_off the de-risking still happens at RSI 99 — the brake blocks buying, not selling',
-    braked.projectedPercent === 0);
+    braked.projectedPercent < 60 && braked.projectedPercent === 25);
+  ok('…and the brake did not report itself as active on a REDUCTION', braked.rsiBraked === false);
 }
 
 // ── THE FREEZE ASYMMETRY ─────────────────────────────────────────────────────────────
@@ -541,7 +553,7 @@ console.log('\nProof 9 — the validation command refuses to open without a froz
   const TREE = currentSourceTreeSha();
   // A CLEAN git environment, injected: these proofs are about the seal's own refusals, and
   // must not depend on whether the developer running them happens to have an edit in flight.
-  const CLEAN = { sourceTreeSha: TREE, dirty: false as const };
+  const CLEAN = { sourceTreeSha: TREE, dirty: false as const, committed: true as const };
   assert.throws(() => loadSelection(undefined, BUNDLE, CLEAN), SealBrokenError);
   console.log('  ok: NO selection file → refused'); passed += 1;
   assert.throws(() => loadSelection('', BUNDLE, CLEAN), SealBrokenError);
@@ -623,17 +635,17 @@ console.log('\nProof 9 — the validation command refuses to open without a froz
   // A DIRTY source is refused too. `rev-parse` reads the COMMITTED tree, so uncommitted
   // engine edits would sail past a tree comparison while genuinely changing what runs.
   assert.throws(
-    () => loadSelection(valid, BUNDLE, { sourceTreeSha: TREE, dirty: true }),
+    () => loadSelection(valid, BUNDLE, { sourceTreeSha: TREE, dirty: true, committed: true }),
     SealBrokenError,
   );
   console.log('  ok: a DIRTY source tree → refused (rev-parse reads the committed tree)'); passed += 1;
   assert.throws(
-    () => loadSelection(valid, BUNDLE, { sourceTreeSha: TREE, dirty: null }),
+    () => loadSelection(valid, BUNDLE, { sourceTreeSha: TREE, dirty: null, committed: true }),
     SealBrokenError,
   );
   console.log('  ok: a source tree whose state git cannot report → refused'); passed += 1;
   assert.throws(
-    () => loadSelection(valid, BUNDLE, { sourceTreeSha: null, dirty: false }),
+    () => loadSelection(valid, BUNDLE, { sourceTreeSha: null, dirty: false, committed: true }),
     SealBrokenError,
   );
   console.log('  ok: no current source-tree identity at all → refused'); passed += 1;
@@ -835,6 +847,81 @@ console.log('\nEvery published figure is auditable — the equal-weight referenc
   ok('the weights drift — the reference really is never rebalanced', drifted);
   ok('…while still summing to 100',
     Math.abs(Object.values(last.weights).reduce((s, w) => s + w, 0) - 100) < 1e-6);
+}
+
+// ── THE FEASIBLE CEILING IS A TOTAL, NOT A HEADROOM ─────────────────────────────────
+//
+// Codex P1, and the most damaging of the lot. Summing `cap - current` measures how much MORE
+// could be bought, then adds it to a floor that deliberately excludes every reducible line —
+// so a held weight ended up in neither term. An all-actionable book at 70 % came out with a
+// ceiling of 35 %, "do nothing" was declared infeasible, and half the book was sold on a bar
+// where nothing should have moved.
+console.log('\nThe feasible ceiling is a TOTAL reachable weight, not a headroom:');
+{
+  const cfg = buildExperimentConfig();
+  const free = (asset: string, currentPercent: number): LineConstraint =>
+    ({ asset, currentPercent, canReduce: true, canIncrease: true, reason: 'free' });
+
+  const invested = [free('BTC', 25), free('ETH', 25), free('BNB', 10), free('XRP', 10)];
+  const held = invested.reduce((s, l) => s + l.currentPercent, 0);
+  const iv = feasibleInterval(invested, cfg.caps);
+  ok(`an all-actionable book held at ${held} % is INSIDE its own interval`, held <= iv.highPercent);
+  ok('…and "do nothing" survives the projection', projectOntoFeasible(held, iv) === held);
+  ok('…the ceiling is the caps total, clamped to 100', iv.highPercent === 100);
+  ok('…and the floor is 0 — every line may be sold', iv.lowPercent === 0);
+
+  // Under risk_off nothing may be BOUGHT, but the book may stay where it is. A ceiling of 0
+  // would mean "liquidate everything", which is not what the posture says.
+  const riskOff = ['BTC', 'ETH', 'BNB', 'XRP'].map((asset) => ({
+    asset, currentPercent: 15, canReduce: true, canIncrease: false, reason: 'risk_off_reduce_only' as const,
+  }));
+  const ro = feasibleInterval(riskOff, cfg.caps);
+  ok('under risk_off the floor is 0 — every line may be reduced', ro.lowPercent === 0);
+  ok('…and the ceiling is the 60 % already held, NOT 0 — risk_off permits selling, it does not mandate liquidation',
+    ro.highPercent === 60);
+
+  // A line above its cap keeps its weight: it cannot be bought further, and the ceiling
+  // never sells.
+  const overCap = feasibleInterval([free('XRP', 50)], cfg.caps);
+  ok('a line above its cap contributes its CURRENT weight, not zero', overCap.highPercent === 50);
+
+  // A forced exit contributes nothing to either bound.
+  const stopped = feasibleInterval(
+    [{ asset: 'BTC', currentPercent: 30, canReduce: true, canIncrease: false, reason: 'stop_exit', forceExit: true }],
+    cfg.caps,
+  );
+  ok('a stopped line contributes 0 to both bounds — it is leaving', stopped.lowPercent === 0 && stopped.highPercent === 0);
+
+  // A frozen line pins the floor AND caps its own contribution to the ceiling.
+  const frozen = feasibleInterval(
+    [{ asset: 'BTC', currentPercent: 30, canReduce: false, canIncrease: false, reason: 'frozen' }, free('ETH', 0)],
+    cfg.caps,
+  );
+  ok('a frozen line pins the floor at its weight', frozen.lowPercent === 30);
+  ok('…and the ceiling is its weight plus the actionable line’s cap', frozen.highPercent === 30 + 35);
+}
+
+// ── THE DRAWDOWN IS SEEDED FROM THE CARRIED EQUITY ──────────────────────────────────
+console.log('\nDrawdown on a resumed window starts from the boundary equity:');
+{
+  const { shared } = prepareTape(ROOT);
+  const calibration = runPolicy(shared, { kind: 'constant', targetPercent: 60 }, CALIBRATION_WINDOW);
+  const resumed = runPolicy(
+    shared, { kind: 'constant', targetPercent: 60 }, VALIDATION_WINDOW, calibration.result.finalState,
+  );
+  const firstBarEquity = resumed.result.bars[0]!.equity;
+  const carried = resumed.result.openingEquity;
+  ok('the resumed run really opens on the carried equity, not the first bar',
+    Math.abs(carried - firstBarEquity) > 1e-9);
+  // If the first bar sits BELOW the carried equity, that drop is a real drawdown and must
+  // appear. Seeding the peak from the first bar would erase it.
+  if (firstBarEquity < carried) {
+    const implied = ((carried - firstBarEquity) / carried) * 100;
+    ok(`the boundary drop of ${implied.toFixed(2)}pt is counted, not erased`,
+      resumed.metrics.maxDrawdownPercent >= implied - 1e-9);
+  } else {
+    ok('the first bar sits above the boundary equity — no drop to count on this run', true);
+  }
 }
 
 // ── PROOF 11 — NO NETWORK, NO DATABASE, NO LLM ───────────────────────────────────────

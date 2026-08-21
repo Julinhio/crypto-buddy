@@ -20,6 +20,7 @@ import {
   buildManifest,
   currentGitCommit,
   currentSourceTreeSha,
+  gitIsDirty,
   writeArtefact,
   type WrittenFile,
 } from './outputs.js';
@@ -421,6 +422,27 @@ async function main(): Promise<number> {
       );
     }
     stepsMs = Date.now() - t1;
+
+    /*
+     * A SELECTION MAY NOT BE PRODUCED FROM A DIRTY SOURCE.
+     *
+     * `rev-parse HEAD:src` reports the COMMITTED tree, so a run with uncommitted engine edits
+     * would stamp a hash that does not describe the code that actually produced these bands
+     * and witnesses. Discard the edits afterwards, commit the artefact, and validation would
+     * see a matching tree on a clean checkout and accept a selection calibrated by code that
+     * no longer exists anywhere.
+     *
+     * The manifest's `tree_dirty` flag cannot save this: `loadSelection` never reads it. So
+     * the refusal belongs HERE, at the moment of emission, where the dirt is still visible.
+     */
+    if (gitIsDirty() !== false) {
+      console.error(
+        '\nREFUSING to emit a selection: the source tree has uncommitted changes (or git could ' +
+          'not say). The recorded src-tree hash reads the COMMITTED source, so it would not ' +
+          'describe the code that produced these numbers. Commit, then re-run.',
+      );
+      return 3;
+    }
 
     const base = {
       schema_version: 1 as const,
