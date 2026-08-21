@@ -20,7 +20,7 @@ import { allocate, feasibleInterval, type LineConstraint } from '../calibration/
 import { constraintFromGate, runReplay, type AssetTape } from '../calibration/exposure/engine.js';
 import { prepareTape, CALIBRATION_WINDOW, VALIDATION_WINDOW } from '../calibration/exposure/tape.js';
 import { applyRsiBrake, MissingMedianRsiError } from '../calibration/exposure/controller.js';
-import { ARMS, runPolicy } from '../calibration/exposure/arms.js';
+import { ARMS, equalWeightBuyAndHold, runPolicy } from '../calibration/exposure/arms.js';
 import { checkAgainstReference, type ArmReference, type CalibrationOutcome } from '../calibration/exposure/calibrate.js';
 import type { Metrics } from '../calibration/exposure/metrics.js';
 import { buildManifest, canonicalJson, currentSourceTreeSha, sha256Of } from '../calibration/exposure/outputs.js';
@@ -806,6 +806,35 @@ console.log('\nProof 1 (artefacts) — a manifest that could never be byte-ident
     typeof parsed.experiment_config_sha256 === 'string' &&
     'crypto_buddy_commit' in parsed);
   ok('it does NOT hash itself', !mk().includes(sha256Of(mk())));
+}
+
+// ── EVERY PUBLISHED FIGURE HAS A TRAJECTORY BEHIND IT ────────────────────────────────
+//
+// The equal-weight reference is a witness the protocol names, and its result is printed in
+// the summary. A figure that cannot be traced back to a trajectory is one the reader has to
+// take on trust — and that is exactly the kind of gap a negative outcome makes expensive,
+// since disagreeing with "no band is deliverable" means auditing what produced it.
+console.log('\nEvery published figure is auditable — the equal-weight reference included:');
+{
+  const { shared } = prepareTape(ROOT);
+  const eq = equalWeightBuyAndHold(shared, CALIBRATION_WINDOW);
+  ok('the equal-weight reference produces a per-bar trajectory', eq.bars.length > 0);
+  ok('…on the same grid as every other run', eq.bars.length === runPolicy(
+    shared, { kind: 'constant', targetPercent: 0 }, CALIBRATION_WINDOW,
+  ).result.bars.length);
+  const first = eq.bars[0]!;
+  const last = eq.bars[eq.bars.length - 1]!;
+  ok('…starting inside the calibration window', first.timestamp >= CALIBRATION_WINDOW.fromMs);
+  ok('…and ending strictly before it closes', last.timestamp < CALIBRATION_WINDOW.toMs);
+  ok('…never reaching the sealed window', last.timestamp < VALIDATION_WINDOW.fromMs);
+  ok('the closing equity of the trajectory IS the published one',
+    Math.abs(last.equity - eq.closingEquity) < 1e-9);
+  // Nothing is ever rebalanced, so the weights must DRIFT — if they stayed at 25 % the
+  // reference would be something else entirely.
+  const drifted = Object.values(last.weights).some((w) => Math.abs(w - 25) > 1);
+  ok('the weights drift — the reference really is never rebalanced', drifted);
+  ok('…while still summing to 100',
+    Math.abs(Object.values(last.weights).reduce((s, w) => s + w, 0) - 100) < 1e-6);
 }
 
 // ── PROOF 11 — NO NETWORK, NO DATABASE, NO LLM ───────────────────────────────────────

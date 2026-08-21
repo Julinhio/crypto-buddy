@@ -169,10 +169,27 @@ export function searchConstantWitness(
  * bar following the first evaluated bar, the same t+1 rule as everything else — with the
  * same fee and slippage.
  */
+/** One bar of the equal-weight reference: fixed quantities, marked at the bar's close. */
+export interface EqualWeightBar {
+  timestamp: number;
+  at: string;
+  equity: number;
+  /** Weight per asset, in percent — they DRIFT, since nothing is ever rebalanced. */
+  weights: Record<string, number>;
+}
+
 export function equalWeightBuyAndHold(shared: SharedTape, window: WindowBounds): {
   openingEquity: number;
   closingEquity: number;
   netReturnPercent: number;
+  /**
+   * The per-bar trajectory, so this number is auditable like every other published one.
+   *
+   * It is a witness the protocol names, its result appears in the summary, and a figure that
+   * cannot be traced back to a trajectory is a figure a reader has to take on trust. Cheap to
+   * produce: the quantities never change, so a bar is one multiplication per asset.
+   */
+  bars: EqualWeightBar[];
 } {
   const { cfg, tapes } = shared;
   const weight = new Decimal(1).div(cfg.assets.length);
@@ -211,27 +228,47 @@ export function equalWeightBuyAndHold(shared: SharedTape, window: WindowBounds):
     qty[asset] = net.div(open.times(new Decimal(1).plus(slipRate)));
   }
 
-  // Valued at the last close inside the window, on each asset's own last available bar.
+  // The trajectory, marked bar by bar on the SAME grid every other run uses. Nothing is
+  // rebalanced, so the weights drift — which is itself part of what this reference shows.
+  const bars: EqualWeightBar[] = [];
   let closing = new Decimal(0);
-  for (const asset of cfg.assets) {
-    const series = tapes[asset]!.h4;
-    let lastClose: Decimal | null = null;
-    for (let i = series.length - 1; i >= 0; i -= 1) {
-      const candle = series[i]!;
-      if (candle.timestamp < window.toMs) {
-        lastClose = new Decimal(candle.close);
+  for (const point of shared.points) {
+    if (point.timestamp < window.fromMs || point.timestamp >= window.toMs) continue;
+    let equity = new Decimal(0);
+    const value: Record<string, Decimal> = {};
+    let complete = true;
+    for (const asset of cfg.assets) {
+      const i = tapes[asset]!.indexByTimestamp.get(point.timestamp);
+      const candle = i == null ? undefined : tapes[asset]!.h4[i];
+      if (!candle) {
+        complete = false;
         break;
       }
+      value[asset] = qty[asset]!.times(new Decimal(candle.close));
+      equity = equity.plus(value[asset]!);
     }
-    if (lastClose == null) throw new Error(`equal-weight repère: no closing price for ${asset}`);
-    closing = closing.plus(qty[asset]!.times(lastClose));
+    // A bar where any asset is missing is skipped whole, exactly as the engine does.
+    if (!complete) continue;
+    const weights: Record<string, number> = {};
+    for (const asset of cfg.assets) {
+      weights[asset] = equity.gt(0) ? value[asset]!.div(equity).times(100).toNumber() : 0;
+    }
+    bars.push({
+      timestamp: point.timestamp,
+      at: new Date(point.timestamp).toISOString(),
+      equity: equity.toNumber(),
+      weights,
+    });
+    closing = equity;
   }
+  if (bars.length === 0) throw new Error('equal-weight repère: no valued bar inside the window');
 
   const opening = STARTING_CASH_USD;
   return {
     openingEquity: opening,
     closingEquity: closing.toNumber(),
     netReturnPercent: closing.minus(opening).div(opening).times(100).toNumber(),
+    bars,
   };
 }
 

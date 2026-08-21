@@ -203,7 +203,7 @@ export interface CalibrationOutcome {
   baseline: Metrics;
   baselineBars: BarRecord[];
   selected: ArmReport | null;
-  equalWeight: { openingEquity: number; closingEquity: number; netReturnPercent: number };
+  equalWeight: ReturnType<typeof equalWeightBuyAndHold>;
 }
 
 /**
@@ -479,6 +479,13 @@ async function main(): Promise<number> {
         constant_target_percent: r.witness.targetPercent,
         bars: r.witnessBars,
       })),
+      // The equal-weight reference is a witness the protocol names and whose result appears
+      // in the summary, so its trajectory belongs here too: a published figure that cannot be
+      // traced back to one is a figure the reader has to take on trust.
+      equal_weight_reference: {
+        note: 'does NOT respect the per-asset caps — external reference only; bought once at the first executable price, never rebalanced, so the weights drift',
+        bars: outcome.equalWeight.bars,
+      },
       // Present only when an arm qualified; empty on the pre-written negative outcome.
       validable_configurations: frozen.map((f) => ({
         name: f.configuration.name,
@@ -500,7 +507,12 @@ async function main(): Promise<number> {
         'the witness runs the SAME gate, stops and movement floor, so the difference isolates the band controller alone. Not an alpha, not the full bot edge.',
       deterministic_baseline: summarizeMetrics(outcome.baseline),
       equal_weight_reference: {
-        ...outcome.equalWeight,
+        // Destructured rather than spread: the reference now carries its per-bar trajectory,
+        // and a spread would drag ~7 662 bars into the SUMMARY. The bars belong in the raw
+        // artefact; the summary keeps the three numbers it is read for.
+        openingEquity: outcome.equalWeight.openingEquity,
+        closingEquity: outcome.equalWeight.closingEquity,
+        netReturnPercent: outcome.equalWeight.netReturnPercent,
         note: 'does NOT respect the per-asset caps — external reference only',
       },
       arms: outcome.reports.map((r) => ({
