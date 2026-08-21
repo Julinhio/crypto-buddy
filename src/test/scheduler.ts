@@ -253,11 +253,11 @@ function dispatchClient(calls: string[]): SupabaseClient {
 }
 
 const timedOutCycle = async () => ({
-  outcome: { status: 'error' as const, appliedDelayMinutes: null, decisionId: null, detail: 'frozen', equitySnapshot: null, marketData: 'unknown' as const },
+  outcome: { status: 'error' as const, appliedDelayMinutes: null, decisionId: null, detail: 'frozen', equitySnapshot: null, marketData: 'unknown' as const, llmFailure: null },
   settled: false, result: null,
 });
 const settledThrow = async () => ({
-  outcome: { status: 'error' as const, appliedDelayMinutes: null, decisionId: null, detail: 'threw', equitySnapshot: null, marketData: 'unknown' as const },
+  outcome: { status: 'error' as const, appliedDelayMinutes: null, decisionId: null, detail: 'threw', equitySnapshot: null, marketData: 'unknown' as const, llmFailure: null },
   settled: true, result: null,
 });
 

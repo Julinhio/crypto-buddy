@@ -18,10 +18,16 @@
  * the alert it closes can stay armed for a very long time (the real outage ran 22 cycles),
  * and "it's back" is otherwise unobservable without opening the dashboard.
  */
-export type AlertTrigger = 'overheating' | 'degraded' | 'market_data' | 'market_data_recovered';
+export type AlertTrigger =
+  | 'overheating'
+  | 'degraded'
+  | 'market_data'
+  | 'market_data_recovered'
+  | 'degraded_recovered';
 
-export interface AlertPayload {
-  trigger: AlertTrigger;
+/** The four counter-driven triggers: one number crossed one threshold. */
+export interface CounterAlert {
+  trigger: 'overheating' | 'degraded' | 'market_data' | 'market_data_recovered';
   /**
    * The counter value at the crossing (floor_delay_streak / consecutive_failures /
    * consecutive_blind_cycles). On `market_data_recovered` it is the streak that just
@@ -39,6 +45,31 @@ export interface AlertPayload {
    */
   cause?: string | null;
 }
+
+/**
+ * THE END OF A DEGRADED INCIDENT — the bot has produced a valid decision again.
+ *
+ * Deliberately NOT a `CounterAlert`. Its two numbers are both allowed to be UNKNOWN, and a
+ * required `value: number` would have forced a zero into the message on exactly the paths
+ * where nothing was measured — a fabricated fact in the one notification whose job is to
+ * report facts about an outage nobody was watching.
+ *
+ * `failureCount` is rebuilt from `scheduler_runs`, not read from `consecutive_failures`
+ * (which a mid-incident `skipped` cycle resets). `outageMs` is measured from the PREVIOUS
+ * `last_success_at`, so it is the time without a valid DECISION — not the span between the
+ * first and the last error, which on 20/08 would have under-reported 5 h 10 as 2 h 00.
+ */
+export interface DegradedRecoveredAlert {
+  trigger: 'degraded_recovered';
+  /** ISO timestamp of the beat (DB now()), so the message is self-dating. */
+  timestamp: string;
+  /** Failures during the incident, or null when the rebuild could not run. Never a guess. */
+  failureCount: number | null;
+  /** Time without a valid decision, in ms, or null when `last_success_at` was unavailable. */
+  outageMs: number | null;
+}
+
+export type AlertPayload = CounterAlert | DegradedRecoveredAlert;
 
 /**
  * A PEAK STOP THAT WAS ARMED ON A CYCLE THAT DIED BEFORE IT COULD FIRE.
@@ -91,7 +122,44 @@ function truncate(text: string, max: number): string {
  * Composes the alert text: which trigger, the counter value, a timestamp, and — for
  * the degraded case — the last error if we have one. Concise and human on purpose.
  */
+/**
+ * A duration a human reads at a glance: `5 h 10 min`, `47 min`, `2 j 3 h`. Pure, and it
+ * never rounds an unknown into a number — a null duration is the caller's problem to word,
+ * not this function's to invent. Negative input (a clock skew between the DB's `now()` and
+ * a stored timestamp) is treated as unknown rather than printed as a negative outage.
+ */
+export function formatDuration(ms: number): string | null {
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const totalMinutes = Math.floor(ms / 60_000);
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) return `${days} j ${hours} h`;
+  if (hours > 0) return `${hours} h ${minutes} min`;
+  return `${minutes} min`;
+}
+
 export function formatAlert(payload: AlertPayload): string {
+  if (payload.trigger === 'degraded_recovered') {
+    // The counterpart of the DÉGRADÉ alert, and the reason it can now be trusted: an
+    // operator who got the warning gets the all-clear too, instead of having to open the
+    // dashboard to find out whether four hours of silence meant "fixed" or "still down".
+    //
+    // Both numbers degrade to an explicit "indisponible" rather than to a zero. A recovery
+    // message that says "0 échecs" after a five-hour outage is worse than one that admits
+    // it could not count them.
+    const failures =
+      payload.failureCount != null ? String(payload.failureCount) : 'indisponible';
+    const outage = payload.outageMs != null ? formatDuration(payload.outageMs) : null;
+    return (
+      `✅ crypto-buddy — RÉTABLI\n` +
+      `Une nouvelle décision valide a été produite : le cycle refonctionne de bout en bout.\n` +
+      `Échecs pendant l'incident : ${failures}\n` +
+      `Temps sans décision valide : ${outage ?? 'inconnu'}\n` +
+      `🕑 ${payload.timestamp}`
+    );
+  }
+
   if (payload.trigger === 'market_data') {
     // Worded to prevent the exact misreading that would waste the first ten minutes at
     // 3 a.m.: the bot is FINE, it is not down, and nothing is at risk. What is broken is

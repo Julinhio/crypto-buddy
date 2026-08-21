@@ -1,5 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { ALERT_READ_DEADLINE_MS } from '../config/index.js';
 import type { RunOutcome } from '../scheduler/policy.js';
+import { runBoundedQuery } from './boundedWrite.js';
 
 /** The singleton scheduler state (camelCased; timestamps as ISO strings). */
 export interface BotState {
@@ -169,6 +171,181 @@ export async function finishRun(supabase: SupabaseClient, p: FinishRunParams): P
   });
   if (error) throw new Error(`finish_run RPC failed: ${error.message}`);
   return data === true;
+}
+
+/** The degraded incident's two inputs, read UNDER THE CLAIM rather than from a snapshot. */
+export interface IncidentState {
+  /** Is a degraded incident currently open? (`bot_state.failure_alert_sent`.) */
+  failureAlertSent: boolean;
+  /** The previous valid decision — where "time without a decision" starts. */
+  lastSuccessAt: string | null;
+}
+
+/**
+ * RE-READS THE DEGRADED INCIDENT'S STATE ONCE THE RUN-LOCK IS HELD.
+ *
+ * `record_heartbeat` snapshots `bot_state` at the TOP of the beat, and `reset_bot` can land
+ * between that snapshot and our claim: it zeroes `failure_alert_sent`, nulls
+ * `last_success_at`, purges `scheduler_runs`, and reschedules to `now()` — so our claim
+ * still succeeds while the snapshot holds pre-reset values.
+ *
+ * That used to be harmless for this flag. `evaluateAlert` recomputed it from the counter
+ * every beat, so a stale `true` was overwritten with `false` on the very next beat. Turning
+ * the flag into an INCIDENT (`evaluateDegradedIncident`) removes that self-healing: a stale
+ * `true` would now STICK, swallowing the degraded alert of the next real incident, and a
+ * later decided cycle would fire a phantom recovery quoting a pre-reset outage duration.
+ * The fix belongs here rather than in the policy, which is pure and right.
+ *
+ * Reading under the claim closes it, exactly as `consecutive_blind_cycles` is read from
+ * `ClaimResult`: `reset_bot` claims the SAME logical run-lock and holds the `bot_state` ROW
+ * lock for its whole transaction (migration 0010), so once we own the claim it provably
+ * cannot interleave. Done with a plain select rather than by extending `claim_due_run` —
+ * that would need a migration, which this PR does not take.
+ *
+ * BEST-EFFORT: returns `null` on any failure, and the caller falls back to the snapshot —
+ * i.e. to the exact behaviour that shipped before. A read that exists only to keep an alert
+ * honest must never be able to fail a cycle that is placing real orders.
+ *
+ * Only worth calling when the SNAPSHOT SAYS ARMED, because that is the only direction
+ * staleness can take: `reset_bot` only ever writes `false`, and the only writer of `true` is
+ * `finish_run`, which is fenced to the lock holder — us. A snapshot reading `false` while
+ * the row reads `true` is therefore impossible, so the common path pays nothing.
+ */
+export async function readIncidentState(supabase: SupabaseClient): Promise<IncidentState | null> {
+  try {
+    const { data, error } = await runBoundedQuery(
+      (signal) =>
+        supabase
+          .from('bot_state')
+          .select('failure_alert_sent, last_success_at')
+          .eq('id', 1)
+          .abortSignal(signal)
+          .maybeSingle(),
+      ALERT_READ_DEADLINE_MS,
+    );
+    if (error || !data) {
+      console.warn(
+        `[warn] could not re-read the incident state under the claim (${error?.message ?? 'no bot_state row'}) — ` +
+          'falling back to the pre-cycle snapshot.',
+      );
+      return null;
+    }
+    const row = data as Record<string, unknown>;
+    return {
+      failureAlertSent: Boolean(row.failure_alert_sent ?? false),
+      lastSuccessAt: (row.last_success_at as string | null) ?? null,
+    };
+  } catch (err) {
+    console.warn(
+      `[warn] could not re-read the incident state under the claim ` +
+        `(${err instanceof Error ? err.message : String(err)}) — falling back to the pre-cycle snapshot.`,
+    );
+    return null;
+  }
+}
+
+/**
+ * WHEN THE RECOVERING RUN ACTUALLY FINISHED, on the DATABASE's clock.
+ *
+ * `finish_run` stamps `scheduler_runs.finished_at = now()` in the same transaction that
+ * releases the lock, so once it has returned true this row holds the exact instant the
+ * cycle completed — readable with a plain select, no migration, no new RPC.
+ *
+ * It replaces an arithmetic estimate (`claim.dbNow` plus a locally measured duration),
+ * which was wrong in the one direction that matters: the interval between the database
+ * producing `dbNow` and the application receiving the claim response is invisible to any
+ * app-side timer, so the estimate always ran EARLY — and an all-clear dated before the
+ * decision that justifies it is precisely what the recovery notification must never say.
+ * Reading the stamp removes the estimation instead of tightening it.
+ *
+ * BEST-EFFORT: `null` on any failure, and the caller falls back to the conservative
+ * estimate. It exists only to date a Telegram message, on a cycle that has already placed
+ * real orders.
+ */
+export async function readRunFinishedAt(
+  supabase: SupabaseClient,
+  runId: number,
+): Promise<string | null> {
+  try {
+    const { data, error } = await runBoundedQuery(
+      (signal) =>
+        supabase
+          .from('scheduler_runs')
+          .select('finished_at')
+          .eq('id', runId)
+          .abortSignal(signal)
+          .maybeSingle(),
+      ALERT_READ_DEADLINE_MS,
+    );
+    if (error || !data) {
+      console.warn(
+        `[warn] recovery: could not read finished_at for run #${runId} ` +
+          `(${error?.message ?? 'no row'}) — falling back to the estimated completion time.`,
+      );
+      return null;
+    }
+    return ((data as Record<string, unknown>).finished_at as string | null) ?? null;
+  } catch (err) {
+    console.warn(
+      `[warn] recovery: could not read finished_at for run #${runId} ` +
+        `(${err instanceof Error ? err.message : String(err)}) — falling back to the estimated completion time.`,
+    );
+    return null;
+  }
+}
+
+/**
+ * HOW MANY CYCLES REALLY FAILED DURING THE INCIDENT THAT JUST ENDED.
+ *
+ * The recovery message wants one number: failures between the last valid decision and this
+ * one. `consecutive_failures` cannot supply it — a `skipped` cycle resets it, so after
+ * `error / error / error / skip / error` the counter reads 1 for an incident that cost
+ * five wake-ups. Making the counter keep non-consecutive failures would falsify the name
+ * and the backoff that reads it. So the number is REBUILT from the append-only history
+ * instead, which already holds every run's outcome and needs no migration to be asked.
+ *
+ * Window: strictly after the PREVIOUS `last_success_at` (the last decided cycle, which is
+ * where "without a valid decision" starts) and up to the claim time of the recovering run.
+ * Only runs that reached `completed` with the technical outcome `error` are counted — a
+ * crashed run left at `running` never produced an outcome, and a `skip` is not a failure.
+ *
+ * BEST-EFFORT BY CONTRACT, and this is the load-bearing property. It exists solely to put
+ * a number in a Telegram message, and it runs on a cycle that has just SUCCEEDED — placing
+ * real orders and a sovereign booking behind it. It therefore returns `null` on every
+ * failure instead of throwing: an observability read must never turn a valid financial
+ * cycle into a failed one. `null` means "unavailable", never "zero", and the message says
+ * so rather than printing a number nobody counted.
+ */
+export async function countFailedRunsSince(
+  supabase: SupabaseClient,
+  sinceIso: string | null,
+  untilIso: string,
+): Promise<number | null> {
+  try {
+    const { count, error } = await runBoundedQuery((signal) => {
+      let query = supabase
+        .from('scheduler_runs')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'completed')
+        .eq('outcome', 'error')
+        .lte('finished_at', untilIso);
+      // No previous success (a fresh install, or a reset) → no lower bound. Counting every
+      // error ever recorded is still the honest answer to "since the last valid decision".
+      if (sinceIso != null) query = query.gt('finished_at', sinceIso);
+      return query.abortSignal(signal);
+    }, ALERT_READ_DEADLINE_MS);
+    if (error) {
+      console.warn(`[warn] recovery: could not rebuild the failure count (${error.message}) — reporting it as unavailable.`);
+      return null;
+    }
+    return typeof count === 'number' ? count : null;
+  } catch (err) {
+    console.warn(
+      `[warn] recovery: could not rebuild the failure count (${err instanceof Error ? err.message : String(err)}) — ` +
+        'reporting it as unavailable. The cycle itself is unaffected.',
+    );
+    return null;
+  }
 }
 
 /**

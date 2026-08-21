@@ -159,7 +159,13 @@ async function main(): Promise<void> {
       ok('failure_alert_sent round-tripped', after.failure_alert_sent === failEval.sent);
 
       // Show the message that WOULD be sent (composition proof, without sending).
-      const fired: { trigger: AlertTrigger; value: number; lastError?: string | null }[] = [];
+      // Narrowed to the two COUNTER triggers this proof exercises. `AlertTrigger` now also
+      // covers `degraded_recovered`, whose payload carries no `value` — see AlertPayload.
+      const fired: {
+        trigger: Extract<AlertTrigger, 'overheating' | 'degraded'>;
+        value: number;
+        lastError?: string | null;
+      }[] = [];
       if (floorEval.fire) fired.push({ trigger: 'overheating', value: step.floor });
       if (failEval.fire) fired.push({ trigger: 'degraded', value: step.fail, lastError: `[debounce-proof] ${step.label}` });
       for (const f of fired) {
