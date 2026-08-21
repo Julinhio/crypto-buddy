@@ -1,4 +1,5 @@
 import { pathToFileURL } from 'node:url';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import type { BandPolicy } from './controller.js';
 import {
@@ -186,6 +187,66 @@ export interface CalibrationOutcome {
   equalWeight: { openingEquity: number; closingEquity: number; netReturnPercent: number };
 }
 
+/**
+ * THE REGRESSION GUARD — steps 1 and 2 must reproduce a previous run EXACTLY.
+ *
+ * The RSI brake and the freeze variant were added to the engine AFTER the first A/B/C run.
+ * Neither is supposed to touch a bare band replay: the brake only applies when a policy asks
+ * for it, and the freeze defaults to production's symmetric gate. "Supposed to" is not a
+ * proof, and a leak would be invisible — it would simply move the numbers a little, and the
+ * band selection would then rest on a different experiment than the one that was reported.
+ *
+ * So the arms are compared to a pinned reference, on EXACT equality. The replay is fully
+ * deterministic on frozen data, so bit-identical is the correct bar; anything looser would
+ * be tolerating exactly the drift this exists to catch.
+ *
+ * A divergence ABORTS before step 3. Testing the RSI on top of an engine that no longer
+ * reproduces its own baseline would be building on sand.
+ */
+export interface ArmReference {
+  baseline: { net: number; cagr: number; maxdd: number; expo: number };
+  equalWeightNet: number;
+  arms: Record<string, {
+    net: number; cagr: number; maxdd: number; expo: number;
+    witnessTarget: number; witnessRealised: number; excess: number; eligible: boolean;
+  }>;
+  selected: string | null;
+}
+
+export function checkAgainstReference(
+  outcome: CalibrationOutcome,
+  reference: ArmReference,
+): string[] {
+  const diffs: string[] = [];
+  const cmp = (label: string, got: unknown, want: unknown): void => {
+    if (got !== want) diffs.push(`${label}: got ${String(got)}, reference ${String(want)}`);
+  };
+
+  cmp('baseline.net', outcome.baseline.netReturnPercent, reference.baseline.net);
+  cmp('baseline.cagr', outcome.baseline.cagrPercent, reference.baseline.cagr);
+  cmp('baseline.maxdd', outcome.baseline.maxDrawdownPercent, reference.baseline.maxdd);
+  cmp('baseline.expo', outcome.baseline.meanExposurePercent, reference.baseline.expo);
+  cmp('equalWeight.net', outcome.equalWeight.netReturnPercent, reference.equalWeightNet);
+
+  for (const report of outcome.reports) {
+    const want = reference.arms[report.name];
+    if (!want) {
+      diffs.push(`arm ${report.name}: absent from the reference`);
+      continue;
+    }
+    cmp(`${report.name}.net`, report.metrics.netReturnPercent, want.net);
+    cmp(`${report.name}.cagr`, report.metrics.cagrPercent, want.cagr);
+    cmp(`${report.name}.maxdd`, report.metrics.maxDrawdownPercent, want.maxdd);
+    cmp(`${report.name}.expo`, report.metrics.meanExposurePercent, want.expo);
+    cmp(`${report.name}.witnessTarget`, report.witness.targetPercent, want.witnessTarget);
+    cmp(`${report.name}.witnessRealised`, report.witness.realisedMeanExposurePercent, want.witnessRealised);
+    cmp(`${report.name}.excess`, report.excessCagrPercent, want.excess);
+    cmp(`${report.name}.eligible`, report.eligibility.eligible, want.eligible);
+  }
+  cmp('selectedArm', outcome.selected?.name ?? null, reference.selected);
+  return diffs;
+}
+
 /** Steps 1 and 2 of the protocol: the three arms, then the selection. */
 export function runArmSelection(shared: SharedTape, window: WindowBounds): CalibrationOutcome {
   validateArms();
@@ -250,6 +311,28 @@ async function main(): Promise<number> {
   console.log('LIMIT: the three arms differ on all three states at once. A winning arm does not');
   console.log('tell us which of its bands carried the result. Assumed, and stated beside the number.');
   console.log('='.repeat(96));
+
+  // === THE REGRESSION GUARD, before anything downstream is built on these numbers =====
+  const referencePath = process.argv[2];
+  if (referencePath) {
+    const reference = JSON.parse(readFileSync(path.resolve(referencePath), 'utf8')) as ArmReference;
+    const diffs = checkAgainstReference(outcome, reference);
+    if (diffs.length > 0) {
+      console.error(`\n${'='.repeat(96)}`);
+      console.error('REGRESSION — steps 1 and 2 no longer reproduce the reference run.');
+      console.error('ABORTING before step 3. The RSI and the asymmetry are not tested on an engine');
+      console.error('that cannot reproduce its own baseline.');
+      for (const d of diffs) console.error(`  - ${d}`);
+      console.error(`${'='.repeat(96)}`);
+      return 2;
+    }
+    console.log(
+      `\nregression guard: steps 1-2 reproduce the reference EXACTLY ` +
+        `(${outcome.reports.length} arms + baseline + equal-weight reference).`,
+    );
+  } else {
+    console.log('\nregression guard: no reference given - nothing to reproduce against.');
+  }
 
   // === STEPS 3 -> 7, and ONLY if an arm actually qualified ==========================
   //

@@ -21,6 +21,8 @@ import { constraintFromGate, runReplay, type AssetTape } from '../calibration/ex
 import { prepareTape, CALIBRATION_WINDOW, VALIDATION_WINDOW } from '../calibration/exposure/tape.js';
 import { applyRsiBrake, MissingMedianRsiError } from '../calibration/exposure/controller.js';
 import { runPolicy } from '../calibration/exposure/arms.js';
+import { checkAgainstReference, type ArmReference, type CalibrationOutcome } from '../calibration/exposure/calibrate.js';
+import type { Metrics } from '../calibration/exposure/metrics.js';
 import { canonicalJson } from '../calibration/exposure/outputs.js';
 import { SealBrokenError, decisionsDigest, loadSelection } from '../calibration/exposure/validate.js';
 
@@ -521,6 +523,67 @@ console.log('\nProof 9 — the validation command refuses to open without a froz
   console.log('  ok: a selection registering no validable configuration → refused'); passed += 1;
 
   rmSync(dir, { recursive: true, force: true });
+}
+
+// ── THE REGRESSION GUARD ─────────────────────────────────────────────────────────────
+//
+// A guard that never fires is indistinguishable from no guard at all, so it is exercised on
+// a divergence rather than only on a match.
+console.log('\nThe regression guard — steps 1-2 must reproduce a reference EXACTLY:');
+{
+  const m = (net: number, cagr: number, maxdd: number, expo: number) =>
+    ({ netReturnPercent: net, cagrPercent: cagr, maxDrawdownPercent: maxdd, meanExposurePercent: expo }) as Metrics;
+  const outcome = {
+    baseline: m(64.49, 15.3, 19.35, 19.58),
+    equalWeight: { openingEquity: 1000, closingEquity: 6042, netReturnPercent: 504.25 },
+    reports: [{
+      name: 'A',
+      metrics: m(167.24, 32.47, 32.13, 36.81),
+      witness: { targetPercent: 37.75, realisedMeanExposurePercent: 36.744, mismatchPoints: 0.065, isSound: true, targetsEvaluated: 401 },
+      excessCagrPercent: 6.55,
+      eligibility: { eligible: true, drawdownOk: true, beatsBaseline: true, excessOk: true, reasons: [] },
+    }],
+    selected: { name: 'A' },
+  } as unknown as CalibrationOutcome;
+
+  const reference: ArmReference = {
+    baseline: { net: 64.49, cagr: 15.3, maxdd: 19.35, expo: 19.58 },
+    equalWeightNet: 504.25,
+    arms: { A: { net: 167.24, cagr: 32.47, maxdd: 32.13, expo: 36.81, witnessTarget: 37.75, witnessRealised: 36.744, excess: 6.55, eligible: true } },
+    selected: 'A',
+  };
+
+  ok('an identical run reports zero divergence', checkAgainstReference(outcome, reference).length === 0);
+
+  // Every field is actually compared — a guard that only looked at the headline return would
+  // wave through a witness that had moved.
+  const perturbations: Array<[string, ArmReference]> = [
+    ['net return', { ...reference, arms: { A: { ...reference.arms.A!, net: 167.25 } } }],
+    ['CAGR', { ...reference, arms: { A: { ...reference.arms.A!, cagr: 32.48 } } }],
+    ['max drawdown', { ...reference, arms: { A: { ...reference.arms.A!, maxdd: 32.14 } } }],
+    ['realised exposure', { ...reference, arms: { A: { ...reference.arms.A!, expo: 36.82 } } }],
+    ['witness target', { ...reference, arms: { A: { ...reference.arms.A!, witnessTarget: 38 } } }],
+    ['witness realised', { ...reference, arms: { A: { ...reference.arms.A!, witnessRealised: 36.75 } } }],
+    ['excess', { ...reference, arms: { A: { ...reference.arms.A!, excess: 6.56 } } }],
+    ['eligibility', { ...reference, arms: { A: { ...reference.arms.A!, eligible: false } } }],
+    ['the baseline', { ...reference, baseline: { ...reference.baseline, net: 64.5 } }],
+    ['the equal-weight reference', { ...reference, equalWeightNet: 504.26 }],
+    ['the selected arm', { ...reference, selected: 'B' }],
+  ];
+  let allCaught = true;
+  for (const [label, perturbed] of perturbations) {
+    if (checkAgainstReference(outcome, perturbed).length === 0) {
+      allCaught = false;
+      console.log(`      MISSED: ${label}`);
+    }
+  }
+  ok(`a divergence in ANY of the ${perturbations.length} compared fields is caught`, allCaught);
+  // Exact equality, not a tolerance: the replay is deterministic on frozen data, so the
+  // smallest drift is real drift.
+  ok('the comparison is EXACT — a 1e-12 drift still fires',
+    checkAgainstReference(outcome, { ...reference, arms: { A: { ...reference.arms.A!, cagr: 32.47 + 1e-12 } } }).length === 1);
+  ok('an arm missing from the reference is reported, not ignored',
+    checkAgainstReference(outcome, { ...reference, arms: {} }).length > 0);
 }
 
 // ── PROOF 11 — NO NETWORK, NO DATABASE, NO LLM ───────────────────────────────────────
