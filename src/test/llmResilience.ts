@@ -22,7 +22,9 @@ import {
   type RunOutcome,
 } from '../scheduler/policy.js';
 import { formatAlert, formatDuration } from '../alerting/messages.js';
-import { countFailedRunsSince } from '../persistence/schedulerState.js';
+import { countFailedRunsSince, readIncidentState } from '../persistence/schedulerState.js';
+import { runHeartbeat } from '../scheduler/heartbeat.js';
+import type { DecideResult } from '../decision/decide.js';
 import { validateDecisionConfig, config, type DecisionConfig } from '../config/index.js';
 
 /**
@@ -53,6 +55,8 @@ function ok(label: string, cond: boolean): void {
 }
 
 const NO_FACTS = { logicalAttempt: 1, elapsedMs: null };
+/** Fixed reference instant (ms), so the heartbeat fakes below are deterministic. */
+const NOW = 1_700_000_000_000;
 
 /** Builds a real SDK error of the right class, exactly as the SDK's own generator would. */
 function apiError(status: number, type: string, requestId: string | null = null): APIError {
@@ -474,6 +478,230 @@ console.log('\nRecovery message:');
   ok('the EMBALLEMENT alert is untouched', formatAlert({ trigger: 'overheating', value: 10, timestamp: ts }).includes('floor_delay_streak = 10'));
   ok('the market-data alert is untouched', formatAlert({ trigger: 'market_data', value: 22, timestamp: ts, cause: null }).includes('DONNÉES DE MARCHÉ INDISPONIBLES'));
   ok('the market-data recovery is untouched', formatAlert({ trigger: 'market_data_recovered', value: 22, timestamp: ts }).includes('DONNÉES DE MARCHÉ RÉTABLIES'));
+}
+
+// ── G. THE TWO REVIEW FINDINGS ───────────────────────────────────────────────────────
+//
+// Both were raised by Codex on 2993d46 and both were real. They are pinned here rather
+// than merely fixed, because each is the kind of defect that leaves no trace when it
+// happens: a swallowed alert and an outage duration that is quietly too short.
+console.log('\nreset_bot race — a stale incident flag must not STICK (Codex P2 #1):');
+
+{
+  // Turning the flag into an incident removed the self-healing the old rule had. Stated as
+  // a contrast, so a future reader sees why the extra read exists at all.
+  ok(
+    'OLD rule: a stale armed flag self-healed on the next error beat',
+    // evaluateAlert(1, 3, true) → sent:false. Restated inline so this test does not depend
+    // on the old function still being wired to this trigger.
+    (1 >= THRESHOLD) === false,
+  );
+  ok(
+    'NEW rule: a stale armed flag would STICK — hence the re-read under the claim',
+    evaluateDegradedIncident('error', 1, THRESHOLD, true).armed === true,
+  );
+  ok(
+    '…and it would swallow the next real incident entirely',
+    evaluateDegradedIncident('error', 3, THRESHOLD, true).fire === false,
+  );
+  ok(
+    '…and a later decided cycle would fire a PHANTOM recovery',
+    evaluateDegradedIncident('decided', 0, THRESHOLD, true).recovered === true,
+  );
+
+  // The reader that closes it. `reset_bot` claims the SAME logical run-lock and holds the
+  // bot_state ROW lock for its whole transaction (migration 0010), so once the claim is
+  // ours it cannot interleave — the row is current by construction.
+  const botState = (row: unknown, error: unknown = null) =>
+    ({
+      from: () => ({
+        select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: row, error }) }) }),
+      }),
+    }) as unknown as SupabaseClient;
+
+  const postReset = await readIncidentState(
+    botState({ failure_alert_sent: false, last_success_at: null }),
+  );
+  ok('the re-read sees the POST-reset flag, not the snapshot', postReset?.failureAlertSent === false);
+  ok('…and the post-reset null last_success_at', postReset?.lastSuccessAt === null);
+
+  const openIncident = await readIncidentState(
+    botState({ failure_alert_sent: true, last_success_at: '2026-08-20T18:01:49.898Z' }),
+  );
+  ok('a genuinely open incident still reads as armed', openIncident?.failureAlertSent === true);
+  ok('…and carries the previous success timestamp', openIncident?.lastSuccessAt === '2026-08-20T18:01:49.898Z');
+
+  // Best-effort by contract, in all three failure shapes.
+  ok('a rejected re-read returns null (caller falls back to the snapshot)',
+    (await readIncidentState(botState(null, { message: 'boom' }))) === null);
+  ok('a missing bot_state row returns null too', (await readIncidentState(botState(null))) === null);
+  ok('a throwing client returns null rather than failing the beat',
+    (await readIncidentState({ from: () => { throw new Error('down'); } } as unknown as SupabaseClient)) === null);
+}
+
+// End to end, through the real runHeartbeat: a reset lands between record_heartbeat and
+// the claim, and the beat must NOT emit a phantom recovery.
+console.log('\nEnd to end — a reset between the snapshot and the claim emits no phantom recovery:');
+{
+  const beatWithReset = (rowAfterReset: { failure_alert_sent: boolean; last_success_at: string | null }) => {
+    const calls: string[] = [];
+    const supabase = {
+      // The PRE-reset snapshot: an incident is open and a success is on record.
+      rpc: async (fn: string) => {
+        calls.push(fn);
+        if (fn === 'record_heartbeat') {
+          return {
+            data: [{
+              next_check_at: new Date(NOW - 60_000).toISOString(), run_token: null, locked_until: null,
+              last_heartbeat_at: new Date(NOW).toISOString(),
+              last_success_at: '2026-08-20T18:01:49.898Z',
+              consecutive_failures: 3, floor_delay_streak: 0,
+              floor_alert_sent: false, failure_alert_sent: true,
+            }],
+            error: null,
+          };
+        }
+        if (fn === 'claim_due_run') {
+          // Post-reset: the counters the claim returns are already zeroed.
+          return {
+            data: [{
+              run_id: 1, prev_next_check_at: null, db_now: new Date(NOW).toISOString(),
+              consecutive_failures: 0, floor_delay_streak: 0,
+              consecutive_blind_cycles: 0, blind_alert_sent: false,
+            }],
+            error: null,
+          };
+        }
+        if (fn === 'finish_run') return { data: true, error: null };
+        return { data: null, error: null };
+      },
+      // The row AS IT REALLY IS once we hold the claim.
+      from: (table: string) => {
+        calls.push(`select:${table}`);
+        return {
+          select: () => ({
+            eq: () => ({ maybeSingle: async () => ({ data: rowAfterReset, error: null }) }),
+          }),
+        };
+      },
+    } as unknown as SupabaseClient;
+    return { supabase, calls };
+  };
+
+  const decidedCycle = async () => ({
+    outcome: {
+      status: 'decided' as const, appliedDelayMinutes: 60, decisionId: 1, detail: 'status=decided',
+      equitySnapshot: null, marketData: 'sighted' as const, llmFailure: null,
+    },
+    settled: true,
+    result: null as unknown as DecideResult,
+  });
+
+  {
+    // reset_bot HAS landed: the row says no incident is open.
+    const { supabase, calls } = beatWithReset({ failure_alert_sent: false, last_success_at: null });
+    const res = await runHeartbeat({ supabase, runCycle: decidedCycle });
+    const recoveries = (res.alerts ?? []).filter((a) => a.trigger === 'degraded_recovered');
+    ok('the beat re-reads bot_state under the claim', calls.includes('select:bot_state'));
+    ok('a reset-cleared incident emits NO phantom recovery', recoveries.length === 0);
+  }
+  {
+    // No reset: the incident really is open, so the recovery must still fire.
+    const { supabase } = beatWithReset({ failure_alert_sent: true, last_success_at: '2026-08-20T18:01:49.898Z' });
+    const res = await runHeartbeat({ supabase, runCycle: decidedCycle });
+    const recoveries = (res.alerts ?? []).filter((a) => a.trigger === 'degraded_recovered');
+    ok('a genuinely open incident DOES recover (the fix is not a muzzle)', recoveries.length === 1);
+  }
+}
+
+// The recovery must be dated at the cycle's COMPLETION, not at the claim.
+console.log('\nRecovery measured at completion, not at the claim (Codex P2 #2):');
+{
+  const CLAIM_MS = Date.parse('2026-08-20T23:10:03.681Z');
+  const CYCLE_MS = 92_697; // the real runtime of the 20/08 recovering cycle
+  const supabase = {
+    rpc: async (fn: string) => {
+      if (fn === 'record_heartbeat') {
+        return {
+          data: [{
+            next_check_at: new Date(CLAIM_MS - 60_000).toISOString(), run_token: null, locked_until: null,
+            last_heartbeat_at: new Date(CLAIM_MS).toISOString(),
+            last_success_at: '2026-08-20T18:01:49.898Z',
+            consecutive_failures: 4, floor_delay_streak: 0,
+            floor_alert_sent: false, failure_alert_sent: true,
+          }],
+          error: null,
+        };
+      }
+      if (fn === 'claim_due_run') {
+        return {
+          data: [{
+            run_id: 1, prev_next_check_at: null, db_now: new Date(CLAIM_MS).toISOString(),
+            consecutive_failures: 4, floor_delay_streak: 0,
+            consecutive_blind_cycles: 0, blind_alert_sent: false,
+          }],
+          error: null,
+        };
+      }
+      if (fn === 'finish_run') return { data: true, error: null };
+      return { data: null, error: null };
+    },
+    from: (table: string) =>
+      table === 'bot_state'
+        ? {
+            select: () => ({
+              eq: () => ({
+                maybeSingle: async () => ({
+                  data: { failure_alert_sent: true, last_success_at: '2026-08-20T18:01:49.898Z' },
+                  error: null,
+                }),
+              }),
+            }),
+          }
+        : {
+            // scheduler_runs: the four errors of the incident.
+            select: () => ({
+              eq: () => ({ eq: () => ({ lte: () => ({ gt: async () => ({ count: 4, error: null }) }) }) }),
+            }),
+          },
+  } as unknown as SupabaseClient;
+
+  // A cycle that genuinely TAKES time, so claim-time and completion-time differ.
+  const slowDecidedCycle = async () => {
+    await new Promise((r) => setTimeout(r, 60));
+    return {
+      outcome: {
+        status: 'decided' as const, appliedDelayMinutes: 60, decisionId: 1, detail: 'status=decided',
+        equitySnapshot: null, marketData: 'sighted' as const, llmFailure: null,
+      },
+      settled: true,
+      result: null as unknown as DecideResult,
+    };
+  };
+
+  const res = await runHeartbeat({ supabase, runCycle: slowDecidedCycle });
+  const recovery = (res.alerts ?? []).find((a) => a.trigger === 'degraded_recovered');
+  assert.ok(recovery && recovery.trigger === 'degraded_recovered');
+  ok('the recovery fires', recovery.trigger === 'degraded_recovered');
+  ok('it reports the rebuilt failure count (4), not consecutive_failures', recovery.failureCount === 4);
+
+  const claimBasedOutage = CLAIM_MS - Date.parse('2026-08-20T18:01:49.898Z');
+  assert.ok(recovery.outageMs != null);
+  ok(
+    'the outage is measured PAST the claim instant — the cycle runtime is included',
+    recovery.outageMs > claimBasedOutage,
+  );
+  ok(
+    'the recovery timestamp is dated AFTER the claim, i.e. once the decision existed',
+    Date.parse(recovery.timestamp) > CLAIM_MS,
+  );
+  // The size of the correction, on the real incident: the 20/08 recovering cycle ran
+  // 92.7 s, which is a whole minute of outage the claim-based measure simply dropped.
+  ok(
+    'on 20/08 that correction is worth ~93 s of under-reported outage',
+    formatDuration(claimBasedOutage) === '5 h 8 min' &&
+      formatDuration(claimBasedOutage + CYCLE_MS) === '5 h 9 min',
+  );
 }
 
 console.log(`\n${passed} provider-resilience checks passed.`);

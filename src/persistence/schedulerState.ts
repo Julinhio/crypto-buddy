@@ -171,6 +171,72 @@ export async function finishRun(supabase: SupabaseClient, p: FinishRunParams): P
   return data === true;
 }
 
+/** The degraded incident's two inputs, read UNDER THE CLAIM rather than from a snapshot. */
+export interface IncidentState {
+  /** Is a degraded incident currently open? (`bot_state.failure_alert_sent`.) */
+  failureAlertSent: boolean;
+  /** The previous valid decision — where "time without a decision" starts. */
+  lastSuccessAt: string | null;
+}
+
+/**
+ * RE-READS THE DEGRADED INCIDENT'S STATE ONCE THE RUN-LOCK IS HELD.
+ *
+ * `record_heartbeat` snapshots `bot_state` at the TOP of the beat, and `reset_bot` can land
+ * between that snapshot and our claim: it zeroes `failure_alert_sent`, nulls
+ * `last_success_at`, purges `scheduler_runs`, and reschedules to `now()` — so our claim
+ * still succeeds while the snapshot holds pre-reset values.
+ *
+ * That used to be harmless for this flag. `evaluateAlert` recomputed it from the counter
+ * every beat, so a stale `true` was overwritten with `false` on the very next beat. Turning
+ * the flag into an INCIDENT (`evaluateDegradedIncident`) removes that self-healing: a stale
+ * `true` would now STICK, swallowing the degraded alert of the next real incident, and a
+ * later decided cycle would fire a phantom recovery quoting a pre-reset outage duration.
+ * The fix belongs here rather than in the policy, which is pure and right.
+ *
+ * Reading under the claim closes it, exactly as `consecutive_blind_cycles` is read from
+ * `ClaimResult`: `reset_bot` claims the SAME logical run-lock and holds the `bot_state` ROW
+ * lock for its whole transaction (migration 0010), so once we own the claim it provably
+ * cannot interleave. Done with a plain select rather than by extending `claim_due_run` —
+ * that would need a migration, which this PR does not take.
+ *
+ * BEST-EFFORT: returns `null` on any failure, and the caller falls back to the snapshot —
+ * i.e. to the exact behaviour that shipped before. A read that exists only to keep an alert
+ * honest must never be able to fail a cycle that is placing real orders.
+ *
+ * Only worth calling when the SNAPSHOT SAYS ARMED, because that is the only direction
+ * staleness can take: `reset_bot` only ever writes `false`, and the only writer of `true` is
+ * `finish_run`, which is fenced to the lock holder — us. A snapshot reading `false` while
+ * the row reads `true` is therefore impossible, so the common path pays nothing.
+ */
+export async function readIncidentState(supabase: SupabaseClient): Promise<IncidentState | null> {
+  try {
+    const { data, error } = await supabase
+      .from('bot_state')
+      .select('failure_alert_sent, last_success_at')
+      .eq('id', 1)
+      .maybeSingle();
+    if (error || !data) {
+      console.warn(
+        `[warn] could not re-read the incident state under the claim (${error?.message ?? 'no bot_state row'}) — ` +
+          'falling back to the pre-cycle snapshot.',
+      );
+      return null;
+    }
+    const row = data as Record<string, unknown>;
+    return {
+      failureAlertSent: Boolean(row.failure_alert_sent ?? false),
+      lastSuccessAt: (row.last_success_at as string | null) ?? null,
+    };
+  } catch (err) {
+    console.warn(
+      `[warn] could not re-read the incident state under the claim ` +
+        `(${err instanceof Error ? err.message : String(err)}) — falling back to the pre-cycle snapshot.`,
+    );
+    return null;
+  }
+}
+
 /**
  * HOW MANY CYCLES REALLY FAILED DURING THE INCIDENT THAT JUST ENDED.
  *

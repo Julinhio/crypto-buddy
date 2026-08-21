@@ -7,6 +7,7 @@ import {
   claimDueRun,
   countFailedRunsSince,
   finishRun,
+  readIncidentState,
 } from '../persistence/schedulerState.js';
 import type { EquitySnapshotInsert } from '../persistence/equitySnapshots.js';
 import { armCycleWatchdog, runGuardedCycle, type GuardedCycle } from './cycleGuard.js';
@@ -143,7 +144,25 @@ export async function runHeartbeat(
     // 4. Run the cycle exactly ONCE on the current market (no replay of missed beats),
     //    under the hard timeout, capturing whether it SETTLED (returned/threw → no
     //    orphan) or timed out (an orphan keeps running in the background).
+    /*
+     * THE CYCLE'S OWN ELAPSED TIME, anchored on the DATABASE's clock.
+     *
+     * `claim.dbNow` is the claim instant, which PRECEDES the whole cycle — using it as the
+     * recovery's completion time would date the all-clear before the decision that caused
+     * it existed, and would understate the outage by the cycle's full runtime (93 s on the
+     * 20/08 recovery, and up to the 300 s budget on a slow one). The brief measures the
+     * outage "until the completion of the new decided cycle", so the completion instant is
+     * what it must be.
+     *
+     * `finish_run` returns only a boolean, so there is no DB completion timestamp to read
+     * without a migration. Instead: the DB anchor PLUS a locally measured DURATION. A
+     * duration is immune to clock skew between the app and the database, which a bare
+     * `Date.now()` would not be — so this stays on the DB's timeline rather than silently
+     * mixing two clocks.
+     */
+    const cycleStartedLocalMs = Date.now();
     const { outcome, settled, result } = await runCycle();
+    const cycleElapsedMs = Date.now() - cycleStartedLocalMs;
     const {
       status,
       appliedDelayMinutes: appliedDelay,
@@ -209,11 +228,23 @@ export async function runHeartbeat(
     // producing a decision), closed only by a real one. `evaluateAlert` still drives the
     // overheating trigger unchanged — its counter only moves on a decided cycle, so it
     // never had this problem. See evaluateDegradedIncident.
+    //
+    // The two inputs are re-read UNDER THE CLAIM when the snapshot says an incident is
+    // open. `reset_bot` can land between `record_heartbeat` and the claim and clear both;
+    // with the flag now meaning "an incident is open" rather than "the counter is high",
+    // a stale `true` would STICK — swallowing the next real degraded alert and firing a
+    // phantom recovery quoting a pre-reset duration. Only that direction is possible
+    // (reset only ever writes `false`, and only our own fenced `finish_run` writes `true`),
+    // so a healthy beat pays for no extra read. Best-effort: on a failed read we fall back
+    // to the snapshot, i.e. to the behaviour that shipped before.
+    const incidentState = state.failureAlertSent ? await readIncidentState(supabase) : null;
+    const incidentArmedBefore = incidentState?.failureAlertSent ?? state.failureAlertSent;
+    const previousSuccessAt = incidentState ? incidentState.lastSuccessAt : state.lastSuccessAt;
     const failureIncident = evaluateDegradedIncident(
       runOutcome,
       failuresAfter,
       config.alerting.consecutiveFailuresThreshold,
-      state.failureAlertSent,
+      incidentArmedBefore,
     );
 
     // THE SECOND HEALTH STATE. Same shape as the two above — a counter, one pure debounce
@@ -292,20 +323,29 @@ export async function runHeartbeat(
       // reads are best-effort and neither can fail the cycle — the orders are already
       // placed and the ledger already booked by the time we get here.
       //
-      // `state.lastSuccessAt` is the PRE-cycle snapshot, i.e. the previous valid decision:
-      // finish_run has just overwritten the column with this run's success, so the
-      // snapshot is the only remaining witness of where the outage started. Null (never a
-      // success, or a reset) → the duration is reported as unknown, never invented.
-      const previousSuccessMs = state.lastSuccessAt ? Date.parse(state.lastSuccessAt) : NaN;
-      const recoveredAtMs = Date.parse(claim.dbNow);
+      // `previousSuccessAt` is the PREVIOUS valid decision — the pre-cycle snapshot, or the
+      // value re-read under the claim when a reset may have moved it. finish_run has just
+      // overwritten the column with THIS run's success, so it is the only remaining witness
+      // of where the outage started. Null (never a success, or a reset) → the duration is
+      // reported as unknown, never invented.
+      //
+      // The end of the outage is the CYCLE'S COMPLETION, not the claim: DB anchor plus the
+      // locally measured cycle duration. Dating it at `claim.dbNow` would announce the
+      // all-clear before the decision that justifies it existed.
+      const previousSuccessMs = previousSuccessAt ? Date.parse(previousSuccessAt) : NaN;
+      const claimedAtMs = Date.parse(claim.dbNow);
+      const recoveredAtMs = Number.isNaN(claimedAtMs) ? NaN : claimedAtMs + cycleElapsedMs;
       const outageMs =
         Number.isNaN(previousSuccessMs) || Number.isNaN(recoveredAtMs)
           ? null
           : recoveredAtMs - previousSuccessMs;
-      const failureCount = await countFailedRunsSince(supabase, state.lastSuccessAt, claim.dbNow);
+      // The query's upper bound stays `claim.dbNow` — a genuine DB timestamp rather than a
+      // derived one, and no run can complete inside the window anyway: we hold the lock,
+      // and this run itself is `decided`, not `error`.
+      const failureCount = await countFailedRunsSince(supabase, previousSuccessAt, claim.dbNow);
       alerts.push({
         trigger: 'degraded_recovered',
-        timestamp: claim.dbNow,
+        timestamp: Number.isNaN(recoveredAtMs) ? claim.dbNow : new Date(recoveredAtMs).toISOString(),
         failureCount,
         outageMs,
       });
