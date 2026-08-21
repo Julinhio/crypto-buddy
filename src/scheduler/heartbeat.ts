@@ -2,13 +2,19 @@ import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { config } from '../config/index.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
-import { recordHeartbeat, claimDueRun, finishRun } from '../persistence/schedulerState.js';
+import {
+  recordHeartbeat,
+  claimDueRun,
+  countFailedRunsSince,
+  finishRun,
+} from '../persistence/schedulerState.js';
 import type { EquitySnapshotInsert } from '../persistence/equitySnapshots.js';
 import { armCycleWatchdog, runGuardedCycle, type GuardedCycle } from './cycleGuard.js';
 import {
   canClaim,
   classifyOutcome,
   evaluateAlert,
+  evaluateDegradedIncident,
   evaluateRecovery,
   missedBeats,
   nextBlindCycles,
@@ -145,6 +151,7 @@ export async function runHeartbeat(
       detail,
       equitySnapshot,
       marketData,
+      llmFailure,
     } = outcome;
 
     // 5b. TIMED OUT → crash behavior. Do NOT finish_run: KEEP the lock and do NOT
@@ -184,6 +191,12 @@ export async function runHeartbeat(
       softSkipDelayMinutes: config.scheduler.softSkipDelayMinutes,
       minDelayMinutes: config.decision.minDelayMinutes,
       maxDelayMinutes: config.decision.maxDelayMinutes,
+      // THE TYPED CLASS, straight from the decision layer. Not parsed from `detail`, not
+      // re-read from `decisions.raw_response`, not re-classified here — the scheduler is a
+      // CONSUMER of the classification, never a second source of it. That is what makes
+      // rewording an error message provably unable to move the backoff.
+      failureClass: llmFailure?.failureClass ?? null,
+      retryableLlmTransportMaxDelayMinutes: config.decision.retryableLlmTransportMaxDelayMinutes,
     });
     const floorStreak = nextFloorStreak(claim.floorDelayStreak, runOutcome, appliedDelay, config.decision.minDelayMinutes);
 
@@ -191,7 +204,17 @@ export async function runHeartbeat(
     // record_heartbeat snapshot at the very top of this beat — and only finishRun
     // (us, fencing-guarded) rewrites them, so that snapshot is still current here.
     const floorAlert = evaluateAlert(floorStreak, config.alerting.floorStreakThreshold, state.floorAlertSent);
-    const failureAlert = evaluateAlert(failuresAfter, config.alerting.consecutiveFailuresThreshold, state.failureAlertSent);
+    // The degraded trigger is now an INCIDENT LIFECYCLE, not a threshold comparison: armed
+    // on the crossing, held across `skipped` cycles (which reset the counter without
+    // producing a decision), closed only by a real one. `evaluateAlert` still drives the
+    // overheating trigger unchanged — its counter only moves on a decided cycle, so it
+    // never had this problem. See evaluateDegradedIncident.
+    const failureIncident = evaluateDegradedIncident(
+      runOutcome,
+      failuresAfter,
+      config.alerting.consecutiveFailuresThreshold,
+      state.failureAlertSent,
+    );
 
     // THE SECOND HEALTH STATE. Same shape as the two above — a counter, one pure debounce
     // evaluation, one flag persisted in the same fenced transaction — because the brief
@@ -232,7 +255,10 @@ export async function runHeartbeat(
       // as the counters. A send that later fails just loses that one alert (no spam);
       // a reclaimed run can't write these (fencing) so it won't send below either.
       floorAlertSent: floorAlert.sent,
-      failureAlertSent: failureAlert.sent,
+      // Intent-first for the recovery too: the incident is DISARMED in this same fenced
+      // transaction, before any send. A Telegram failure then costs one notification, not
+      // a message that repeats on every later beat.
+      failureAlertSent: failureIncident.armed,
       consecutiveBlindCycles: blindAfter,
       blindAlertSent: blindAlert.sent,
       // Only a KNOWN answer touches `last_market_data_ok_at`; 'unknown' passes null and
@@ -257,8 +283,32 @@ export async function runHeartbeat(
     if (floorAlert.fire) {
       alerts.push({ trigger: 'overheating', value: floorStreak, timestamp: claim.dbNow });
     }
-    if (failureAlert.fire) {
+    if (failureIncident.fire) {
       alerts.push({ trigger: 'degraded', value: failuresAfter, timestamp: claim.dbNow, lastError: detail });
+    }
+    if (failureIncident.recovered) {
+      // THE ONLY PLACE THE HISTORY IS RE-READ, and only once a recovery is genuinely
+      // candidate: an incident really was alerted, and this cycle really did decide. Both
+      // reads are best-effort and neither can fail the cycle — the orders are already
+      // placed and the ledger already booked by the time we get here.
+      //
+      // `state.lastSuccessAt` is the PRE-cycle snapshot, i.e. the previous valid decision:
+      // finish_run has just overwritten the column with this run's success, so the
+      // snapshot is the only remaining witness of where the outage started. Null (never a
+      // success, or a reset) → the duration is reported as unknown, never invented.
+      const previousSuccessMs = state.lastSuccessAt ? Date.parse(state.lastSuccessAt) : NaN;
+      const recoveredAtMs = Date.parse(claim.dbNow);
+      const outageMs =
+        Number.isNaN(previousSuccessMs) || Number.isNaN(recoveredAtMs)
+          ? null
+          : recoveredAtMs - previousSuccessMs;
+      const failureCount = await countFailedRunsSince(supabase, state.lastSuccessAt, claim.dbNow);
+      alerts.push({
+        trigger: 'degraded_recovered',
+        timestamp: claim.dbNow,
+        failureCount,
+        outageMs,
+      });
     }
     if (blindAlert.fire) {
       // `detail` carries the cycle's own status string, which on a blind cycle is

@@ -337,7 +337,36 @@ guard against ever deciding twice in parallel.
   jump the schedule forward. And reschedule for **every** outcome so the bot never
   goes dark: a decided cycle → the LLM's bounded delay (15–240); a soft skip → a
   fixed ~30 min; a hard error → capped exponential backoff (15, 30, 60, 120, 240)
-  reset on success.
+  reset on success — **except** when the failure is classified
+  `retryable_llm_transport`, which is capped at 30 min (see below).
+- **A provider fault is not a broken bot** — on 20/08/2026 four consecutive cycles
+  died on the same wall (`claude-sonnet-4-6`, aborted at ~90 008 ms, no allocation,
+  no order) and the generic backoff turned a 26-minute Anthropic incident into
+  **5 h 10 min without a valid decision**. So the decision layer now CLASSIFIES its
+  own failures, once, in `decision/llmFailure.ts`, and hands the scheduler a typed
+  value rather than a string. Exactly four causes become `retryable_llm_transport`:
+  the local 90 s attempt deadline, an SDK connection/transport error, HTTP 429, and
+  HTTP 5xx (529 included). Auth, a missing key, config, parsing, the coherence
+  guard, Supabase, application logic and **anything unrecognised** keep the generic
+  policy — an unknown error is never made retryable by optimism. Those failures are
+  capped at `retryableLlmTransportMaxDelayMinutes` (30), so the same incident would
+  now read 15 / 30 / 30 / 30 instead of 15 / 30 / 60 / 120.
+  Two rules make it trustworthy: **nothing is classified from a message** (the
+  deadline is recognised through a typed error built by the code that owns the
+  `AbortSignal`, so rewording it cannot move the backoff), and the **classification
+  has a single source** — the scheduler consumes it, never re-derives it from
+  `raw_response`, `detail`, or an exception. `consecutive_failures` stays global: a
+  change of class picks a different ceiling, it never resets the counter.
+- **A failed LLM call leaves a structured trace** — that same classification is
+  serialized as a versioned JSON (`schema_version: 1`) into the text column that
+  already held the bare error message, so **no migration**. Where the incident left
+  four rows reading `Request was aborted.`, a failure now records its class, error
+  type, cleaned message, HTTP status, request id, logical attempt and elapsed time.
+  Unknown fields are `null`, never a plausible default — `sdk_request_count` in
+  particular, because the SDK exposes no such count and `1 + maxRetries` is a
+  ceiling, not a measurement. No key, no prompt, no headers, no response body.
+  A `decided` row's `raw_response` is untouched, and the replays already filter on
+  `status = 'decided'`, so the corpus never sees these rows.
 - **No catch-up** — if many beats were missed (the bot was down), run **one** fresh
   cycle on the current market; missed beats are only logged.
 - **Fail loud on infra** — for a cron-launched bot the **exit code is the first line
@@ -398,23 +427,42 @@ catches. Detection lives in their dashboard (period 5 min, grace 15–20 min, em
 nothing to code. Note a *cycle* error still pings (the process is alive and backing
 off) — that gap is covered by the degraded alert below, not by Healthchecks.
 
-**Internal alerts (Telegram).** Two triggers, both off the counters `bot_state`
-already maintains, each with named thresholds in config (easy to retune):
+**Internal alerts (Telegram).** Two counter triggers, both off the counters
+`bot_state` already maintains, each with named thresholds in config (easy to retune),
+plus the recovery that closes the second one:
 
 - **Overheating** — `floor_delay_streak` reaches **10**: the AI has asked for its
   15-min floor delay ten cycles in a row.
 - **Degraded** — `consecutive_failures` reaches **3**: the bot still beats but its
   cycle fails every time (the gap Healthchecks can't see — the process is up and
   still pinging). The alert carries the last cycle's error when available.
+- **Recovered** — the counterpart of the degraded alert, sent on the **first cycle
+  that decides again** after one was actually raised. It reports the failures during
+  the incident and the time **without a valid decision** — measured from the previous
+  `last_success_at`, so the 20/08 incident reads 5 h 09 min rather than the 2 h
+  between the first and last error. Both numbers degrade to an explicit
+  *indisponible* / *inconnu* rather than to a zero.
 
-**Anti-spam (debounce).** Identical for both, and **independent** per trigger (an
-overheating alert never masks a degraded one): alert **once** on the crossing, stay
-silent while the counter remains above, **re-arm** when it drops back. The state is
-one debounce flag per trigger in `bot_state` (`floor_alert_sent` / `failure_alert_sent`,
-migration 0007 — they replace the unused `alert_sent` placeholder). The decision is a
-pure function (`evaluateAlert` in `scheduler/policy.ts`); the flags are persisted in
-the same fenced `finish_run` transaction as the counters, so a reclaimed run can't
-double-alert.
+**Anti-spam (debounce).** Identical for both counter triggers, and **independent**
+per trigger (an overheating alert never masks a degraded one): alert **once** on the
+crossing, stay silent while the counter remains above, **re-arm** when it drops back.
+The state is one debounce flag per trigger in `bot_state` (`floor_alert_sent` /
+`failure_alert_sent`, migration 0007 — they replace the unused `alert_sent`
+placeholder). The decision is a pure function (`evaluateAlert` in
+`scheduler/policy.ts`); the flags are persisted in the same fenced `finish_run`
+transaction as the counters, so a reclaimed run can't double-alert.
+
+**The degraded trigger is an INCIDENT, not a threshold.** `evaluateAlert` answers "is
+this counter above its threshold right now?", which is right for `overheating` (its
+counter only moves on a decided cycle) and wrong for `degraded`: a **skipped** cycle
+resets `consecutive_failures` without producing any decision, so one skip mid-incident
+silently re-armed the trigger and no recovery could ever be announced. So
+`failure_alert_sent` now means *an incident is open* (`evaluateDegradedIncident`):
+armed on the crossing, **held across skips**, closed only by a real decision. The
+counter itself is untouched — "consecutive failures" still means consecutive failures,
+which is exactly why the recovery message cannot read its count from it and rebuilds it
+from `scheduler_runs` instead (`countFailedRunsSince`, best-effort: it returns `null`
+rather than ever failing a valid financial cycle).
 
 **Robustness — the alerting layer can NEVER take the bot down.** Every external call
 (the Healthchecks ping and the Telegram send) is **best-effort**: on any failure or
@@ -621,12 +669,12 @@ src/
 │   ├── athAtlCache.ts       # ATH/ATL seed / maintain / fallback logic
 │   ├── decisions.ts         # load recent + insert decision rows (resilient)
 │   ├── executions.ts        # execution journal: derive ledger (booked intents) + insert rows
-│   └── schedulerState.ts    # bot_state + scheduler_runs RPCs (heartbeat / claim / finish)
+│   └── schedulerState.ts    # bot_state + scheduler_runs RPCs (heartbeat / claim / finish) + incident failure rebuild
 ├── scheduler/
-│   ├── policy.ts            # PURE logic: due/lock, missed beats, backoff, delays, overheating, alert debounce
+│   ├── policy.ts            # PURE logic: due/lock, missed beats, backoff, delays, overheating, alert debounce, degraded incident
 │   └── heartbeat.ts         # one beat: liveness → atomic claim → cycle → reschedule → release → alerts
 ├── alerting/
-│   ├── messages.ts         # PURE alert payloads + Telegram text (trigger, value, time, last error)
+│   ├── messages.ts         # PURE alert payloads + Telegram text (trigger, value, time, last error, recovery)
 │   ├── telegram.ts         # best-effort Telegram sender (never throws, hard timeout)
 │   ├── healthchecks.ts     # best-effort dead-man's-switch ping (never throws, hard timeout)
 │   ├── sendTestMessage.ts  # `notify:test` — prove the Telegram bot end-to-end
@@ -652,7 +700,8 @@ src/
     ├── effectiveTarget.ts   # which allocation column answers which question
     ├── prompt.ts            # frozen mandate v2 (caps + portfolio) + per-run user prompt
     ├── context.ts           # decision context: portfolio in place of testnet balances
-    ├── llm.ts               # Anthropic client, structured call, token/latency capture
+    ├── llm.ts               # Anthropic client, structured call, token/latency capture, owned attempt deadline
+    ├── llmFailure.ts        # THE single LLM failure classifier + versioned failure journal
     ├── gitSha.ts            # commit SHA for traceability (env → git → null)
     ├── decide.ts            # orchestrator: derive → decide → clamp → movements → execute
     └── print.ts             # human-readable decision output

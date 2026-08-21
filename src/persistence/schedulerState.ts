@@ -172,6 +172,58 @@ export async function finishRun(supabase: SupabaseClient, p: FinishRunParams): P
 }
 
 /**
+ * HOW MANY CYCLES REALLY FAILED DURING THE INCIDENT THAT JUST ENDED.
+ *
+ * The recovery message wants one number: failures between the last valid decision and this
+ * one. `consecutive_failures` cannot supply it — a `skipped` cycle resets it, so after
+ * `error / error / error / skip / error` the counter reads 1 for an incident that cost
+ * five wake-ups. Making the counter keep non-consecutive failures would falsify the name
+ * and the backoff that reads it. So the number is REBUILT from the append-only history
+ * instead, which already holds every run's outcome and needs no migration to be asked.
+ *
+ * Window: strictly after the PREVIOUS `last_success_at` (the last decided cycle, which is
+ * where "without a valid decision" starts) and up to the claim time of the recovering run.
+ * Only runs that reached `completed` with the technical outcome `error` are counted — a
+ * crashed run left at `running` never produced an outcome, and a `skip` is not a failure.
+ *
+ * BEST-EFFORT BY CONTRACT, and this is the load-bearing property. It exists solely to put
+ * a number in a Telegram message, and it runs on a cycle that has just SUCCEEDED — placing
+ * real orders and a sovereign booking behind it. It therefore returns `null` on every
+ * failure instead of throwing: an observability read must never turn a valid financial
+ * cycle into a failed one. `null` means "unavailable", never "zero", and the message says
+ * so rather than printing a number nobody counted.
+ */
+export async function countFailedRunsSince(
+  supabase: SupabaseClient,
+  sinceIso: string | null,
+  untilIso: string,
+): Promise<number | null> {
+  try {
+    let query = supabase
+      .from('scheduler_runs')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'completed')
+      .eq('outcome', 'error')
+      .lte('finished_at', untilIso);
+    // No previous success (a fresh install, or a reset) → no lower bound. Counting every
+    // error ever recorded is still the honest answer to "since the last valid decision".
+    if (sinceIso != null) query = query.gt('finished_at', sinceIso);
+    const { count, error } = await query;
+    if (error) {
+      console.warn(`[warn] recovery: could not rebuild the failure count (${error.message}) — reporting it as unavailable.`);
+      return null;
+    }
+    return typeof count === 'number' ? count : null;
+  } catch (err) {
+    console.warn(
+      `[warn] recovery: could not rebuild the failure count (${err instanceof Error ? err.message : String(err)}) — ` +
+        'reporting it as unavailable. The cycle itself is unaffected.',
+    );
+    return null;
+  }
+}
+
+/**
  * Claims the run-lock for a MANUAL one-shot cycle (`npm run decide`) — the same
  * atomic compare-and-set as claim_due_run MINUS the "due?" check (a manual run wants
  * to run NOW, like reset_bot). Returns true on a claim, false when a live lock is

@@ -68,6 +68,23 @@ export interface DecisionConfig {
    * reserve still intact — otherwise the cycle fails cleanly before the watchdog kills it.
    */
   retryReserveSeconds: number;
+  /**
+   * THE CEILING ON A PROVIDER-FAULT BACKOFF, in minutes.
+   *
+   * The generic backoff (15 / 30 / 60 / 120 / 240) is right for a bot that is broken: keep
+   * doubling, stop hammering, wait for a human. It is wrong for a bot whose PROVIDER is
+   * briefly unwell — on 20/08/2026 four transport failures bought four hours of silence
+   * for an outage Anthropic declared over in twenty-six minutes.
+   *
+   * So a failure classified `retryable_llm_transport` takes `min(generic backoff, this)`.
+   * 30 minutes is one doubling past the floor: long enough that a real outage is not
+   * hammered (two attempts an hour, against a 90 s call), short enough that a bot which
+   * would otherwise be waiting four hours loses at most half of one.
+   *
+   * NOT an environment variable, deliberately. It is a strategy bound like `minDelayMinutes`
+   * and `maxDelayMinutes`, and those live in code where a review sees them change.
+   */
+  retryableLlmTransportMaxDelayMinutes: number;
 }
 
 /**
@@ -509,6 +526,9 @@ export const config: AppConfig = {
     // write. The worst FULL cycle ever measured is 42.10s, of which the LLM call was
     // 39.23s; the tail has never approached 45s.
     retryReserveSeconds: 45,
+    // One doubling above the 15-min floor. Only a `retryable_llm_transport` failure is
+    // capped here; every other error keeps the full 15/30/60/120/240 escalation.
+    retryableLlmTransportMaxDelayMinutes: 30,
   },
 
   execution: {
@@ -783,6 +803,31 @@ export function validateDecisionConfig(
   }
   if (!(decision.retryReserveSeconds > 0)) {
     problems.push(`retryReserveSeconds must be > 0 (got ${decision.retryReserveSeconds})`);
+  }
+  // The provider-fault ceiling, bounded at BOTH ends by the delays it sits between.
+  //
+  // Below `minDelayMinutes` it would be a ceiling the floor already overrides — the cap
+  // would silently do nothing, which is worse than being rejected because it LOOKS
+  // configured. Above `maxDelayMinutes` it could never bind either, since the generic
+  // backoff is already clamped there. An integer, because a delay in minutes reaches SQL
+  // as one; strictly positive and finite, because a zero or a NaN would either hammer the
+  // provider every beat or produce an invalid next_check_at.
+  const cap = decision.retryableLlmTransportMaxDelayMinutes;
+  if (
+    !(
+      Number.isFinite(cap) &&
+      Number.isInteger(cap) &&
+      cap > 0 &&
+      cap >= decision.minDelayMinutes &&
+      cap <= decision.maxDelayMinutes
+    )
+  ) {
+    problems.push(
+      `retryableLlmTransportMaxDelayMinutes must be a positive integer within ` +
+        `[minDelayMinutes, maxDelayMinutes] = [${decision.minDelayMinutes}, ${decision.maxDelayMinutes}] ` +
+        `(got ${cap}) — below the floor it could never bind, above the ceiling it could never ` +
+        'bind either, and either way it would read as configured while doing nothing',
+    );
   }
   const worstCase = 2 * decision.attemptTimeoutSeconds + decision.retryReserveSeconds;
   if (worstCase > scheduler.maxCycleSeconds) {

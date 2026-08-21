@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { config, type StrategyVersion } from '../config/index.js';
 import { buildDecisionSchema, type DecisionOutput } from './schema.js';
+import { LlmAttemptDeadlineError } from './llmFailure.js';
 
 // Memoized client.
 let client: Anthropic | null = null;
@@ -45,6 +46,36 @@ const LLM_TIMEOUT_MS = Math.floor(
  * rather than leaving an orphan in flight, as a `Promise.race` against a timer would.
  */
 const ATTEMPT_DEADLINE_MS = config.decision.attemptTimeoutSeconds * 1000;
+
+/**
+ * The deadline's signal, plus the ONE bit that says whether it is OUR timer that fired.
+ *
+ * Was `AbortSignal.timeout(…)`, which is a fine timer and a terrible witness: the SDK turns
+ * any abort into the same `APIUserAbortError` carrying the same sentence, and a caller
+ * downstream could then only tell a 90-second deadline from any other cancellation by
+ * reading that sentence. The whole point of this PR is that no operational decision may
+ * rest on an SDK message — so the component that OWNS the signal keeps the fact instead.
+ *
+ * An explicit `AbortController` gives us that: the timer callback sets `fired` immediately
+ * before aborting, so `fired === true` in the catch means the abort came from here and
+ * from nothing else. That is knowledge, not inference.
+ *
+ * The caller MUST `dispose()` on every path — a live timer would hold the event loop open
+ * for up to 90 s after a fast, successful call.
+ */
+function attemptDeadline(): { signal: AbortSignal; fired: () => boolean; dispose: () => void } {
+  const controller = new AbortController();
+  let fired = false;
+  const timer = setTimeout(() => {
+    fired = true;
+    controller.abort();
+  }, ATTEMPT_DEADLINE_MS);
+  return {
+    signal: controller.signal,
+    fired: () => fired,
+    dispose: () => clearTimeout(timer),
+  };
+}
 
 const MISSING_KEY_MESSAGE =
   'Missing ANTHROPIC_API_KEY — set it in .env to run the decision layer. ' +
@@ -136,26 +167,41 @@ export async function runDecision(params: {
   }
 
   const start = Date.now();
-  const message = await anthropic.messages.create(
-    {
-      model,
-      max_tokens: config.decision.maxTokens,
-      // Frozen mandate, cache_control'd for reuse across runs (volatile context
-      // lives in the user turn, after this cached prefix). The retry keeps the same
-      // system prefix AND the same first user turn, so it reads the cache the first
-      // attempt just wrote rather than paying for the context twice.
-      system: [
-        { type: 'text', text: params.systemPrompt, cache_control: { type: 'ephemeral' } },
-      ],
-      messages,
-      output_config: { format: zodOutputFormat(schema) },
-    },
-    // The per-attempt bound, restated at the call site so it applies to the retry too,
-    // and so the relation to the cycle budget is visible where the network call actually
-    // happens. `signal` is the load-bearing one: `timeout` and `maxRetries` bound the
-    // REQUESTS, the signal bounds the whole attempt including the SDK's backoff sleeps.
-    { timeout: LLM_TIMEOUT_MS, maxRetries: LLM_MAX_RETRIES, signal: AbortSignal.timeout(ATTEMPT_DEADLINE_MS) },
-  );
+  const deadline = attemptDeadline();
+  let message: Anthropic.Message;
+  try {
+    message = await anthropic.messages.create(
+      {
+        model,
+        max_tokens: config.decision.maxTokens,
+        // Frozen mandate, cache_control'd for reuse across runs (volatile context
+        // lives in the user turn, after this cached prefix). The retry keeps the same
+        // system prefix AND the same first user turn, so it reads the cache the first
+        // attempt just wrote rather than paying for the context twice.
+        system: [
+          { type: 'text', text: params.systemPrompt, cache_control: { type: 'ephemeral' } },
+        ],
+        messages,
+        output_config: { format: zodOutputFormat(schema) },
+      },
+      // The per-attempt bound, restated at the call site so it applies to the retry too,
+      // and so the relation to the cycle budget is visible where the network call actually
+      // happens. `signal` is the load-bearing one: `timeout` and `maxRetries` bound the
+      // REQUESTS, the signal bounds the whole attempt including the SDK's backoff sleeps.
+      { timeout: LLM_TIMEOUT_MS, maxRetries: LLM_MAX_RETRIES, signal: deadline.signal },
+    );
+  } catch (err) {
+    // THE ONE PLACE THE DEADLINE IS NAMED. We own the controller, so `fired()` is a fact
+    // about our own timer rather than a reading of the SDK's prose — and re-throwing a
+    // TYPED error is what lets `classifyLlmFailure` recognise it without ever touching a
+    // message. Anything else propagates verbatim: the SDK's own error classes already
+    // carry the status and the request id the classifier needs.
+    if (deadline.fired()) throw new LlmAttemptDeadlineError(ATTEMPT_DEADLINE_MS, { cause: err });
+    throw err;
+  } finally {
+    // Always: a pending 90 s timer would keep the process alive long after a fast call.
+    deadline.dispose();
+  }
   const latencyMs = Date.now() - start;
 
   const rawResponse = message.content

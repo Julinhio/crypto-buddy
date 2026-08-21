@@ -1,5 +1,6 @@
 import { config, WATCHDOG_GRACE_SECONDS } from '../config/index.js';
 import { decide, type DecideResult } from '../decision/decide.js';
+import type { LlmFailureClassification } from '../decision/llmFailure.js';
 import { prepareEquitySnapshot, type EquitySnapshotInsert } from '../persistence/equitySnapshots.js';
 import type { CycleStatus } from './policy.js';
 
@@ -55,6 +56,20 @@ export interface CycleOutcome {
    * warrants none (skipped) or the cycle didn't return a valued book (timeout/throw).
    */
   equitySnapshot: EquitySnapshotInsert | null;
+  /**
+   * THE TYPED FAILURE CLASS, carried straight through from the decision layer.
+   *
+   * This is the scheduler's ONLY input on the question "was this a provider fault?". It is
+   * relayed verbatim — this file classifies nothing, and `detail` (a human string) is never
+   * consulted for it. Null on every path but a thrown LLM call.
+   *
+   * A TIMED-OUT or THROWN cycle also reports null, and that is the honest answer rather
+   * than a missing one: the wrapper cannot see WHY the cycle froze, and guessing
+   * "transport" would hand a shorter backoff to a cycle that may have hung anywhere. The
+   * classified case is the one where the LLM call really did throw and decide() came back
+   * to say so.
+   */
+  llmFailure: LlmFailureClassification | null;
 }
 
 /**
@@ -99,6 +114,9 @@ export async function runCycleWithTimeout(
         // before touching it — we do not know, and saying so leaves the blind counter
         // untouched rather than guessing in either direction.
         marketData: 'unknown',
+        // Same reasoning, applied to the backoff: a frozen cycle names no cause, so it
+        // gets the generic policy. Only a classified LLM throw shortens the delay.
+        llmFailure: null,
       };
     }
     return {
@@ -111,6 +129,9 @@ export async function runCycleWithTimeout(
       // PURE prepare only (object mapping, no I/O). The WRITE happens outside this
       // raced promise (beat.ts / CLI), so it can never weigh on the verdict above.
       equitySnapshot: prepareEquitySnapshot(raced.status, raced.decisionId, raced.portfolio),
+      // Relayed, not re-derived. decide() classified it once, at the only place that held
+      // the real error object; this file just carries the structure to the scheduler.
+      llmFailure: raced.llmFailure,
     };
   } catch (err) {
     // Capture the STACK (not just the message) for the post-mortem in scheduler_runs.
@@ -124,6 +145,9 @@ export async function runCycleWithTimeout(
       // A throw can come from anywhere — including from well after a perfectly good market
       // read. Same reasoning as the timeout above: unknown, so the counter does not move.
       marketData: 'unknown',
+      // A cycle that threw past decide()'s own error handling never produced a
+      // classification. Generic backoff.
+      llmFailure: null,
     };
   } finally {
     // Essential: clear the timer on the resolve path, else a pending timer would

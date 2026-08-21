@@ -9,6 +9,8 @@
  * concurrency guarantee is proven live (two parallel beats), never offline.
  */
 
+import type { LlmFailureClass } from '../decision/llmFailure.js';
+
 /** The decide() status the cycle returned (DecisionRow['status']). */
 export type CycleStatus = 'decided' | 'skipped' | 'parse_failed' | 'error' | 'guard_failed';
 
@@ -97,6 +99,14 @@ export function nextDelayMinutes(
     softSkipDelayMinutes: number;
     minDelayMinutes: number;
     maxDelayMinutes: number;
+    /**
+     * THE CLASS OF THE **CURRENT** FAILURE — the typed value produced once in the decision
+     * layer and relayed here untouched. Null (or absent) means "not a known-transient
+     * provider fault", which is every pre-existing caller and every non-LLM failure.
+     */
+    failureClass?: LlmFailureClass | null;
+    /** Ceiling applied to a `retryable_llm_transport` failure. See the config bound. */
+    retryableLlmTransportMaxDelayMinutes?: number;
   },
 ): number {
   switch (outcome) {
@@ -106,8 +116,32 @@ export function nextDelayMinutes(
     }
     case 'skip':
       return opts.softSkipDelayMinutes;
-    case 'error':
-      return backoffMinutes(opts.failuresAfter, opts.minDelayMinutes, opts.maxDelayMinutes);
+    case 'error': {
+      const generic = backoffMinutes(opts.failuresAfter, opts.minDelayMinutes, opts.maxDelayMinutes);
+      /*
+       * THE ONE BEHAVIOURAL CHANGE OF THIS PR, and it is deliberately this small.
+       *
+       * `consecutive_failures` stays GLOBAL — no per-class counter, no reset on a change of
+       * class. What the class decides is the CEILING applied to the delay this failure
+       * earns, nothing else. Two consequences, both intended and both pinned by tests:
+       *
+       *   - four transport failures then a non-transport one → the fifth is the fifth
+       *     global failure and takes the full generic 240 min. A provider outage does not
+       *     buy a broken bot a shorter leash;
+       *   - four non-transport failures then a transport one → the fifth is still capped
+       *     at 30 min. A bot that was broken and is now merely waiting on Anthropic should
+       *     not inherit four hours of silence from its own past.
+       *
+       * `min` rather than a replacement: the first failure must still be the 15-minute
+       * floor, not 30. On 20/08 that yields 15 / 30 / 30 / 30 instead of 15 / 30 / 60 /
+       * 120 — the bot would have retried at 21:37 rather than 23:07.
+       */
+      const cap = opts.retryableLlmTransportMaxDelayMinutes;
+      if (opts.failureClass === 'retryable_llm_transport' && cap != null) {
+        return Math.min(generic, cap);
+      }
+      return generic;
+    }
   }
 }
 
@@ -149,6 +183,62 @@ export interface AlertDecision {
 export function evaluateAlert(value: number, threshold: number, prevSent: boolean): AlertDecision {
   const atOrAbove = value >= threshold;
   return { fire: atOrAbove && !prevSent, sent: atOrAbove };
+}
+
+/** The degraded trigger's verdict for one beat: what to send, and the flag to persist. */
+export interface DegradedIncident {
+  /** Send the DEGRADED alert on this beat — once, on the upward crossing. */
+  fire: boolean;
+  /** Send the RECOVERED notification on this beat — once, on the first valid decision. */
+  recovered: boolean;
+  /** The incident flag to persist: armed from the crossing until a recovery closes it. */
+  armed: boolean;
+}
+
+/**
+ * THE DEGRADED INCIDENT, as a lifecycle rather than as a threshold comparison.
+ *
+ * `evaluateAlert` above answers "is this counter at or above its threshold right now?".
+ * That is the right question for `overheating`, whose counter only moves on a decided
+ * cycle. It is the wrong one for `degraded`, and 20/08 shows why: the alert must close on
+ * a REAL RECOVERY — a new valid decision — and `consecutive_failures` is reset to zero by
+ * a `skipped` cycle too. Under the old rule, one skip mid-incident silently re-armed the
+ * trigger, so a bot that had been failing for hours could go quiet and then alert again as
+ * if nothing had preceded it, and no recovery was ever announced because the flag was
+ * already down by the time a decision landed.
+ *
+ * So the flag stops meaning "the counter is above the threshold" and starts meaning "an
+ * incident is open". Three inputs, three behaviours:
+ *
+ *   - error   → arm on the crossing, fire ONCE; stay armed while it continues, even if the
+ *               counter dropped below the threshold in between (the `skip → error` case);
+ *   - skip    → nothing is sent and the flag is left EXACTLY as it was. A skipped cycle is
+ *               not a recovery: no decision was produced, and the mechanics working is not
+ *               the same fact as the bot deciding again;
+ *   - decided → the only thing that closes an incident. Recovery fires iff one was open,
+ *               and the flag comes down.
+ *
+ * The counter itself is NOT touched — `nextConsecutiveFailures` keeps resetting on a skip,
+ * because "consecutive failures" has to keep meaning consecutive failures. That is exactly
+ * why the recovery message cannot read its failure count from it, and rebuilds it from
+ * `scheduler_runs` instead (see `countFailedRunsSince`).
+ *
+ * Pure, so the seven sequences in the brief are proven offline rather than in production.
+ */
+export function evaluateDegradedIncident(
+  outcome: RunOutcome,
+  failuresAfter: number,
+  threshold: number,
+  prevArmed: boolean,
+): DegradedIncident {
+  if (outcome === 'decided') {
+    return { fire: false, recovered: prevArmed, armed: false };
+  }
+  if (outcome === 'skip') {
+    return { fire: false, recovered: false, armed: prevArmed };
+  }
+  const atOrAbove = failuresAfter >= threshold;
+  return { fire: atOrAbove && !prevArmed, recovered: false, armed: prevArmed || atOrAbove };
 }
 
 /**

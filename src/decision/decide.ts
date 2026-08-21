@@ -59,6 +59,11 @@ import { sendTelegram } from '../alerting/telegram.js';
 import { buildSystemPrompt, buildUserPrompt, marketStateFromRegime, PROMPT_VERSION } from './prompt.js';
 import { buildSystemPromptV5, buildUserPromptV5, PROMPT_V5_VERSION } from './promptV5.js';
 import { assertAnthropicConfigured, resolveModel, runDecision, type LlmResult } from './llm.js';
+import {
+  classifyLlmFailure,
+  serializeLlmFailure,
+  type LlmFailureClassification,
+} from './llmFailure.js';
 import { getGitSha } from './gitSha.js';
 
 /**
@@ -99,6 +104,20 @@ export interface DecideResult {
   movements: Movement[];
   /** The real testnet execution outcome (null on a non-decided / unpersisted cycle). */
   execution: ExecutionSummary | null;
+  /**
+   * THE TYPED CAUSE OF AN LLM CALL FAILURE, when that is what ended the cycle.
+   *
+   * Non-null ONLY on the two paths where a call to Anthropic threw (the first call, and
+   * the coherence guard's single relaunch). Null everywhere else — including on a
+   * `parse_failed` or a `guard_failed`, which are model-output problems, not transport
+   * ones, and must keep the generic backoff.
+   *
+   * This is the value the scheduler reads to pick its delay. It travels as a STRUCTURE,
+   * never as text: nothing downstream may re-derive a class from `raw_response`, from
+   * `detail`, or from a message. One classification, one source, two consumers (the
+   * journal and the backoff).
+   */
+  llmFailure: LlmFailureClassification | null;
 }
 
 /**
@@ -741,12 +760,24 @@ export async function decide(): Promise<DecideResult> {
     addAttempt(llm);
   } catch (err) {
     const latencyMs = Date.now() - llmStart;
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[ERROR] LLM call failed (${message}) — recording status=error; no decision.`);
+    // ONE classification, at the only place that holds the real error object. Everything
+    // after this — the journal row, the scheduler's delay — reads this structure. Nothing
+    // downstream re-inspects the exception, and nothing parses the text we are about to
+    // write. `logicalAttempt: 1` is the FIRST call; the guard's relaunch is attempt 2.
+    const failure = classifyLlmFailure(err, { logicalAttempt: 1, elapsedMs: latencyMs });
+    console.error(
+      `[ERROR] LLM call failed (${failure.errorType}${failure.httpStatus != null ? ` ${failure.httpStatus}` : ''}: ` +
+        `${failure.message}) — class=${failure.failureClass ?? 'unclassified'}; recording status=error; no decision.`,
+    );
     const row = makeRow(decisionContext, context.regime, gitSha, {
       status: 'error',
       model: resolveModel(),
-      raw_response: message,
+      // The failure JOURNAL, in the same text column that used to hold the bare message —
+      // no migration, and strictly more than it held before. On 20/08 this column read
+      // `Request was aborted.` four times: no status, no request id, no elapsed time, no
+      // way to tell a provider outage from a local bug. A `decided` row's raw_response
+      // still means exactly what it always meant; only the failure path changes shape.
+      raw_response: serializeLlmFailure(failure),
       latency_ms: latencyMs,
     });
     const { persisted, id } = await insertDecision(supabase, row);
@@ -757,7 +788,7 @@ export async function decide(): Promise<DecideResult> {
     // The stop may have been armed on this book. Nothing is placed here — the alert only
     // makes the gap visible. See alertArmedStopNotFired.
     await alertArmedStopNotFired('error');
-    return emptyResult('error', persisted, id, row, portfolio, marketData);
+    return emptyResult('error', persisted, id, row, portfolio, marketData, failure);
   }
 
   /**
@@ -771,6 +802,13 @@ export async function decide(): Promise<DecideResult> {
     event: Omit<GuardEventInsert, 'decision_id' | 'run_token'>,
     alert: string,
     proposal?: ValidatedDecision,
+    /**
+     * The typed transport cause, on the ONE path here that has one (the guard's relaunch
+     * throwing). Every other caller is a model-output failure — a broken output contract,
+     * an unusable response, an incoherent one — and passes nothing, which is what keeps
+     * those cycles on the generic backoff.
+     */
+    llmFailure: LlmFailureClassification | null = null,
   ): Promise<DecideResult> => {
     const row = makeRow(decisionContext, context.regime, gitSha, {
       status,
@@ -807,7 +845,7 @@ export async function decide(): Promise<DecideResult> {
     // Sent AFTER the cycle's own alert, so the operator reads why the cycle failed first
     // and the stop notice second — the second only matters in the light of the first.
     await alertArmedStopNotFired(status);
-    return emptyResult(status, persisted, id, row, portfolio, marketData);
+    return emptyResult(status, persisted, id, row, portfolio, marketData, llmFailure);
   };
 
   // ── The SYSTEMIC check — is the output contract itself still standing? ─────────
@@ -976,9 +1014,16 @@ export async function decide(): Promise<DecideResult> {
       });
       addAttempt(llm);
     } catch (err) {
-      telemetry.latencyMs += Date.now() - retryStart;
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[ERROR] the guard's retry call failed (${message}) — no decision.`);
+      const retryElapsedMs = Date.now() - retryStart;
+      telemetry.latencyMs += retryElapsedMs;
+      // Same single classifier, same typed structure — attempt 2 this time. The guard's
+      // relaunch is an LLM call like any other, and a provider outage that killed it
+      // deserves the same short backoff as one that killed the first call.
+      const failure = classifyLlmFailure(err, { logicalAttempt: 2, elapsedMs: retryElapsedMs });
+      console.error(
+        `[ERROR] the guard's retry call failed (${failure.errorType}: ${failure.message}) — ` +
+          `class=${failure.failureClass ?? 'unclassified'}; no decision.`,
+      );
       return failCycle(
         'error',
         llm,
@@ -991,9 +1036,16 @@ export async function decide(): Promise<DecideResult> {
           attempt: 2,
           rules: firstRules,
           assets: [],
-          detail: `retry call failed: ${message}`,
+          // The SAME versioned failure journal as the first-call path, in THIS path's own
+          // error-message column. `raw_response` is not available here: on a failed
+          // relaunch it holds the first attempt's actual response, which is evidence worth
+          // keeping and not an error message to overwrite. So the structured cause goes
+          // where the unstructured one already lived.
+          detail: serializeLlmFailure(failure),
         },
-        `⚠️ Cycle en échec — la relance du garde n'a pas abouti (${message}). Aucun ordre passé.`,
+        `⚠️ Cycle en échec — la relance du garde n'a pas abouti (${failure.errorType}: ${failure.message}). Aucun ordre passé.`,
+        undefined,
+        failure,
       );
     }
 
@@ -1324,6 +1376,8 @@ export async function decide(): Promise<DecideResult> {
     clamp,
     movements,
     execution,
+    // A decided cycle had no LLM call failure by construction — it has a model response.
+    llmFailure: null,
   };
 }
 
@@ -1334,6 +1388,12 @@ function emptyResult(
   row: DecisionRow,
   portfolio: VirtualPortfolio | null,
   marketData: SeenMarket,
+  /**
+   * The typed LLM transport cause, on the two paths that have one. Optional and defaulted
+   * to null so the skip / parse_failed / guard_failed call sites keep saying exactly what
+   * they said before: no LLM call failed there, and the generic backoff still applies.
+   */
+  llmFailure: LlmFailureClassification | null = null,
 ): DecideResult {
   return {
     status,
@@ -1346,6 +1406,7 @@ function emptyResult(
     clamp: null,
     movements: [],
     execution: null,
+    llmFailure,
   };
 }
 
