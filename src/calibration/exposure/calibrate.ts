@@ -14,11 +14,12 @@ import {
   type WitnessSelection,
 } from './arms.js';
 import { CALIBRATION_WINDOW, prepareTape } from './tape.js';
-import { excessVsWitness, type Metrics } from './metrics.js';
+import { excessVsWitness, WITNESS_EXPOSURE_TOLERANCE_POINTS, type Metrics } from './metrics.js';
 import type { BarRecord } from './engine.js';
 import {
   buildManifest,
   currentGitCommit,
+  currentDepsLockSha,
   currentSourceTreeSha,
   gitIsDirty,
   writeArtefact,
@@ -444,11 +445,38 @@ async function main(): Promise<number> {
       return 3;
     }
 
+    /*
+     * A CONFIGURATION FROZEN AGAINST AN IMPERFECT WITNESS IS NOT VALIDABLE.
+     *
+     * Refused at EMISSION as well as at loading. The sealed window's check is the backstop;
+     * this is where the fact is still fresh and the operator can act on it — being told at
+     * validation time that a selection was never usable is being told too late.
+     */
+    const unsound = frozen.filter(
+      (f) => f.configuration.witnessMismatchPoints > WITNESS_EXPOSURE_TOLERANCE_POINTS,
+    );
+    if (unsound.length > 0) {
+      console.error(
+        '\nREFUSING to emit a selection: ' +
+          unsound
+            .map(
+              (f) =>
+                `"${f.configuration.name}" was frozen against an IMPERFECT witness ` +
+                `(mismatch ${f.configuration.witnessMismatchPoints.toFixed(3)}pt > ` +
+                `${WITNESS_EXPOSURE_TOLERANCE_POINTS}pt)`,
+            )
+            .join('; ') +
+          '. The protocol forbids an excess-of-CAGR claim resting on such a witness.',
+      );
+      return 4;
+    }
+
     const base = {
       schema_version: 1 as const,
       bundle_sha256: bundle.manifest.bundle_sha256,
       crypto_buddy_commit: currentGitCommit(),
       source_tree_sha: currentSourceTreeSha(),
+      deps_lock_sha: currentDepsLockSha(),
       selected_arm: selected.name,
       rsi_retained: rsi,
       asymmetry_admissible: asymVerdict.admissible,

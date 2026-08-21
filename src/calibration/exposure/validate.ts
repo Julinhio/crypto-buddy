@@ -4,9 +4,10 @@ import path from 'node:path';
 import type { BandPolicy } from './controller.js';
 import { runPolicy, type SharedTape, type WindowBounds } from './arms.js';
 import { CALIBRATION_WINDOW, VALIDATION_WINDOW, prepareTape } from './tape.js';
-import { excessVsWitness, type Metrics } from './metrics.js';
+import { excessVsWitness, WITNESS_EXPOSURE_TOLERANCE_POINTS, type Metrics } from './metrics.js';
 import {
   buildManifest,
+  currentDepsLockSha,
   currentSourceTreeSha,
   gitIsDirty,
   isCommittedAtHead,
@@ -67,6 +68,15 @@ export interface SelectionFile {
    * engine against bands and witnesses calibrated by another.
    */
   source_tree_sha: string | null;
+  /**
+   * THE RUNTIME DEPENDENCIES' identity — `package-lock.json` at HEAD.
+   *
+   * `src` is what we write; the lockfile is what we RUN. `technicalindicators` produces the
+   * regime timeline and `decimal.js` produces every number in the replay, and neither lives
+   * under `src/`. A dependency bump committed on its own leaves the source identity untouched
+   * and `gitIsDirty()` false, which would let the sealed window open under different numerics.
+   */
+  deps_lock_sha: string | null;
   selected_arm: string;
   rsi_retained: boolean;
   asymmetry_admissible: boolean;
@@ -91,6 +101,7 @@ export function decisionsDigest(selection: Omit<SelectionFile, 'decisions_sha256
       {
         bundle_sha256: selection.bundle_sha256,
         source_tree_sha: selection.source_tree_sha,
+        deps_lock_sha: selection.deps_lock_sha,
         selected_arm: selection.selected_arm,
         rsi_retained: selection.rsi_retained,
         asymmetry_admissible: selection.asymmetry_admissible,
@@ -117,8 +128,14 @@ export function loadSelection(
    * only run on a clean checkout would silently stop asserting anything the moment a developer
    * had an edit in flight, which is precisely when a seal matters.
    */
-  env: { sourceTreeSha: string | null; dirty: boolean | null; committed: boolean | null } = {
+  env: {
+    sourceTreeSha: string | null;
+    depsLockSha: string | null;
+    dirty: boolean | null;
+    committed: boolean | null;
+  } = {
     sourceTreeSha: currentSourceTreeSha(),
+    depsLockSha: currentDepsLockSha(),
     dirty: gitIsDirty(),
     committed: file ? isCommittedAtHead(file) : null,
   },
@@ -196,6 +213,23 @@ export function loadSelection(
         'so the out-of-sample comparison would no longer be between comparable things.',
     );
   }
+  // The RUNTIME half of the same identity, checked separately from the source so a reader
+  // sees WHICH one moved — "the engine changed" and "the arithmetic library changed" call for
+  // different investigations.
+  if (parsed.deps_lock_sha == null || env.depsLockSha == null) {
+    throw new SealBrokenError(
+      'the selection carries no runtime-dependency identity, or git cannot report the current ' +
+        'one. The sealed window may only be opened under the dependencies that calibrated it.',
+    );
+  }
+  if (parsed.deps_lock_sha !== env.depsLockSha) {
+    throw new SealBrokenError(
+      `the selection was calibrated under package-lock ${parsed.deps_lock_sha}, this run carries ` +
+        `${env.depsLockSha}. technicalindicators computes the regimes and decimal.js the ` +
+        'arithmetic — a different lockfile is a different engine.',
+    );
+  }
+
   if (env.dirty !== false) {
     throw new SealBrokenError(
       'the source tree has uncommitted changes (or git could not say). The recorded tree hash ' +
@@ -216,6 +250,32 @@ export function loadSelection(
   for (const cfg of parsed.configurations) {
     if (!Number.isFinite(cfg.witnessTargetPercent)) {
       throw new SealBrokenError(`configuration "${cfg.name}" carries no frozen witness target`);
+    }
+    /*
+     * AN IMPERFECT WITNESS CANNOT SUPPORT A PASS.
+     *
+     * The protocol is explicit: if no constant target lands inside the pre-registered
+     * tolerance, the witness is declared imperfect and cannot support any excess-of-CAGR
+     * claim. The out-of-sample verdict IS such a claim — it compares this configuration's net
+     * return to that witness's.
+     *
+     * Checking only that the target is a finite number let an unmatched witness through, and
+     * validation would then have reported a pass against a control the protocol had already
+     * disqualified. The three arms are sound today; a retained RSI or asymmetric variant is
+     * re-searched at step 7 and carries no such guarantee.
+     */
+    if (!Number.isFinite(cfg.witnessMismatchPoints)) {
+      throw new SealBrokenError(
+        `configuration "${cfg.name}" records no witness exposure mismatch — soundness cannot be judged`,
+      );
+    }
+    if (cfg.witnessMismatchPoints > WITNESS_EXPOSURE_TOLERANCE_POINTS) {
+      throw new SealBrokenError(
+        `configuration "${cfg.name}" was frozen against an IMPERFECT witness: realised exposure ` +
+          `mismatch ${cfg.witnessMismatchPoints.toFixed(3)}pt exceeds the pre-registered ` +
+          `${WITNESS_EXPOSURE_TOLERANCE_POINTS}pt tolerance. The protocol forbids an ` +
+          'excess-of-CAGR claim resting on it, and the out-of-sample verdict is such a claim.',
+      );
     }
   }
   return parsed;

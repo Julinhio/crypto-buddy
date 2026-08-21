@@ -23,7 +23,13 @@ import { applyRsiBrake, MissingMedianRsiError } from '../calibration/exposure/co
 import { ARMS, equalWeightBuyAndHold, runPolicy } from '../calibration/exposure/arms.js';
 import { checkAgainstReference, type ArmReference, type CalibrationOutcome } from '../calibration/exposure/calibrate.js';
 import type { Metrics } from '../calibration/exposure/metrics.js';
-import { buildManifest, canonicalJson, currentSourceTreeSha, sha256Of } from '../calibration/exposure/outputs.js';
+import {
+  buildManifest,
+  canonicalJson,
+  currentDepsLockSha,
+  currentSourceTreeSha,
+  sha256Of,
+} from '../calibration/exposure/outputs.js';
 import { SealBrokenError, decisionsDigest, loadSelection, validateConfiguration } from '../calibration/exposure/validate.js';
 
 /**
@@ -553,7 +559,13 @@ console.log('\nProof 9 — the validation command refuses to open without a froz
   const TREE = currentSourceTreeSha();
   // A CLEAN git environment, injected: these proofs are about the seal's own refusals, and
   // must not depend on whether the developer running them happens to have an edit in flight.
-  const CLEAN = { sourceTreeSha: TREE, dirty: false as const, committed: true as const };
+  const LOCK = currentDepsLockSha();
+  const CLEAN = {
+    sourceTreeSha: TREE,
+    depsLockSha: LOCK,
+    dirty: false as const,
+    committed: true as const,
+  };
   assert.throws(() => loadSelection(undefined, BUNDLE, CLEAN), SealBrokenError);
   console.log('  ok: NO selection file → refused'); passed += 1;
   assert.throws(() => loadSelection('', BUNDLE, CLEAN), SealBrokenError);
@@ -567,6 +579,7 @@ console.log('\nProof 9 — the validation command refuses to open without a froz
     bundle_sha256: BUNDLE,
     crypto_buddy_commit: 'deadbeef',
     source_tree_sha: TREE,
+    deps_lock_sha: LOCK,
     selected_arm: 'B',
     rsi_retained: false,
     asymmetry_admissible: false,
@@ -635,20 +648,68 @@ console.log('\nProof 9 — the validation command refuses to open without a froz
   // A DIRTY source is refused too. `rev-parse` reads the COMMITTED tree, so uncommitted
   // engine edits would sail past a tree comparison while genuinely changing what runs.
   assert.throws(
-    () => loadSelection(valid, BUNDLE, { sourceTreeSha: TREE, dirty: true, committed: true }),
+    () => loadSelection(valid, BUNDLE, { ...CLEAN, dirty: true }),
     SealBrokenError,
   );
   console.log('  ok: a DIRTY source tree → refused (rev-parse reads the committed tree)'); passed += 1;
   assert.throws(
-    () => loadSelection(valid, BUNDLE, { sourceTreeSha: TREE, dirty: null, committed: true }),
+    () => loadSelection(valid, BUNDLE, { ...CLEAN, dirty: null }),
     SealBrokenError,
   );
   console.log('  ok: a source tree whose state git cannot report → refused'); passed += 1;
   assert.throws(
-    () => loadSelection(valid, BUNDLE, { sourceTreeSha: null, dirty: false, committed: true }),
+    () => loadSelection(valid, BUNDLE, { ...CLEAN, sourceTreeSha: null }),
     SealBrokenError,
   );
   console.log('  ok: no current source-tree identity at all → refused'); passed += 1;
+
+  // THE RUNTIME HALF OF THE IDENTITY. `src` is what we write; the lockfile is what we RUN.
+  // `technicalindicators` computes the regimes and `decimal.js` the arithmetic, and neither
+  // lives under `src/` — a dependency bump committed alone leaves the source identity intact.
+  assert.throws(
+    () => loadSelection(valid, BUNDLE, { ...CLEAN, depsLockSha: 'd'.repeat(40) }),
+    SealBrokenError,
+  );
+  console.log('  ok: a DIFFERENT package-lock → refused'); passed += 1;
+  assert.throws(
+    () => loadSelection(valid, BUNDLE, { ...CLEAN, depsLockSha: null }),
+    SealBrokenError,
+  );
+  console.log('  ok: no runtime-dependency identity → refused'); passed += 1;
+  const noLock = { ...base, deps_lock_sha: null };
+  const noLockFile = write('nolock.json', { ...noLock, decisions_sha256: decisionsDigest(noLock) });
+  assert.throws(() => loadSelection(noLockFile, BUNDLE, CLEAN), SealBrokenError);
+  console.log('  ok: a selection carrying no lockfile identity → refused'); passed += 1;
+  ok('the lockfile identity is part of the decisions digest',
+    decisionsDigest(base) !== decisionsDigest({ ...base, deps_lock_sha: 'e'.repeat(40) }));
+
+  // AN IMPERFECT WITNESS CANNOT SUPPORT A PASS. The out-of-sample verdict compares the
+  // configuration's net return to that witness's — which is exactly the excess-of-CAGR claim
+  // the protocol forbids resting on an unmatched control.
+  const unsound = {
+    ...base,
+    configurations: [{ ...base.configurations[0]!, witnessMismatchPoints: 0.9 }],
+  };
+  const unsoundFile = write('unsound.json', { ...unsound, decisions_sha256: decisionsDigest(unsound) });
+  assert.throws(() => loadSelection(unsoundFile, BUNDLE, CLEAN), /IMPERFECT witness/);
+  console.log('  ok: a configuration frozen against an IMPERFECT witness → refused'); passed += 1;
+
+  const noMismatch = {
+    ...base,
+    configurations: [{ ...base.configurations[0]!, witnessMismatchPoints: Number.NaN }],
+  };
+  const noMismatchFile = write('nomismatch.json', { ...noMismatch, decisions_sha256: decisionsDigest(noMismatch) });
+  assert.throws(() => loadSelection(noMismatchFile, BUNDLE, CLEAN), SealBrokenError);
+  console.log('  ok: a configuration recording no mismatch at all → refused'); passed += 1;
+
+  // …and one exactly ON the tolerance is accepted: the protocol says "≤ 0,25", not "< 0,25".
+  const onTolerance = {
+    ...base,
+    configurations: [{ ...base.configurations[0]!, witnessMismatchPoints: 0.25 }],
+  };
+  const onToleranceFile = write('ontol.json', { ...onTolerance, decisions_sha256: decisionsDigest(onTolerance) });
+  ok('a mismatch exactly ON the 0.25pt tolerance is accepted',
+    loadSelection(onToleranceFile, BUNDLE, CLEAN).configurations[0]!.witnessMismatchPoints === 0.25);
 
   rmSync(dir, { recursive: true, force: true });
 }
@@ -831,6 +892,15 @@ console.log('\nEvery published figure is auditable — the equal-weight referenc
   const { shared } = prepareTape(ROOT);
   const eq = equalWeightBuyAndHold(shared, CALIBRATION_WINDOW);
   ok('the equal-weight reference produces a per-bar trajectory', eq.bars.length > 0);
+  // IT STAYS IN CASH UNTIL ITS ENTRY. The quantities are bought at the successor bar's open,
+  // so marking them against an earlier close would show a position one bar before it exists —
+  // temporally invalid in the one artefact whose job is to let a reader reconstruct events.
+  ok('…opening at exactly 1 000 $ in CASH, before the entry bar',
+    eq.bars[0]!.equity === 1000 && Object.values(eq.bars[0]!.weights).every((w) => w === 0));
+  const firstInvested = eq.bars.findIndex((b) => Object.values(b.weights).some((w) => w > 0));
+  ok('…then becoming invested exactly once, on a later bar', firstInvested > 0);
+  ok('…and every bar before it is flat cash',
+    eq.bars.slice(0, firstInvested).every((b) => b.equity === 1000));
   ok('…on the same grid as every other run', eq.bars.length === runPolicy(
     shared, { kind: 'constant', targetPercent: 0 }, CALIBRATION_WINDOW,
   ).result.bars.length);

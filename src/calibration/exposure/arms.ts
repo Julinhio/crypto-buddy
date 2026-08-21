@@ -232,8 +232,31 @@ export function equalWeightBuyAndHold(shared: SharedTape, window: WindowBounds):
   // rebalanced, so the weights drift — which is itself part of what this reference shows.
   const bars: EqualWeightBar[] = [];
   let closing = new Decimal(0);
+  // The instant the quantities actually exist: the OPEN of the successor bar. Every bar
+  // before it must show CASH, not the future position marked against a past close.
+  const entryTimestamp = tapes[cfg.assets[0]!]!.h4[entryIndex[cfg.assets[0]!]!]!.timestamp;
   for (const point of shared.points) {
     if (point.timestamp < window.fromMs || point.timestamp >= window.toMs) continue;
+
+    /*
+     * BEFORE THE ENTRY BAR, THE BOOK IS CASH.
+     *
+     * The quantities are bought at the successor bar's open — the same t+1 rule as every other
+     * run — so marking them against an earlier close would show a fully invested portfolio one
+     * bar before it exists. The closing return is unaffected, but the audit trajectory would be
+     * temporally invalid: it is the one artefact whose job is to let a reader reconstruct what
+     * happened, and it would start by showing a position that had not been bought.
+     */
+    if (point.timestamp < entryTimestamp) {
+      bars.push({
+        timestamp: point.timestamp,
+        at: new Date(point.timestamp).toISOString(),
+        equity: STARTING_CASH_USD,
+        weights: Object.fromEntries(cfg.assets.map((asset) => [asset, 0])),
+      });
+      continue;
+    }
+
     let equity = new Decimal(0);
     const value: Record<string, Decimal> = {};
     let complete = true;

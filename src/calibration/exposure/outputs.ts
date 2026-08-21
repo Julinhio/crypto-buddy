@@ -71,6 +71,33 @@ export function currentSourceTreeSha(): string | null {
 }
 
 /**
+ * THE RUNTIME DEPENDENCIES' identity — the blob hash of `package-lock.json` at HEAD.
+ *
+ * `HEAD:src` covers the code this repository writes. It does NOT cover the code this
+ * repository RUNS: `technicalindicators` computes the regime timeline and `decimal.js`
+ * computes every number in the replay, and their exact versions live in the lockfile, at the
+ * repository root — outside `src/` entirely. Commit a dependency bump without touching
+ * `src/` and the source identity is unchanged, `gitIsDirty()` is false, and the sealed window
+ * would open under arithmetic that never calibrated anything.
+ *
+ * WHAT THIS PROVES, AND WHAT IT DOES NOT. It proves the lockfile is the same one — i.e. what
+ * SHOULD be installed. It cannot prove what IS installed: only `npm ci` makes those the same
+ * thing. That residual gap is real and is stated rather than papered over; closing it would
+ * mean hashing `node_modules`, which is a different chantier.
+ */
+export function currentDepsLockSha(): string | null {
+  try {
+    const out = execFileSync('git', ['rev-parse', 'HEAD:package-lock.json'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return out.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Was the SOURCE dirty when this ran — i.e. is the recorded commit really the code that
  * produced these numbers?
  *
@@ -167,6 +194,7 @@ export function buildManifest(input: ManifestInput): unknown {
     crypto_buddy_commit: currentGitCommit(),
     crypto_buddy_tree_dirty: gitIsDirty(),
     crypto_buddy_src_tree_sha: currentSourceTreeSha(),
+    crypto_buddy_deps_lock_sha: currentDepsLockSha(),
     regime_version: REGIME_VERSION,
     experiment_config_sha256: experimentConfigSha256(input.cfg),
     experiment_config: {
