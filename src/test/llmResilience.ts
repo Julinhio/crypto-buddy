@@ -29,7 +29,12 @@ import {
 } from '../persistence/schedulerState.js';
 import { runHeartbeat } from '../scheduler/heartbeat.js';
 import type { DecideResult } from '../decision/decide.js';
-import { validateDecisionConfig, config, type DecisionConfig } from '../config/index.js';
+import {
+  ALERT_READ_DEADLINE_MS,
+  validateDecisionConfig,
+  config,
+  type DecisionConfig,
+} from '../config/index.js';
 
 /**
  * PROVIDER-RESILIENCE TEST — the offline proofs of the 20/08/2026 incident PR.
@@ -61,6 +66,47 @@ function ok(label: string, cond: boolean): void {
 const NO_FACTS = { logicalAttempt: 1, elapsedMs: null };
 /** Fixed reference instant (ms), so the heartbeat fakes below are deterministic. */
 const NOW = 1_700_000_000_000;
+
+/**
+ * A postgrest-like query stub: every builder method returns itself, `maybeSingle()`
+ * resolves to `result`, and the node is itself thenable so a head/count query can be
+ * awaited directly. `abortSignal` is part of the chain on purpose — the three incident
+ * reads are BOUND through it, and a stub that silently ignored it would let an unbounded
+ * read pass this suite.
+ */
+interface QueryStub {
+  select: (columns?: string) => QueryStub;
+  eq: () => QueryStub;
+  lte: () => QueryStub;
+  gt: () => QueryStub;
+  abortSignal: (signal: AbortSignal) => QueryStub;
+  maybeSingle: () => Promise<unknown>;
+  then: (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) => Promise<unknown>;
+}
+
+/** `result` resolves the query; `hang: true` makes it never settle (the stall case). */
+function stub(result: unknown, hang = false): QueryStub {
+  const pending = new Promise<unknown>(() => {});
+  const node: QueryStub = {
+    select: () => node,
+    eq: () => node,
+    lte: () => node,
+    gt: () => node,
+    abortSignal: () => node,
+    maybeSingle: () => (hang ? pending : Promise.resolve(result)),
+    then: (res, rej) => (hang ? pending : Promise.resolve(result)).then(res, rej),
+  };
+  return node;
+}
+
+/** Wraps a per-table stub factory into something shaped like a Supabase client. */
+function client(from: (table: string, columns?: string) => QueryStub): SupabaseClient {
+  return {
+    from: (table: string) => ({
+      select: (columns?: string) => from(table, columns),
+    }),
+  } as unknown as SupabaseClient;
+}
 
 /** Builds a real SDK error of the right class, exactly as the SDK's own generator would. */
 function apiError(status: number, type: string, requestId: string | null = null): APIError {
@@ -398,45 +444,28 @@ const OK: RunOutcome = 'decided';
 //    reported as unavailable, and the failure is logged. Proven against the real reader.
 console.log('\nRecovery when the history rebuild fails (best-effort by contract):');
 {
+  const SINCE = '2026-08-20T18:01:50Z';
+  const UNTIL = '2026-08-20T23:11:36Z';
   const throwingClient = {
     from: () => {
       throw new Error('scheduler_runs unreachable');
     },
   } as unknown as SupabaseClient;
-  const rejectingClient = {
-    from: () => ({
-      select: () => ({
-        eq: () => ({
-          eq: () => ({
-            lte: () => ({
-              gt: async () => ({ count: null, error: { message: 'permission denied' } }),
-            }),
-          }),
-        }),
-      }),
-    }),
-  } as unknown as SupabaseClient;
-  const countingClient = (count: number) =>
-    ({
-      from: () => ({
-        select: () => ({
-          eq: () => ({
-            eq: () => ({
-              lte: () => ({
-                gt: async () => ({ count, error: null }),
-              }),
-            }),
-          }),
-        }),
-      }),
-    }) as unknown as SupabaseClient;
 
-  const thrown = await countFailedRunsSince(throwingClient, '2026-08-20T18:01:50Z', '2026-08-20T23:11:36Z');
+  const thrown = await countFailedRunsSince(throwingClient, SINCE, UNTIL);
   ok('a throwing history read returns null instead of failing the cycle', thrown === null);
-  const rejected = await countFailedRunsSince(rejectingClient, '2026-08-20T18:01:50Z', '2026-08-20T23:11:36Z');
+  const rejected = await countFailedRunsSince(
+    client(() => stub({ count: null, error: { message: 'permission denied' } })),
+    SINCE,
+    UNTIL,
+  );
   ok('a rejected history read returns null too', rejected === null);
-  const counted = await countFailedRunsSince(countingClient(4), '2026-08-20T18:01:50Z', '2026-08-20T23:11:36Z');
+  const counted = await countFailedRunsSince(client(() => stub({ count: 4, error: null })), SINCE, UNTIL);
   ok('a successful read returns the real count (the four errors of 20/08)', counted === 4);
+  // No lower bound (a reset nulled last_success_at) — the `.gt()` link is skipped, so the
+  // bound must still be applied to the shorter chain.
+  const noLowerBound = await countFailedRunsSince(client(() => stub({ count: 0, error: null })), null, UNTIL);
+  ok('a null lower bound still produces a bounded, usable count', noLowerBound === 0);
 
   const unavailable = formatAlert({
     trigger: 'degraded_recovered',
@@ -517,11 +546,7 @@ console.log('\nreset_bot race — a stale incident flag must not STICK (Codex P2
   // bot_state ROW lock for its whole transaction (migration 0010), so once the claim is
   // ours it cannot interleave — the row is current by construction.
   const botState = (row: unknown, error: unknown = null) =>
-    ({
-      from: () => ({
-        select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: row, error }) }) }),
-      }),
-    }) as unknown as SupabaseClient;
+    client(() => stub({ data: row, error }));
 
   const postReset = await readIncidentState(
     botState({ failure_alert_sent: false, last_success_at: null }),
@@ -580,25 +605,18 @@ console.log('\nEnd to end — a reset between the snapshot and the claim emits n
         return { data: null, error: null };
       },
       // The row AS IT REALLY IS once we hold the claim.
-      from: (table: string) => {
-        calls.push(`select:${table}`);
-        if (table === 'bot_state') {
-          return {
-            select: () => ({
-              eq: () => ({ maybeSingle: async () => ({ data: rowAfterReset, error: null }) }),
-            }),
-          };
-        }
-        // scheduler_runs — answered fully so the recovery path runs clean here rather than
-        // limping through its best-effort fallbacks. A warning nobody expects is a warning
-        // nobody reads, and it would hide a real one later.
-        return {
-          select: (columns: string) =>
-            columns === 'finished_at'
-              ? { eq: () => ({ maybeSingle: async () => ({ data: { finished_at: '2026-08-21T00:00:00.000Z' }, error: null }) }) }
-              : { eq: () => ({ eq: () => ({ lte: () => ({ gt: async () => ({ count: 3, error: null }) }) }) }) },
-        };
-      },
+      from: (table: string) => ({
+        select: (columns?: string) => {
+          calls.push(`select:${table}`);
+          if (table === 'bot_state') return stub({ data: rowAfterReset, error: null });
+          // scheduler_runs — answered fully so the recovery path runs clean here rather
+          // than limping through its best-effort fallbacks. A warning nobody expects is a
+          // warning nobody reads, and it would hide a real one later.
+          return columns === 'finished_at'
+            ? stub({ data: { finished_at: '2026-08-21T00:00:00.000Z' }, error: null })
+            : stub({ count: 3, error: null });
+        },
+      }),
     } as unknown as SupabaseClient;
     return { supabase, calls };
   };
@@ -644,7 +662,12 @@ const FINISHED_AT = '2026-08-20T23:11:36.655Z';
  * database stamps `db_now`, then the response spends that long in flight. Any app-side
  * timer started after the claim returns is blind to it.
  */
-function recoveringBeat(opts: { finishedAt: string | null; claimLatencyMs: number }): SupabaseClient {
+function recoveringBeat(opts: {
+  finishedAt: string | null;
+  claimLatencyMs: number;
+  /** Make the finished_at read STALL rather than fail — the case a try/catch cannot see. */
+  hangFinishedAt?: boolean;
+}): SupabaseClient {
   return {
     rpc: async (fn: string) => {
       if (fn === 'record_heartbeat') {
@@ -674,37 +697,24 @@ function recoveringBeat(opts: { finishedAt: string | null; claimLatencyMs: numbe
       if (fn === 'finish_run') return { data: true, error: null };
       return { data: null, error: null };
     },
-    from: (table: string) => {
-      if (table === 'bot_state') {
-        return {
-          select: () => ({
-            eq: () => ({
-              maybeSingle: async () => ({
-                data: { failure_alert_sent: true, last_success_at: PREV_SUCCESS },
-                error: null,
-              }),
-            }),
-          }),
-        };
-      }
+    from: (table: string) => ({
       // scheduler_runs answers two different questions; dispatch on the projection.
-      return {
-        select: (columns: string) =>
-          columns === 'finished_at'
-            ? {
-                eq: () => ({
-                  maybeSingle: async () =>
-                    opts.finishedAt == null
-                      ? { data: null, error: { message: 'unreachable' } }
-                      : { data: { finished_at: opts.finishedAt }, error: null },
-                }),
-              }
-            : {
-                // The four errors of the incident.
-                eq: () => ({ eq: () => ({ lte: () => ({ gt: async () => ({ count: 4, error: null }) }) }) }),
-              },
-      };
-    },
+      select: (columns?: string) => {
+        if (table === 'bot_state') {
+          return stub({ data: { failure_alert_sent: true, last_success_at: PREV_SUCCESS }, error: null });
+        }
+        if (columns === 'finished_at') {
+          // `hangFinishedAt` is the STALL case: accepted, never settled. A try/catch never
+          // sees it — only the deadline does.
+          if (opts.hangFinishedAt) return stub(null, true);
+          return opts.finishedAt == null
+            ? stub({ data: null, error: { message: 'unreachable' } })
+            : stub({ data: { finished_at: opts.finishedAt }, error: null });
+        }
+        // The four errors of the incident.
+        return stub({ count: 4, error: null });
+      },
+    }),
   } as unknown as SupabaseClient;
 }
 
@@ -776,16 +786,65 @@ const slowDecidedCycle = async () => {
 
 {
   // The reader itself, in its three failure shapes plus the nominal one.
-  const runs = (row: unknown, error: unknown = null) =>
-    ({
-      from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: row, error }) }) }) }),
-    }) as unknown as SupabaseClient;
+  const runs = (row: unknown, error: unknown = null) => client(() => stub({ data: row, error }));
   ok('readRunFinishedAt returns the stamp', (await readRunFinishedAt(runs({ finished_at: FINISHED_AT }), 1)) === FINISHED_AT);
   ok('a rejected read returns null', (await readRunFinishedAt(runs(null, { message: 'boom' }), 1)) === null);
   ok('a missing row returns null', (await readRunFinishedAt(runs(null), 1)) === null);
   ok(
     'a throwing client returns null rather than failing the beat',
     (await readRunFinishedAt({ from: () => { throw new Error('down'); } } as unknown as SupabaseClient, 1)) === null,
+  );
+}
+
+// ── H. THE READS ARE BOUND, NOT MERELY WRAPPED ───────────────────────────────────────
+//
+// Codex P2 #4, and `boundedWrite.ts` states the principle in its own header: a try/catch
+// does not make a call best-effort, it only handles the ones that FINISH. A select Supabase
+// accepts but never settles would hang its await until the watchdog force-exits the
+// process — for the pre-finish_run read that means a cycle which has ALREADY placed its
+// orders never gets rescheduled or released.
+//
+// Every stub below NEVER SETTLES. If any read were unbounded, this section would hang
+// instead of failing, which is itself the signal.
+console.log('\nThe three incident reads are BOUND — a stall must not reach the watchdog:');
+{
+  const hung = client(() => stub(null, true));
+  const withinDeadline = ALERT_READ_DEADLINE_MS + 1_500;
+
+  const t0 = Date.now();
+  const stalled = await readIncidentState(hung);
+  const elapsed = Date.now() - t0;
+  ok('a STALLED incident re-read returns null instead of hanging', stalled === null);
+  ok(`…and it gives up inside its deadline (${elapsed}ms)`, elapsed < withinDeadline);
+  ok('…having waited for the deadline rather than returning instantly', elapsed >= ALERT_READ_DEADLINE_MS - 100);
+
+  const t1 = Date.now();
+  ok('a STALLED finished_at read returns null', (await readRunFinishedAt(hung, 1)) === null);
+  ok(`…inside its deadline (${Date.now() - t1}ms)`, Date.now() - t1 < withinDeadline);
+
+  const t2 = Date.now();
+  ok(
+    'a STALLED failure-count rebuild returns null',
+    (await countFailedRunsSince(hung, '2026-08-20T18:01:50Z', '2026-08-20T23:11:36Z')) === null,
+  );
+  ok(`…inside its deadline (${Date.now() - t2}ms)`, Date.now() - t2 < withinDeadline);
+}
+
+// And end to end: a stalled stamp read must still let the beat finish and still recover,
+// falling back to the estimate. This is the scenario Codex described — it now costs the
+// deadline, not the process.
+{
+  const t0 = Date.now();
+  const res = await runHeartbeat({
+    supabase: recoveringBeat({ finishedAt: null, hangFinishedAt: true, claimLatencyMs: 0 }),
+    runCycle: slowDecidedCycle,
+  });
+  const elapsed = Date.now() - t0;
+  const recovery = (res.alerts ?? []).find((a) => a.trigger === 'degraded_recovered');
+  ok('a beat whose stamp read STALLS still finalizes and still recovers', recovery != null);
+  ok(
+    `…at the cost of the deadline, not of the cycle (${elapsed}ms)`,
+    elapsed < ALERT_READ_DEADLINE_MS + 2_000,
   );
 }
 

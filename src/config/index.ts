@@ -722,6 +722,34 @@ export const PROBE_TIMEOUT_MS = 5_000;
 export const INCIDENT_WRITE_DEADLINE_MS = 5_000;
 
 /**
+ * HARD bound on each of the degraded-incident's three observational READS — the state
+ * re-read under the claim, the recovering run's `finished_at`, and the failure count
+ * rebuilt from `scheduler_runs`.
+ *
+ * Same hazard as the two above, and the same answer. `boundedWrite.ts` states it exactly:
+ * a try/catch does not make a call best-effort, it only handles the ones that FINISH. A
+ * select Supabase accepts but never settles would hang its `await`, and the watchdog —
+ * armed since before the claim — would force-exit the process. For the pre-`finish_run`
+ * read that means a cycle which has ALREADY placed its orders never gets rescheduled or
+ * released; for the two post-`finish_run` reads it means the Healthchecks ping is
+ * swallowed, so a healthy bot reads as silent. A read that exists only to date a Telegram
+ * message must not be able to do either.
+ *
+ * NOT added to `validateOutageBudget`, and deliberately so: that invariant bounds what runs
+ * INSIDE the cycle (`2 × attemptTimeout + reserve + probe + write ≤ maxCycleSeconds`),
+ * whereas these three run in the beat's finalize path, AFTER the cycle returned — the same
+ * window `finish_run` itself occupies, whose backstop has always been the watchdog. Adding
+ * them to a cycle-budget assertion would state a relation that is not the one being
+ * checked. What matters is that the worst case is now small and finite (three reads, 2s
+ * each, and only on a recovery beat) instead of unbounded.
+ *
+ * 2s rather than the 5s above: these are single-row lookups on a primary key or on the
+ * `bot_state` singleton, roughly 10× their typical latency, and up to three of them can
+ * land on one beat.
+ */
+export const ALERT_READ_DEADLINE_MS = 2_000;
+
+/**
  * Fails fast on an unsafe scheduler config. The critical invariant is
  * `lockTtlSeconds > maxCycleSeconds + WATCHDOG_GRACE_SECONDS`: the watchdog only
  * force-exits the process (killing the timed-out orphan) at budget + grace, so if

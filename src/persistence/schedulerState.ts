@@ -1,5 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { ALERT_READ_DEADLINE_MS } from '../config/index.js';
 import type { RunOutcome } from '../scheduler/policy.js';
+import { runBoundedQuery } from './boundedWrite.js';
 
 /** The singleton scheduler state (camelCased; timestamps as ISO strings). */
 export interface BotState {
@@ -211,11 +213,16 @@ export interface IncidentState {
  */
 export async function readIncidentState(supabase: SupabaseClient): Promise<IncidentState | null> {
   try {
-    const { data, error } = await supabase
-      .from('bot_state')
-      .select('failure_alert_sent, last_success_at')
-      .eq('id', 1)
-      .maybeSingle();
+    const { data, error } = await runBoundedQuery(
+      (signal) =>
+        supabase
+          .from('bot_state')
+          .select('failure_alert_sent, last_success_at')
+          .eq('id', 1)
+          .abortSignal(signal)
+          .maybeSingle(),
+      ALERT_READ_DEADLINE_MS,
+    );
     if (error || !data) {
       console.warn(
         `[warn] could not re-read the incident state under the claim (${error?.message ?? 'no bot_state row'}) — ` +
@@ -260,11 +267,16 @@ export async function readRunFinishedAt(
   runId: number,
 ): Promise<string | null> {
   try {
-    const { data, error } = await supabase
-      .from('scheduler_runs')
-      .select('finished_at')
-      .eq('id', runId)
-      .maybeSingle();
+    const { data, error } = await runBoundedQuery(
+      (signal) =>
+        supabase
+          .from('scheduler_runs')
+          .select('finished_at')
+          .eq('id', runId)
+          .abortSignal(signal)
+          .maybeSingle(),
+      ALERT_READ_DEADLINE_MS,
+    );
     if (error || !data) {
       console.warn(
         `[warn] recovery: could not read finished_at for run #${runId} ` +
@@ -310,16 +322,18 @@ export async function countFailedRunsSince(
   untilIso: string,
 ): Promise<number | null> {
   try {
-    let query = supabase
-      .from('scheduler_runs')
-      .select('id', { count: 'exact', head: true })
-      .eq('status', 'completed')
-      .eq('outcome', 'error')
-      .lte('finished_at', untilIso);
-    // No previous success (a fresh install, or a reset) → no lower bound. Counting every
-    // error ever recorded is still the honest answer to "since the last valid decision".
-    if (sinceIso != null) query = query.gt('finished_at', sinceIso);
-    const { count, error } = await query;
+    const { count, error } = await runBoundedQuery((signal) => {
+      let query = supabase
+        .from('scheduler_runs')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'completed')
+        .eq('outcome', 'error')
+        .lte('finished_at', untilIso);
+      // No previous success (a fresh install, or a reset) → no lower bound. Counting every
+      // error ever recorded is still the honest answer to "since the last valid decision".
+      if (sinceIso != null) query = query.gt('finished_at', sinceIso);
+      return query.abortSignal(signal);
+    }, ALERT_READ_DEADLINE_MS);
     if (error) {
       console.warn(`[warn] recovery: could not rebuild the failure count (${error.message}) — reporting it as unavailable.`);
       return null;

@@ -39,6 +39,28 @@ export async function runBoundedWrite(
   build: (signal: AbortSignal) => PromiseLike<WriteResult>,
   deadlineMs: number,
 ): Promise<void> {
+  const result = await runBoundedQuery(build, deadlineMs);
+  if (result?.error) throw new Error(result.error.message);
+}
+
+/**
+ * The same hard deadline, for a query whose VALUE is wanted — the read counterpart of
+ * `runBoundedWrite`, which is now a thin wrapper over it.
+ *
+ * Generalized rather than copied, on this file's own rule: the race below (signal-aborted
+ * query against an independent timer, both settle paths folded into a value so a late
+ * rejection can never surface as an unhandled rejection) is exactly the subtle logic a
+ * second copy would drift from. One mechanism, two shapes.
+ *
+ * THROWS on a rejection or on a query that never settles; PostgREST's own `{ error }`
+ * channel is left to the caller, because a read that comes back empty is often a legitimate
+ * answer rather than a failure. Callers that only want a best-effort value catch and return
+ * null.
+ */
+export async function runBoundedQuery<T>(
+  build: (signal: AbortSignal) => PromiseLike<T>,
+  deadlineMs: number,
+): Promise<T> {
   const query = build(AbortSignal.timeout(deadlineMs));
 
   // Rejection is folded into the VALUE rather than caught away: a bare
@@ -47,7 +69,7 @@ export async function runBoundedWrite(
   // here also means a late rejection from a query the race abandoned can never surface as
   // an unhandled rejection mid-cycle.
   type Outcome =
-    | { kind: 'settled'; result: WriteResult }
+    | { kind: 'settled'; result: T }
     | { kind: 'failed'; error: unknown }
     | { kind: 'timeout' };
 
@@ -69,10 +91,13 @@ export async function runBoundedWrite(
   try {
     const outcome = await Promise.race([settled, deadline]);
     if (outcome.kind === 'timeout') {
-      throw new Error(`write did not settle within ${deadlineMs}ms — abandoned`);
+      // "query", not "write": this races reads as well now, and a read that timed out
+      // logging "write did not settle" would send the next reader to the wrong table.
+      // Nothing asserts this string — it is a log line, checked before rewording it.
+      throw new Error(`query did not settle within ${deadlineMs}ms — abandoned`);
     }
     if (outcome.kind === 'failed') throw outcome.error;
-    if (outcome.result?.error) throw new Error(outcome.result.error.message);
+    return outcome.result;
   } finally {
     if (timer) clearTimeout(timer);
   }
