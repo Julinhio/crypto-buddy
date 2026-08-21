@@ -299,6 +299,31 @@ export interface ValidationVerdict {
    */
   calibrationBrakedBars: number;
   validationBrakedBars: number;
+  /**
+   * THE WITNESS'S EXPOSURE MATCH **IN THE OUT-OF-SAMPLE WINDOW**.
+   *
+   * The frozen constant target was matched to the arm on CALIBRATION, to 0.06 point. That
+   * says nothing about the window it was frozen for: both realised exposures are
+   * path-dependent — the gate, the stops and the movement floor all act differently on a
+   * different market — so the pair can drift apart out-of-sample without anyone touching it.
+   *
+   * The target itself is NEVER recomputed on the future mean; the protocol forbids it and
+   * that is the whole point of freezing. What is computed here is the FACT of the drift, so
+   * a reader can see whether the control was still a control.
+   */
+  oosWitnessMismatchPoints: number;
+  /** False when the pair drifted past the pre-registered 0.25-point tolerance out-of-sample. */
+  oosWitnessIsSound: boolean;
+  /**
+   * Whether the out-of-sample excess of CAGR may be QUOTED as a claim.
+   *
+   * False when the witness drifted out of tolerance in this window: the protocol says an
+   * imperfect witness "ne peut soutenir aucune affirmation d'excès de CAGR", and an excess
+   * measured against a control that is no longer exposure-matched is precisely such an
+   * affirmation. The number is still published — hiding it would be worse — but it is
+   * published with this flag beside it.
+   */
+  excessIsSupported: boolean;
 }
 
 /**
@@ -380,8 +405,24 @@ export function validateConfiguration(
     );
   }
 
+  /*
+   * THE DRIFT IS RECORDED, NOT ACTED ON AS A REJECTION.
+   *
+   * The protocol's validation rejection list is CLOSED and holds two criteria: net return
+   * below the frozen witness, and max drawdown above the limit. Adding a third here would be
+   * expanding a protocol that was handed over closed.
+   *
+   * But it also says an imperfect witness cannot support an excess-of-CAGR claim — and out of
+   * tolerance, out-of-sample, that is exactly what this witness is. The two statements pull in
+   * different directions on the same fact, and settling that is a methodological call, not an
+   * implementation one. So this records the drift and marks the excess unsupported, without
+   * inventing a rejection criterion. See the PR for the open question.
+   */
   return {
     name: cfg.name,
+    oosWitnessMismatchPoints: excess.exposureMismatchPoints,
+    oosWitnessIsSound: excess.witnessIsSound,
+    excessIsSupported: excess.witnessIsSound,
     calibrationMetrics: calibration.metrics,
     validationMetrics: validation.metrics,
     witnessValidationMetrics: witnessValidation.metrics,
@@ -453,8 +494,18 @@ async function main(): Promise<number> {
     console.log(`  OOS net ${v.validationMetrics.netReturnPercent.toFixed(2)}%  ` +
       `CAGR ${v.validationMetrics.cagrPercent.toFixed(2)}%  ` +
       `maxDD ${v.validationMetrics.maxDrawdownPercent.toFixed(2)}%`);
-    console.log(`  frozen witness net ${v.witnessValidationMetrics.netReturnPercent.toFixed(2)}%  ` +
-      `excess of CAGR vs constant witness ${v.excessCagrPercent >= 0 ? '+' : ''}${v.excessCagrPercent.toFixed(2)}pt`);
+    console.log(`  frozen witness net ${v.witnessValidationMetrics.netReturnPercent.toFixed(2)}%`);
+    console.log(
+      `  OOS witness exposure mismatch ${v.oosWitnessMismatchPoints.toFixed(3)}pt ` +
+        `(${v.oosWitnessIsSound ? 'still matched' : 'DRIFTED out of tolerance'})`,
+    );
+    console.log(
+      v.excessIsSupported
+        ? `  excess of CAGR vs constant witness ${v.excessCagrPercent >= 0 ? '+' : ''}${v.excessCagrPercent.toFixed(2)}pt`
+        : `  excess of CAGR: ${v.excessCagrPercent >= 0 ? '+' : ''}${v.excessCagrPercent.toFixed(2)}pt — ` +
+          'NOT SUPPORTED: the witness drifted out of exposure tolerance in this window, so this ' +
+          'number may not be quoted as an excess-of-CAGR claim',
+    );
     console.log(`  verdict: ${v.rejected ? `REJECTED — ${v.reasons.join(' | ')}` : 'PASSES'}`);
   }
 
@@ -471,6 +522,12 @@ async function main(): Promise<number> {
         validation_max_drawdown_percent: v.validationMetrics.maxDrawdownPercent,
         witness_net_return_percent: v.witnessValidationMetrics.netReturnPercent,
         excess_cagr_points: v.excessCagrPercent,
+        oos_witness_mismatch_points: v.oosWitnessMismatchPoints,
+        oos_witness_is_sound: v.oosWitnessIsSound,
+        excess_is_supported: v.excessIsSupported,
+        excess_caveat: v.excessIsSupported
+          ? null
+          : 'the witness drifted out of the pre-registered exposure tolerance in this window; this excess may not be quoted as a claim',
         rejected: v.rejected,
         reasons: v.reasons,
       })),

@@ -845,6 +845,27 @@ console.log('\nThe sealed window replays the FROZEN configuration, not just its 
     withBoth.validationMetrics.closingEquity !== withAsym.validationMetrics.closingEquity);
   ok('…while the brake still fires under the asymmetric gate', withBoth.calibrationBrakedBars > 0);
 
+  // 3b) THE WITNESS'S EXPOSURE MATCH IS RE-MEASURED IN THE VALIDATION WINDOW.
+  //
+  // The frozen target was matched on CALIBRATION. Both realised exposures are path-dependent,
+  // so the pair can drift apart in the window it was frozen FOR — without anyone touching it.
+  // The target is never recomputed (the protocol forbids it); the DRIFT is measured, and an
+  // excess measured against a drifted control may not be quoted as a claim.
+  ok('the verdict reports the OOS witness exposure mismatch',
+    Number.isFinite(plain.oosWitnessMismatchPoints));
+  ok('…and says whether it is still inside the pre-registered tolerance',
+    plain.oosWitnessIsSound === (plain.oosWitnessMismatchPoints <= 0.25));
+  ok('…and an excess is supported only when the witness is still matched',
+    plain.excessIsSupported === plain.oosWitnessIsSound);
+  // A configuration whose frozen target is nowhere near its exposure must be flagged.
+  const mismatched = validateConfiguration(
+    shared, { ...base, rsi: false, freeze: 'symmetric', witnessTargetPercent: 5 }, windows,
+  );
+  ok('a badly matched frozen witness drifts out of tolerance OOS', !mismatched.oosWitnessIsSound);
+  ok('…and its excess is marked NOT SUPPORTED', mismatched.excessIsSupported === false);
+  ok('…while the excess figure is still published rather than hidden',
+    Number.isFinite(mismatched.excessCagrPercent));
+
   // 4) THE WITNESS SHARES THE MECHANICS AND NEVER THE TREATMENT.
   //    Same frozen target, so any difference in the witness comes from the gate variant alone.
   ok('the witness follows the FREEZE variant (mechanics held constant)',
