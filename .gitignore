@@ -22,3 +22,15 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Calibration OUTPUTS.
+#
+# `selection.json`, `summary.json` and `manifest.json` ARE committed: the protocol requires
+# the selection to be frozen and committed before the sealed window may be opened, and the
+# other two are the published result.
+#
+# `trajectory.json` is NOT — it is ~13 MB of per-bar detail, fully regenerable from the
+# bundle plus this commit, and it would add a fresh 13 MB blob to history on every run. The
+# manifest still records its SHA-256, so a regenerated trajectory can be checked against the
+# one that produced these numbers. That makes the hash a verification rather than a duplicate.
+out/**/trajectory.json

@@ -1,0 +1,15 @@
+# THE CALIBRATION BUNDLE IS HASHED BYTE FOR BYTE.
+#
+# `data/calibration/**` is verified against a manifest of SHA-256 digests, and the
+# manifest's own `bundle_sha256` is recomputed from those digests before any run. A
+# checkout that rewrote line endings would break every one of them at once — and it
+# would do so silently, at clone time, on a machine nobody was watching.
+#
+# This is not hypothetical: `core.autocrlf=true` is set on the machine this bundle was
+# copied from, and `crypto-lab` (the producer) had to pin the same files for the same
+# reason. The bundle is byte-identical across the two repositories only as long as both
+# pin it.
+data/calibration/** -text
+
+# Belt and braces for the payload type itself, in case the bundle ever moves.
+*.json text eol=lf
