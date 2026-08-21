@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "kind": "calibration",
+  "bundle_id": "crypto-buddy-exposure-v1",
+  "bundle_sha256": "517563c6a9ec9a29eba769049b7154a2a2a2b9c5ce6fd8730dfc019f17e487ce",
+  "bundle_as_of_exclusive": "2026-08-21T00:00:00.000Z",
+  "crypto_buddy_commit": "7f26de46f447fa82cc7a15e31bfe66542f44e9d8",
+  "crypto_buddy_tree_dirty": false,
+  "crypto_buddy_src_tree_sha": "bee0ea818828fea6e6156771b181c6e2191fbbd4",
+  "crypto_buddy_deps_lock_sha": "eb23e7e378e429f5db0d9689509d22c337c6389f",
+  "regime_version": "r1",
+  "experiment_config_sha256": "762bfc737c975d2ee3e2f318bbab31c48289964acdf14c8ed34dacc98dc4bc7c",
+  "experiment_config": {
+    "assets": [
+      "BNB",
+      "BTC",
+      "ETH",
+      "XRP"
+    ],
+    "caps": {
+      "BNB": 20,
+      "BTC": 35,
+      "ETH": 35,
+      "XRP": 15
+    },
+    "basket": {
+      "BNB": 19.047619047619047,
+      "BTC": 33.33333333333333,
+      "ETH": 33.33333333333333,
+      "XRP": 14.285714285714285
+    },
+    "min_movement_percent": 2,
+    "peak_stop_percent": 10,
+    "cash_floor": "none"
+  },
+  "costs": {
+    "fee_percent_per_leg": 0.1,
+    "slippage_percent_per_leg": 0.05,
+    "execution": "signal on the close of t, order filled at the open of t+1"
+  },
+  "arms": {
+    "A": {
+      "defensive": [
+        0,
+        20
+      ],
+      "neutral": [
+        20,
+        45
+      ],
+      "constructive": [
+        45,
+        70
+      ]
+    },
+    "B": {
+      "defensive": [
+        0,
+        25
+      ],
+      "neutral": [
+        35,
+        60
+      ],
+      "constructive": [
+        65,
+        90
+      ]
+    },
+    "C": {
+      "defensive": [
+        0,
+        30
+      ],
+      "neutral": [
+        50,
+        75
+      ],
+      "constructive": [
+        85,
+        100
+      ]
+    }
+  },
+  "controls": {
+    "deterministic_baseline_target_percent": 20,
+    "deterministic_baseline_note": "constant-exposure control, NOT a re-enactment of the live policy (which runs through the model)",
+    "witness_grid": {
+      "from_percent": 0,
+      "to_percent": 100,
+      "step_percent": 0.25,
+      "targets": 401
+    }
+  },
+  "windows": {
+    "calibration": {
+      "from": "2021-01-01T00:00:00.000Z",
+      "to_exclusive": "2024-07-01T00:00:00.000Z"
+    }
+  },
+  "outputs": [
+    {
+      "file": "summary.json",
+      "sha256": "34987d0c8a8dcbc4295d9bf178d8b9a9787e010e869d0abba6dae5883cf52782",
+      "bytes": 22310
+    },
+    {
+      "file": "trajectory.json",
+      "sha256": "4bdbda862943aca0b088b6030929e2b0af9171abe0f4c95da6d18b695e8ef671",
+      "bytes": 96027019
+    }
+  ]
+}
