@@ -509,7 +509,6 @@ async function main(): Promise<number> {
         cfg: shared.cfg,
         windows: { calibration: CALIBRATION_WINDOW },
         outputs: written,
-        timings: { prep_ms: prepMs, arm_selection_ms: selectionMs, steps_3_to_7_ms: stepsMs },
         extra: selectionFile ? { selection_decisions_sha256: selectionFile.decisions_sha256 } : {},
       }),
     ),

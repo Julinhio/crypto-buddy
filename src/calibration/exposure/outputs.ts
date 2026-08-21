@@ -46,11 +46,27 @@ export function currentGitCommit(): string | null {
   }
 }
 
-/** Whether the tree was dirty — a manifest pointing at a commit that is not what ran. */
+/**
+ * Was the SOURCE dirty when this ran — i.e. is the recorded commit really the code that
+ * produced these numbers?
+ *
+ * Deliberately blind to the output directory. A run WRITES its artefacts before stamping the
+ * manifest, so a whole-tree check reports "dirty" on every single run, for a reason that has
+ * nothing to do with the code. That flag would then mean nothing, and a genuinely
+ * uncommitted source change — the one case it exists to catch — would hide inside the noise.
+ */
+export const OUTPUT_DIR_PREFIX = 'out/';
+
 export function gitIsDirty(): boolean | null {
   try {
     const out = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    return out.trim().length > 0;
+    const sourceChanges = out
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      // Porcelain lines read "XY path"; the path starts after the status columns.
+      .filter((line) => !line.replace(/^\S+\s+/, '').startsWith(OUTPUT_DIR_PREFIX));
+    return sourceChanges.length > 0;
   } catch {
     return null;
   }
@@ -76,8 +92,7 @@ export interface ManifestInput {
   cfg: ExperimentConfig;
   windows: Record<string, { fromMs: number; toMs: number }>;
   outputs: WrittenFile[];
-  /** Timings, published rather than estimated. */
-  timings: Record<string, number>;
+  // NO timings here. See buildManifest.
   /** Anything the run wants on the record — e.g. the selection file's own digest. */
   extra?: Record<string, unknown>;
 }
@@ -85,6 +100,11 @@ export interface ManifestInput {
 /**
  * Builds the manifest. Deliberately verbose: a year from now the only way to know whether
  * two result folders are comparable is whether these fields match.
+ *
+ * NO WALL-CLOCK TIMINGS LIVE HERE, and that is not an omission. A duration can never
+ * reproduce, so a manifest carrying one could never be byte-identical across two runs — which
+ * would quietly make the determinism proof unprovable on the very artefact whose job is to
+ * certify the others. Timings are printed to stdout and published in the PR instead.
  */
 export function buildManifest(input: ManifestInput): unknown {
   return {
@@ -142,7 +162,6 @@ export function buildManifest(input: ManifestInput): unknown {
         },
       ]),
     ),
-    timings_ms: input.timings,
     ...(input.extra ?? {}),
     // LAST, and it does not include itself. See the header.
     outputs: [...input.outputs].sort((a, b) => (a.file < b.file ? -1 : 1)),

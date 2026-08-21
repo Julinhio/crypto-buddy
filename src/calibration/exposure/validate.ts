@@ -158,21 +158,39 @@ export function validateConfiguration(
   shared: SharedTape,
   cfg: ValidableConfiguration,
 ): ValidationVerdict {
+  /*
+   * THE FROZEN CONFIGURATION IS REPLAYED IN FULL — band, RSI verdict AND freeze variant.
+   *
+   * Dropping either of the last two would validate a DIFFERENT strategy from the one the
+   * selection committed to, and it would do so silently: the run would complete, the numbers
+   * would look plausible, and the single out-of-sample opening would have been spent on a
+   * configuration nobody chose. `cfg.rsi` and `cfg.freeze` are not decoration; they are two
+   * thirds of what step 4 and step 6 froze.
+   */
+  const policy = {
+    kind: 'band' as const,
+    bands: cfg.bands,
+    rsiBrake: cfg.rsi,
+    freeze: cfg.freeze,
+  };
+
   // Calibration leg — run for its ending STATE, which is what the validation resumes from.
-  const calibration = runPolicy(shared, { kind: 'band', bands: cfg.bands }, CALIBRATION_WINDOW);
+  const calibration = runPolicy(shared, policy, CALIBRATION_WINDOW);
   const resume: EngineState = calibration.result.finalState;
 
-  const validation = runPolicy(shared, { kind: 'band', bands: cfg.bands }, VALIDATION_WINDOW, resume);
+  const validation = runPolicy(shared, policy, VALIDATION_WINDOW, resume);
 
-  // The witness crosses the boundary the same way, from its own calibration state.
-  const witnessCalibration = runPolicy(
-    shared,
-    { kind: 'constant', targetPercent: cfg.witnessTargetPercent },
-    CALIBRATION_WINDOW,
-  );
+  // The witness crosses the boundary the same way, from its own calibration state. It shares
+  // the FREEZE (mechanics) and never the RSI brake (the treatment under test).
+  const witnessPolicy = {
+    kind: 'constant' as const,
+    targetPercent: cfg.witnessTargetPercent,
+    freeze: cfg.freeze,
+  };
+  const witnessCalibration = runPolicy(shared, witnessPolicy, CALIBRATION_WINDOW);
   const witnessValidation = runPolicy(
     shared,
-    { kind: 'constant', targetPercent: cfg.witnessTargetPercent },
+    witnessPolicy,
     VALIDATION_WINDOW,
     witnessCalibration.result.finalState,
   );
@@ -262,7 +280,6 @@ async function main(): Promise<number> {
         cfg: shared.cfg,
         windows: { calibration: CALIBRATION_WINDOW, validation: VALIDATION_WINDOW },
         outputs: written,
-        timings: { prep_ms: prepMs, validation_ms: validationMs },
         extra: { selection_decisions_sha256: selection.decisions_sha256 },
       }),
     ),

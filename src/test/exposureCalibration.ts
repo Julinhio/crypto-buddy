@@ -23,7 +23,7 @@ import { applyRsiBrake, MissingMedianRsiError } from '../calibration/exposure/co
 import { runPolicy } from '../calibration/exposure/arms.js';
 import { checkAgainstReference, type ArmReference, type CalibrationOutcome } from '../calibration/exposure/calibrate.js';
 import type { Metrics } from '../calibration/exposure/metrics.js';
-import { canonicalJson } from '../calibration/exposure/outputs.js';
+import { buildManifest, canonicalJson, sha256Of } from '../calibration/exposure/outputs.js';
 import { SealBrokenError, decisionsDigest, loadSelection } from '../calibration/exposure/validate.js';
 
 /**
@@ -584,6 +584,55 @@ console.log('\nThe regression guard — steps 1-2 must reproduce a reference EXA
     checkAgainstReference(outcome, { ...reference, arms: { A: { ...reference.arms.A!, cagr: 32.47 + 1e-12 } } }).length === 1);
   ok('an arm missing from the reference is reported, not ignored',
     checkAgainstReference(outcome, { ...reference, arms: {} }).length > 0);
+}
+
+// ── THE SEALED WINDOW REPLAYS THE FROZEN CONFIGURATION, IN FULL ──────────────────────
+//
+// A defect found by reading the code back: the validation used to replay only `cfg.bands`,
+// dropping `cfg.rsi` and `cfg.freeze`. It would have completed, produced plausible numbers,
+// and spent the single out-of-sample opening on a configuration nobody selected. Pinned here
+// by SOURCE inspection, because the failure is an omission — there is nothing to observe in
+// the output of a run whose two extra dimensions happen to be off.
+console.log('\nThe sealed window replays the FROZEN configuration, not just its band:');
+{
+  const src = readFileSync(path.join(ROOT, 'src', 'calibration', 'exposure', 'validate.ts'), 'utf8');
+  const body = src.slice(src.indexOf('export function validateConfiguration'));
+  ok('the validation policy carries the frozen RSI verdict', body.includes('rsiBrake: cfg.rsi'));
+  ok('…and the frozen freeze variant', body.includes('freeze: cfg.freeze'));
+  ok('the witness carries the freeze variant too (mechanics held constant)',
+    body.includes('targetPercent: cfg.witnessTargetPercent') && body.includes('freeze: cfg.freeze'));
+  // …and never the brake, which is the treatment under test.
+  const witnessBlock = body.slice(body.indexOf('const witnessPolicy'), body.indexOf('const excess'));
+  ok('…but NEVER the RSI brake — the control must not carry the treatment',
+    !witnessBlock.includes('rsiBrake'));
+}
+
+// ── PROOF 1 (artefacts) — THE MANIFEST CARRIES NOTHING THAT CANNOT REPRODUCE ─────────
+console.log('\nProof 1 (artefacts) — a manifest that could never be byte-identical is a broken proof:');
+{
+  const src = readFileSync(path.join(ROOT, 'src', 'calibration', 'exposure', 'outputs.ts'), 'utf8');
+  const body = src.slice(src.indexOf('export function buildManifest'));
+  ok('the manifest carries no wall-clock timing', !body.includes('timings'));
+  // The real check: build it twice and compare bytes.
+  const { shared, bundle } = prepareTape(ROOT);
+  const mk = () =>
+    canonicalJson(
+      buildManifest({
+        kind: 'calibration',
+        bundle: bundle.manifest,
+        cfg: shared.cfg,
+        windows: { calibration: CALIBRATION_WINDOW },
+        outputs: [{ file: 'summary.json', sha256: 'a'.repeat(64), bytes: 10 }],
+      }),
+    );
+  ok('two manifest builds are byte-identical', mk() === mk());
+  const parsed = JSON.parse(mk()) as Record<string, unknown>;
+  ok('it pins the bundle, the commit, the regime version and the config digest',
+    parsed.bundle_sha256 === EXPECTED_BUNDLE_SHA256 &&
+    typeof parsed.regime_version === 'string' &&
+    typeof parsed.experiment_config_sha256 === 'string' &&
+    'crypto_buddy_commit' in parsed);
+  ok('it does NOT hash itself', !mk().includes(sha256Of(mk())));
 }
 
 // ── PROOF 11 — NO NETWORK, NO DATABASE, NO LLM ───────────────────────────────────────
