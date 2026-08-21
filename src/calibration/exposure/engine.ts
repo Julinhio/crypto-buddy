@@ -56,13 +56,26 @@ export interface EngineInput {
 }
 
 /**
+ * How the individual freeze behaves.
+ *
+ *   'symmetric'  — production's gate, unchanged: a frozen line moves in neither direction.
+ *   'asymmetric' — the freeze applies to SELLS ONLY: a frozen line may be reinforced but not
+ *                  reduced.
+ *
+ * The deterministic stop and the reduction under a confirmed `risk_off` are IDENTICAL in
+ * both, which is what makes the comparison a test of the freeze rather than of the ladder:
+ * both variants keep every deterministic exit exactly as production has it.
+ */
+export type FreezeMode = 'symmetric' | 'asymmetric';
+
+/**
  * Either a context-driven band (an arm) or a flat target (a constant witness / the
  * deterministic 20 % baseline). Both travel through the SAME allocation sequence, the same
  * gate, the same stops and the same movement floor — which is what makes the difference
  * between them attributable to the controller rather than to the plumbing.
  */
 export type ExposurePolicy =
-  | { kind: 'band'; bands: BandPolicy; rsiBrake?: boolean }
+  | { kind: 'band'; bands: BandPolicy; rsiBrake?: boolean; freeze?: FreezeMode }
   /**
    * The constant-exposure control. It deliberately carries NO RSI brake, whatever the arm it
    * is paired with: the brake is part of the CONTROLLER under test, and putting the treatment
@@ -145,6 +158,7 @@ export function constraintFromGate(
   asset: string,
   gate: string,
   currentPercent: number,
+  freeze: FreezeMode = 'symmetric',
 ): LineConstraint {
   switch (gate) {
     // The stop is exiting the whole line: fully sellable, never buyable.
@@ -162,7 +176,15 @@ export function constraintFromGate(
         reason: 'risk_off_reduce_only',
       };
     case 'frozen':
-      return { asset, currentPercent, canReduce: false, canIncrease: false, reason: 'frozen' };
+      // The ONLY line that differs between the two variants. Everything above it — the stop,
+      // the risk_off reduction — is untouched, and everything below it never was frozen.
+      return {
+        asset,
+        currentPercent,
+        canReduce: false,
+        canIncrease: freeze === 'asymmetric',
+        reason: 'frozen',
+      };
     case 'no_regime':
       return {
         asset,
@@ -298,7 +320,14 @@ export function runReplay(input: EngineInput): EngineResult {
         stopThresholdPercent: cfg.peakStopPercent,
       });
       gates[asset] = verdict.gate;
-      lines.push(constraintFromGate(asset, verdict.gate, currentPercent));
+      lines.push(
+        constraintFromGate(
+          asset,
+          verdict.gate,
+          currentPercent,
+          policy.kind === 'band' ? (policy.freeze ?? 'symmetric') : 'symmetric',
+        ),
+      );
     }
 
     // ── The controller, then the allocation ──────────────────────────────────────────

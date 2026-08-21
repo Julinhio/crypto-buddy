@@ -241,6 +241,32 @@ console.log('\nThe RSI brake — a one-way brake against buying into an overboug
     braked.projectedPercent === 0);
 }
 
+// ── THE FREEZE ASYMMETRY ─────────────────────────────────────────────────────────────
+console.log('\nThe freeze asymmetry — sell-only freeze, with the deterministic exits untouched:');
+{
+  const sym = constraintFromGate('BTC', 'frozen', 30, 'symmetric');
+  ok('symmetric: a frozen line moves in neither direction', sym.canReduce === false && sym.canIncrease === false);
+  const asym = constraintFromGate('BTC', 'frozen', 30, 'asymmetric');
+  ok('asymmetric: a frozen line may be REINFORCED', asym.canIncrease === true);
+  ok('…but still not REDUCED — the freeze is on sells', asym.canReduce === false);
+
+  // The two deterministic exits must be IDENTICAL in both variants, or the comparison would
+  // be testing the ladder rather than the freeze.
+  for (const mode of ['symmetric', 'asymmetric'] as const) {
+    const stop = constraintFromGate('BTC', 'stop_exit', 30, mode);
+    const ro = constraintFromGate('BTC', 'risk_off_reduction', 30, mode);
+    ok(`${mode}: the stop still exits fully`, stop.canReduce === true && stop.canIncrease === false);
+    ok(`${mode}: risk_off still reduces`, ro.canReduce === true && ro.canIncrease === false);
+  }
+  // And the asymmetric freeze must LIFT the ceiling, since a frozen line can now be bought.
+  const cfgA = buildExperimentConfig();
+  const frozenLine: LineConstraint[] = [
+    { asset: 'BTC', currentPercent: 10, canReduce: false, canIncrease: true, reason: 'frozen' },
+  ];
+  ok('an asymmetric freeze lifts the feasible ceiling by the line’s remaining cap',
+    feasibleInterval(frozenLine, cfgA.caps).highPercent === 10 + (35 - 10));
+}
+
 // ── PROOF 10 — BUNDLE VERIFICATION ───────────────────────────────────────────────────
 console.log('\nProof 10 — the bundle gate refuses every kind of tampering:');
 {
