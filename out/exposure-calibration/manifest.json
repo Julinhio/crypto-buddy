@@ -4,9 +4,9 @@
   "bundle_id": "crypto-buddy-exposure-v1",
   "bundle_sha256": "517563c6a9ec9a29eba769049b7154a2a2a2b9c5ce6fd8730dfc019f17e487ce",
   "bundle_as_of_exclusive": "2026-08-21T00:00:00.000Z",
-  "crypto_buddy_commit": "a308bf50d5dcc73add5d2d03bf2c7286b5e9d1f3",
+  "crypto_buddy_commit": "8284e66e8b5cd009dd091f34c0fefc9c77b03128",
   "crypto_buddy_tree_dirty": false,
-  "crypto_buddy_src_tree_sha": "9637036eddff0137e077673de6d0ea14cbbe79e2",
+  "crypto_buddy_src_tree_sha": "47186a916d5fd0876f62672214486f866dc82559",
   "regime_version": "r1",
   "experiment_config_sha256": "762bfc737c975d2ee3e2f318bbab31c48289964acdf14c8ed34dacc98dc4bc7c",
   "experiment_config": {
