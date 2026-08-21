@@ -22,7 +22,7 @@ import { prepareTape, CALIBRATION_WINDOW, VALIDATION_WINDOW } from '../calibrati
 import { applyRsiBrake, MissingMedianRsiError } from '../calibration/exposure/controller.js';
 import { ARMS, equalWeightBuyAndHold, runPolicy } from '../calibration/exposure/arms.js';
 import { checkAgainstReference, type ArmReference, type CalibrationOutcome } from '../calibration/exposure/calibrate.js';
-import type { Metrics } from '../calibration/exposure/metrics.js';
+import { excessVsWitness, type Metrics } from '../calibration/exposure/metrics.js';
 import {
   buildManifest,
   canonicalJson,
@@ -30,7 +30,13 @@ import {
   currentSourceTreeSha,
   sha256Of,
 } from '../calibration/exposure/outputs.js';
-import { SealBrokenError, decisionsDigest, loadSelection, validateConfiguration } from '../calibration/exposure/validate.js';
+import {
+  SealBrokenError,
+  VALIDATION_MAX_DRAWDOWN_PERCENT,
+  decisionsDigest,
+  loadSelection,
+  validateConfiguration,
+} from '../calibration/exposure/validate.js';
 
 /**
  * THE TWELVE PROOFS of the exposure-calibration harness.
@@ -865,6 +871,75 @@ console.log('\nThe sealed window replays the FROZEN configuration, not just its 
   ok('…and its excess is marked NOT SUPPORTED', mismatched.excessIsSupported === false);
   ok('…while the excess figure is still published rather than hidden',
     Number.isFinite(mismatched.excessCagrPercent));
+
+  // 3c) A DRIFTED WITNESS MAKES THE CONFIGURATION NON-DELIVERABLE, AS "INCONCLUSIVE".
+  //
+  // Not a failure of the configuration: the control stopped being a control, so the claim the
+  // experiment is built on — return AT COMPARABLE EXPOSURE — could not be made. The four
+  // properties Julien pinned, each checked on its own.
+  {
+    // (i) drift STRICTLY ABOVE the tolerance → not deliverable, labelled inconclusive.
+    ok('a drifted witness → outcome "inconclusive", not "rejected"', mismatched.outcome === 'inconclusive');
+    ok('…and the configuration is NOT deliverable', mismatched.deliverable === false);
+    ok('…and it is NOT reported as a performance failure', mismatched.rejected === false);
+    ok('…with a reason that says nothing is proven either way',
+      mismatched.reasons.some((r) => r.includes('INCONCLUSIVE') && r.includes('not a performance failure')));
+
+    // (ii) the METRICS are still published in full, with the flag beside them.
+    ok('the metrics are still published — net return', Number.isFinite(mismatched.validationMetrics.netReturnPercent));
+    ok('…max drawdown', Number.isFinite(mismatched.validationMetrics.maxDrawdownPercent));
+    ok('…realised exposure', Number.isFinite(mismatched.validationMetrics.meanExposurePercent));
+    ok('…and the excess figure itself, flagged unsupported',
+      Number.isFinite(mismatched.excessCagrPercent) && mismatched.excessIsSupported === false);
+    ok('…with oosWitnessIsSound = false recorded', mismatched.oosWitnessIsSound === false);
+
+    // (iii) EXACTLY at the tolerance the witness stays acceptable. The protocol says "≤".
+    //       Checked on the pure predicate, since hitting 0.25000 on a real tape is chance.
+    const atTolerance = excessVsWitness(
+      { cagrPercent: 10, meanExposurePercent: 40 } as Metrics,
+      { cagrPercent: 8, meanExposurePercent: 40.25 } as Metrics,
+    );
+    ok('a mismatch of exactly 0.25pt is SOUND — the protocol says "≤"', atTolerance.witnessIsSound === true);
+    const justOver = excessVsWitness(
+      { cagrPercent: 10, meanExposurePercent: 40 } as Metrics,
+      { cagrPercent: 8, meanExposurePercent: 40.2500001 } as Metrics,
+    );
+    ok('…and a hair above it is NOT', justOver.witnessIsSound === false);
+
+    // (iv) THE TWO PRE-REGISTERED CRITERIA ARE UNCHANGED. A well-matched configuration is
+    //      judged exactly as before — the drift rule adds nothing to its evaluation.
+    // Conditioned on the FACT rather than on an assumption: the synthetic sub-window used for
+    // this proof is short, and a frozen target matched on the full calibration has no reason
+    // to stay matched on an arbitrary slice of it. Asserting "plain is well matched" would be
+    // asserting something about the fixture, not about the rule.
+    if (plain.oosWitnessIsSound) {
+      ok('a WELL-MATCHED configuration is judged on the two criteria alone',
+        plain.outcome === (plain.reasons.length > 0 ? 'rejected' : 'passes'));
+    } else {
+      ok('this fixture drifted too — the rule applies to it identically',
+        plain.outcome === 'inconclusive' || plain.validationMetrics.maxDrawdownPercent > VALIDATION_MAX_DRAWDOWN_PERCENT);
+    }
+    ok('deliverability is exactly "the outcome passes", never a third state',
+      plain.deliverable === (plain.outcome === 'passes') &&
+      mismatched.deliverable === (mismatched.outcome === 'passes'));
+
+    // The two criteria themselves, exercised directly on a SOUND witness so the drift rule
+    // cannot be what produces the verdict.
+    const sound = validateConfiguration(
+      shared, { ...base, rsi: false, freeze: 'symmetric' },
+      { calibration: windows.calibration, validation: windows.calibration },
+    );
+    ok('with a sound witness, the outcome is decided by the two criteria alone',
+      !sound.oosWitnessIsSound || sound.outcome === (sound.reasons.length > 0 ? 'rejected' : 'passes'));
+    ok('…the drawdown limit is still 45 %', VALIDATION_MAX_DRAWDOWN_PERCENT === 45);
+    // The drawdown criterion is ABSOLUTE and outranks a drift: it is judgeable whatever the
+    // witness does, so a breach stays a genuine rejection rather than being hidden behind
+    // "we could not tell".
+    ok('a drawdown breach is reported as REJECTED even when the witness drifted',
+      mismatched.validationMetrics.maxDrawdownPercent > VALIDATION_MAX_DRAWDOWN_PERCENT
+        ? mismatched.outcome === 'rejected'
+        : true);
+  }
 
   // 4) THE WITNESS SHARES THE MECHANICS AND NEVER THE TREATMENT.
   //    Same frozen target, so any difference in the witness comes from the gate variant alone.

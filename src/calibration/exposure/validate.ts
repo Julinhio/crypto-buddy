@@ -287,6 +287,23 @@ export interface ValidationVerdict {
   validationMetrics: Metrics;
   witnessValidationMetrics: Metrics;
   excessCagrPercent: number;
+  /**
+   * THE THREE-VALUED VERDICT.
+   *
+   *   'passes'       — deliverable: both performance criteria met, witness still matched.
+   *   'rejected'     — a PERFORMANCE failure, measured and attributable.
+   *   'inconclusive' — the witness drifted out of exposure tolerance in this window, so the
+   *                    comparison the experiment is built on could not be made. NOT a failure
+   *                    of the configuration: nothing was proven either way.
+   *
+   * The distinction matters for what may be said afterwards. "It failed" and "we could not
+   * tell" licence very different next steps, and collapsing them would let a measurement
+   * problem be reported as a verdict on the strategy.
+   */
+  outcome: 'passes' | 'rejected' | 'inconclusive';
+  /** May this configuration be delivered? False for BOTH non-passing outcomes. */
+  deliverable: boolean;
+  /** Kept for the performance half: true when a pre-registered criterion was breached. */
   rejected: boolean;
   reasons: string[];
   /**
@@ -406,7 +423,46 @@ export function validateConfiguration(
   }
 
   /*
-   * THE DRIFT IS RECORDED, NOT ACTED ON AS A REJECTION.
+   * A DRIFTED WITNESS MAKES THE CONFIGURATION NON-DELIVERABLE, AS "INCONCLUSIVE".
+   *
+   * Not a new criterion invented after the fact: it is the operational application of a rule
+   * the protocol already states. An imperfect witness cannot support an excess-of-CAGR claim,
+   * and the experiment's central affirmation IS a claim about return AT COMPARABLE EXPOSURE.
+   * When the pair drifts past the tolerance out-of-sample, that affirmation cannot be made —
+   * so the configuration cannot be delivered on the strength of it.
+   *
+   * It is deliberately NOT called a failure. Nothing was proven against the configuration; the
+   * control simply stopped being a control. The metrics are still published in full.
+   *
+   * PRECEDENCE, stated because it is a choice. The drawdown limit is ABSOLUTE — judgeable
+   * whatever the witness does — so a breach of it is a genuine rejection and is reported as
+   * one. The net-return criterion, by contrast, is measured AGAINST the witness: if the
+   * witness drifted, attributing a failure to that comparison would rest a verdict on the very
+   * control we have just declared unusable. So a drift outranks it.
+   *
+   * The two pre-registered criteria are evaluated exactly as before, unchanged, and reported
+   * whatever the outcome.
+   */
+  const witnessDrifted = !excess.witnessIsSound;
+  const drawdownBreached = validation.metrics.maxDrawdownPercent > VALIDATION_MAX_DRAWDOWN_PERCENT;
+  const outcome: 'passes' | 'rejected' | 'inconclusive' = drawdownBreached
+    ? 'rejected'
+    : witnessDrifted
+      ? 'inconclusive'
+      : reasons.length > 0
+        ? 'rejected'
+        : 'passes';
+  if (witnessDrifted) {
+    reasons.push(
+      `INCONCLUSIVE: the frozen witness drifted to ${excess.exposureMismatchPoints.toFixed(3)}pt of ` +
+        `exposure mismatch out-of-sample, past the pre-registered ${WITNESS_EXPOSURE_TOLERANCE_POINTS}pt ` +
+        'tolerance. The comparison at comparable exposure could not be made, so nothing is ' +
+        'proven either way — this is not a performance failure.',
+    );
+  }
+
+  /*
+   * THE DRIFT IS ALSO RECORDED AS A FACT.
    *
    * The protocol's validation rejection list is CLOSED and holds two criteria: net return
    * below the frozen witness, and max drawdown above the limit. Adding a third here would be
@@ -427,7 +483,9 @@ export function validateConfiguration(
     validationMetrics: validation.metrics,
     witnessValidationMetrics: witnessValidation.metrics,
     excessCagrPercent: excess.excessCagrPercent,
-    rejected: reasons.length > 0,
+    outcome,
+    deliverable: outcome === 'passes',
+    rejected: outcome === 'rejected',
     reasons,
     calibrationBrakedBars: calibration.result.bars.filter((b) => b.rsiBraked).length,
     validationBrakedBars: validation.result.bars.filter((b) => b.rsiBraked).length,
@@ -458,6 +516,10 @@ export function enforceAsymmetryPairing(
   const asymNet = asymmetric.validationMetrics.netReturnPercent;
   const symNet = symmetric.validationMetrics.netReturnPercent;
   if (asymNet < symNet) {
+    // A performance failure on a pre-registered condition: a genuine rejection, and it
+    // overrides an 'inconclusive' label — this one is measured, not unmeasurable.
+    asymmetric.outcome = 'rejected';
+    asymmetric.deliverable = false;
     asymmetric.rejected = true;
     asymmetric.reasons.push(
       `out-of-sample net return ${asymNet.toFixed(2)}% is below the symmetric variant's ` +
@@ -506,7 +568,14 @@ async function main(): Promise<number> {
           'NOT SUPPORTED: the witness drifted out of exposure tolerance in this window, so this ' +
           'number may not be quoted as an excess-of-CAGR claim',
     );
-    console.log(`  verdict: ${v.rejected ? `REJECTED — ${v.reasons.join(' | ')}` : 'PASSES'}`);
+    const label =
+      v.outcome === 'passes'
+        ? 'PASSES'
+        : v.outcome === 'rejected'
+          ? 'REJECTED (performance)'
+          : 'INCONCLUSIVE (witness unmatched — nothing proven either way)';
+    console.log(`  verdict: ${label}${v.reasons.length ? ` — ${v.reasons.join(' | ')}` : ''}`);
+    console.log(`  deliverable: ${v.deliverable ? 'YES' : 'NO'}`);
   }
 
   const written: WrittenFile[] = [];
@@ -528,6 +597,8 @@ async function main(): Promise<number> {
         excess_caveat: v.excessIsSupported
           ? null
           : 'the witness drifted out of the pre-registered exposure tolerance in this window; this excess may not be quoted as a claim',
+        outcome: v.outcome,
+        deliverable: v.deliverable,
         rejected: v.rejected,
         reasons: v.reasons,
       })),
@@ -549,7 +620,9 @@ async function main(): Promise<number> {
   );
 
   console.log(`\nartefacts → ${outDir}`);
-  return verdicts.every((v) => v.rejected) ? 1 : 0;
+  // Non-zero when nothing is deliverable — including when every verdict is INCONCLUSIVE,
+  // which is not a pass however carefully it is worded.
+  return verdicts.some((v) => v.deliverable) ? 0 : 1;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
