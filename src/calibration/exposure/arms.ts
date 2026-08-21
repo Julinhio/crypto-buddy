@@ -3,7 +3,7 @@ import type { BandPolicy } from './controller.js';
 import { validateBandPolicy } from './controller.js';
 import type { ExperimentConfig } from './config.js';
 import type { AssetTape, EngineResult, EngineState, ExposurePolicy } from './engine.js';
-import { runReplay, STARTING_CASH_USD } from './engine.js';
+import { runReplay, STARTING_CASH_USD, type FreezeMode } from './engine.js';
 import { computeMetrics, WITNESS_EXPOSURE_TOLERANCE_POINTS, type Metrics } from './metrics.js';
 import type { RegimePoint } from '../../market/regime.js';
 
@@ -127,11 +127,17 @@ export function searchConstantWitness(
   shared: SharedTape,
   window: WindowBounds,
   armMeanExposurePercent: number,
+  /**
+   * The gate variant the arm ran under. The witness MUST share it: the freeze is mechanics,
+   * and a symmetric witness paired with an asymmetric arm would introduce a second difference
+   * into a comparison whose whole job is to isolate one.
+   */
+  freeze: FreezeMode = 'symmetric',
 ): WitnessSelection {
   let best: { target: number; realised: number; mismatch: number } | null = null;
 
   for (const target of WITNESS_TARGETS) {
-    const { metrics } = runPolicy(shared, { kind: 'constant', targetPercent: target }, window);
+    const { metrics } = runPolicy(shared, { kind: 'constant', targetPercent: target, freeze }, window);
     const realised = metrics.meanExposurePercent;
     const mismatch = Math.abs(realised - armMeanExposurePercent);
     // Strictly-better keeps the FIRST target on a tie, and the grid ascends — so a tie

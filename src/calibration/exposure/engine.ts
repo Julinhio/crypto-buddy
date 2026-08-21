@@ -77,12 +77,19 @@ export type FreezeMode = 'symmetric' | 'asymmetric';
 export type ExposurePolicy =
   | { kind: 'band'; bands: BandPolicy; rsiBrake?: boolean; freeze?: FreezeMode }
   /**
-   * The constant-exposure control. It deliberately carries NO RSI brake, whatever the arm it
-   * is paired with: the brake is part of the CONTROLLER under test, and putting the treatment
-   * into the control is exactly what a control exists to avoid. What the witness must share
-   * with the arm is the MECHANICS — the gate, the stops, the movement floor — and it does.
+   * The constant-exposure control.
+   *
+   * It deliberately carries NO RSI brake, whatever the arm it is paired with: the brake is
+   * part of the CONTROLLER under test, and putting the treatment into the control is exactly
+   * what a control exists to avoid.
+   *
+   * It DOES carry the freeze mode, and that is the same reasoning read the other way. The
+   * freeze is MECHANICS, not treatment — the witness must share the gate, the stops, the
+   * movement floor and the costs with the arm it is matched to. Pairing an asymmetric
+   * configuration with a symmetric witness would let a second difference into a comparison
+   * built to isolate one.
    */
-  | { kind: 'constant'; targetPercent: number };
+  | { kind: 'constant'; targetPercent: number; freeze?: FreezeMode };
 
 /** Starting capital, fixed by the protocol. */
 export const STARTING_CASH_USD = 1000;
@@ -325,7 +332,7 @@ export function runReplay(input: EngineInput): EngineResult {
           asset,
           verdict.gate,
           currentPercent,
-          policy.kind === 'band' ? (policy.freeze ?? 'symmetric') : 'symmetric',
+          policy.freeze ?? 'symmetric',
         ),
       );
     }

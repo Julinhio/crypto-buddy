@@ -14,7 +14,10 @@ import {
 } from './arms.js';
 import { CALIBRATION_WINDOW, prepareTape } from './tape.js';
 import { excessVsWitness, type Metrics } from './metrics.js';
-import { buildManifest, writeArtefact, type WrittenFile } from './outputs.js';
+import { buildManifest, currentGitCommit, writeArtefact, type WrittenFile } from './outputs.js';
+import { freezeWitness, judgeAsymmetry, judgeRsi } from './select.js';
+import { decisionsDigest, type SelectionFile, type ValidableConfiguration } from './validate.js';
+import type { FreezeMode } from './engine.js';
 
 /**
  * THE CALIBRATION RUN — the selection, on the calibration window ONLY.
@@ -248,7 +251,110 @@ async function main(): Promise<number> {
   console.log('tell us which of its bands carried the result. Assumed, and stated beside the number.');
   console.log('='.repeat(96));
 
+  // === STEPS 3 -> 7, and ONLY if an arm actually qualified ==========================
+  //
+  // A negative outcome stops here on purpose. Testing the RSI on an arm that failed its own
+  // eligibility would be looking for a variant that rescues it, which is precisely the loop
+  // the fixed order exists to prevent.
+  let rsiVerdict: ReturnType<typeof judgeRsi> | null = null;
+  let asymVerdict: ReturnType<typeof judgeAsymmetry> | null = null;
+  let selectionFile: SelectionFile | null = null;
+  const frozen: Array<{ configuration: ValidableConfiguration; metrics: Metrics; witnessMetrics: Metrics }> = [];
+  let stepsMs = 0;
+
+  if (outcome.selected) {
+    const selected = outcome.selected;
+    const t1 = Date.now();
+
+    // -- STEP 3 - the RSI candidate, on THIS arm only, at identical band --------------
+    const withRsi = runPolicy(shared, { kind: 'band', bands: selected.bands, rsiBrake: true }, CALIBRATION_WINDOW);
+    rsiVerdict = judgeRsi(selected.metrics, withRsi.metrics);
+    const brakedBars = withRsi.result.bars.filter((b) => b.rsiBraked).length;
+    console.log(`\n-- STEP 3 - RSI candidate on arm ${selected.name} ` + '-'.repeat(52));
+    console.log(`  without RSI : CAGR ${selected.metrics.cagrPercent.toFixed(2)}%  maxDD ${selected.metrics.maxDrawdownPercent.toFixed(2)}%  mean exposure ${selected.metrics.meanExposurePercent.toFixed(2)}%`);
+    console.log(`  with RSI    : CAGR ${withRsi.metrics.cagrPercent.toFixed(2)}%  maxDD ${withRsi.metrics.maxDrawdownPercent.toFixed(2)}%  mean exposure ${withRsi.metrics.meanExposurePercent.toFixed(2)}%`);
+    console.log(`  braked bars : ${brakedBars} / ${withRsi.result.bars.length}`);
+    console.log(`  verdict     : ${rsiVerdict.retained ? 'RETAINED' : 'REJECTED'} - ${rsiVerdict.reason}`);
+
+    // -- STEP 4 - frozen, in or out, and never revisited ------------------------------
+    const rsi = rsiVerdict.retained;
+
+    // -- STEP 5 - the asymmetry, on THAT configuration only ---------------------------
+    const sym = runPolicy(shared, { kind: 'band', bands: selected.bands, rsiBrake: rsi, freeze: 'symmetric' }, CALIBRATION_WINDOW);
+    const asym = runPolicy(shared, { kind: 'band', bands: selected.bands, rsiBrake: rsi, freeze: 'asymmetric' }, CALIBRATION_WINDOW);
+    asymVerdict = judgeAsymmetry(sym.metrics, asym.metrics);
+    console.log(`\n-- STEP 5 - freeze asymmetry (sell-only) ` + '-'.repeat(52));
+    console.log(`  symmetric  : CAGR ${sym.metrics.cagrPercent.toFixed(2)}%  maxDD ${sym.metrics.maxDrawdownPercent.toFixed(2)}%`);
+    console.log(`  asymmetric : CAGR ${asym.metrics.cagrPercent.toFixed(2)}%  maxDD ${asym.metrics.maxDrawdownPercent.toFixed(2)}%`);
+    console.log(`  verdict    : ${asymVerdict.admissible ? 'ADMISSIBLE to validation' : 'NOT admissible'} - ${asymVerdict.reason}`);
+
+    // -- STEPS 6 & 7 - pre-register the variants, each with its OWN frozen witness -----
+    const modes: FreezeMode[] = asymVerdict.admissible ? ['symmetric', 'asymmetric'] : ['symmetric'];
+    for (const mode of modes) {
+      const name = `${selected.name}-${rsi ? 'rsi' : 'norsi'}-${mode}`;
+      // A bare arm's witness was already searched in step 2 on exactly these mechanics; the
+      // search is exhaustive and deterministic, so repeating it would burn nine minutes to
+      // land on the same target. Any VARIANT gets its own search.
+      const reusable = !rsi && mode === 'symmetric';
+      if (reusable) {
+        console.log(`\n  witness for ${name}: reusing the step-2 search (identical configuration)`);
+        frozen.push({
+          configuration: {
+            name, bands: selected.bands, rsi, freeze: mode,
+            witnessTargetPercent: selected.witness.targetPercent,
+            witnessMismatchPoints: selected.witness.mismatchPoints,
+          },
+          metrics: selected.metrics,
+          witnessMetrics: selected.witnessMetrics,
+        });
+      } else {
+        console.log(`\n  witness for ${name}: exhaustive search (401 targets)...`);
+        frozen.push(freezeWitness(shared, CALIBRATION_WINDOW, name, selected.bands, rsi, mode));
+      }
+      const last = frozen[frozen.length - 1]!;
+      console.log(
+        `    constant ${last.configuration.witnessTargetPercent.toFixed(2)}%  mismatch ${last.configuration.witnessMismatchPoints.toFixed(3)}pt  ` +
+          `excess ${(last.metrics.cagrPercent - last.witnessMetrics.cagrPercent).toFixed(2)}pt`,
+      );
+    }
+    stepsMs = Date.now() - t1;
+
+    const base = {
+      schema_version: 1 as const,
+      bundle_sha256: bundle.manifest.bundle_sha256,
+      crypto_buddy_commit: currentGitCommit(),
+      selected_arm: selected.name,
+      rsi_retained: rsi,
+      asymmetry_admissible: asymVerdict.admissible,
+      configurations: frozen.map((f) => f.configuration),
+    };
+    selectionFile = { ...base, decisions_sha256: decisionsDigest(base) };
+  }
+
   const written: WrittenFile[] = [];
+  if (selectionFile) {
+    // THE FROZEN SELECTION. Committed BEFORE the sealed window may be opened; the validation
+    // command refuses to run without it, and refuses it if any decision was edited after.
+    written.push(writeArtefact(outDir, 'selection.json', selectionFile));
+    console.log(`\nselection frozen -> ${outDir}/selection.json  (digest ${selectionFile.decisions_sha256.slice(0, 16)}...)`);
+    console.log('COMMIT IT before opening the sealed window. The validation command will refuse otherwise.');
+  }
+
+  written.push(
+    writeArtefact(outDir, 'trajectory.json', {
+      kind: 'raw-trajectory',
+      note: 'the full per-bar trajectory of every configuration pre-registered for validation',
+      configurations: frozen.map((f) => ({
+        name: f.configuration.name,
+        bars: runPolicy(
+          shared,
+          { kind: 'band', bands: f.configuration.bands, rsiBrake: f.configuration.rsi, freeze: f.configuration.freeze },
+          CALIBRATION_WINDOW,
+        ).result.bars,
+      })),
+    }),
+  );
+
   written.push(
     writeArtefact(outDir, 'summary.json', {
       kind: 'arm-selection',
@@ -276,6 +382,35 @@ async function main(): Promise<number> {
         eligibility: r.eligibility,
       })),
       selected_arm: outcome.selected?.name ?? null,
+      step3_rsi: rsiVerdict
+        ? {
+            retained: rsiVerdict.retained,
+            branch_a: rsiVerdict.branchA,
+            branch_b: rsiVerdict.branchB,
+            cagr_delta_points: rsiVerdict.cagrDeltaPoints,
+            drawdown_delta_points: rsiVerdict.drawdownDeltaPoints,
+            reason: rsiVerdict.reason,
+          }
+        : null,
+      step5_asymmetry: asymVerdict
+        ? {
+            admissible: asymVerdict.admissible,
+            cagr_delta_points: asymVerdict.cagrDeltaPoints,
+            drawdown_delta_points: asymVerdict.drawdownDeltaPoints,
+            reason: asymVerdict.reason,
+            note: 'the third condition (out-of-sample net return at least equal to the symmetric variant) is judged in the sealed window, never here',
+          }
+        : null,
+      step7_frozen_witnesses: frozen.map((f) => ({
+        name: f.configuration.name,
+        rsi: f.configuration.rsi,
+        freeze: f.configuration.freeze,
+        witness_constant_target_percent: f.configuration.witnessTargetPercent,
+        witness_mismatch_points: f.configuration.witnessMismatchPoints,
+        metrics: summarizeMetrics(f.metrics),
+        witness_metrics: summarizeMetrics(f.witnessMetrics),
+        excess_cagr_vs_constant_witness_points: f.metrics.cagrPercent - f.witnessMetrics.cagrPercent,
+      })),
       limit:
         'the three arms differ on all three states at once; a winning arm does not identify which band carried the result',
     }),
@@ -291,7 +426,8 @@ async function main(): Promise<number> {
         cfg: shared.cfg,
         windows: { calibration: CALIBRATION_WINDOW },
         outputs: written,
-        timings: { prep_ms: prepMs, arm_selection_ms: selectionMs },
+        timings: { prep_ms: prepMs, arm_selection_ms: selectionMs, steps_3_to_7_ms: stepsMs },
+        extra: selectionFile ? { selection_decisions_sha256: selectionFile.decisions_sha256 } : {},
       }),
     ),
   );

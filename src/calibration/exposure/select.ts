@@ -144,10 +144,11 @@ export function freezeWitness(
   freeze: FreezeMode,
 ): { configuration: ValidableConfiguration; metrics: Metrics; witnessMetrics: Metrics } {
   const { metrics } = runPolicy(shared, { kind: 'band', bands, rsiBrake: rsi, freeze }, window);
-  const witness = searchConstantWitness(shared, window, metrics.meanExposurePercent);
+  // The witness inherits the FREEZE variant (mechanics) and never the RSI brake (treatment).
+  const witness = searchConstantWitness(shared, window, metrics.meanExposurePercent, freeze);
   const { metrics: witnessMetrics } = runPolicy(
     shared,
-    { kind: 'constant', targetPercent: witness.targetPercent },
+    { kind: 'constant', targetPercent: witness.targetPercent, freeze },
     window,
   );
   return {

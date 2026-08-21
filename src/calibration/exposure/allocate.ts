@@ -158,7 +158,44 @@ export function allocate(params: {
 
   // ── 2. the feasible interval, for the direction we are actually travelling ─────────
   const interval = feasibleInterval(lines, cfg.caps);
+
+  /*
+   * THE STRUCTURAL INVARIANT, asserted rather than assumed.
+   *
+   * The feasible FLOOR is the sum of the weights of the lines we may not reduce — a SUBSET of
+   * the book we already hold. It therefore cannot exceed the current exposure, ever, and the
+   * projection can never push a target UP toward it.
+   *
+   * That matters most for the RSI brake: when the brake cancels an increase by capping the
+   * target at the current exposure, the feasible projection must not be able to recreate a
+   * higher one. It may hold the exposure, and it may REDUCE it if another constraint demands
+   * that (a ceiling below the current book), but it may never raise it.
+   *
+   * If this ever fires it is a construction defect in the interval — a line counted in the
+   * floor that is not in the book, or an exposure computed on a different basis than the
+   * weights — and not a legitimate structural constraint. So it fails loudly here instead of
+   * silently producing a purchase the brake had just refused.
+   */
+  const FLOOR_EPSILON = 1e-9;
+  if (interval.lowPercent > currentExposurePercent + FLOOR_EPSILON) {
+    throw new Error(
+      `exposure allocator: the feasible floor (${interval.lowPercent}) exceeds the current ` +
+        `exposure (${currentExposurePercent}). The floor sums a SUBSET of the book, so this is ` +
+        'impossible unless the interval is built wrong — refusing to continue.',
+    );
+  }
+
   const projectedPercent = projectOntoFeasible(bandTargetPercent, interval);
+
+  // The brake's own guarantee, restated where it is observable: a braked bar never ends up
+  // aiming higher than the book already sits.
+  if (braked.braked && projectedPercent > currentExposurePercent + FLOOR_EPSILON) {
+    throw new Error(
+      `exposure allocator: the RSI brake capped the target at ${currentExposurePercent}% but the ` +
+        `feasible projection raised it to ${projectedPercent}%. A braked bar may hold or reduce ` +
+        'exposure, never increase it.',
+    );
+  }
 
   // ── 3. nominal targets from the FIXED basket ──────────────────────────────────────
   const nominal: Record<string, number> = {};

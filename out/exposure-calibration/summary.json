@@ -1,0 +1,634 @@
+{
+  "kind": "arm-selection",
+  "metric_name": "excess of CAGR vs constant witness",
+  "metric_note": "the witness runs the SAME gate, stops and movement floor, so the difference isolates the band controller alone. Not an alpha, not the full bot edge.",
+  "deterministic_baseline": {
+    "bars": 7662,
+    "opening_equity": 1000,
+    "closing_equity": 1644.9097195635186,
+    "net_return_percent": 64.49097195635186,
+    "cagr_percent": 15.29789284738654,
+    "max_drawdown_percent": 19.345878569766796,
+    "time_under_water_days": 1243,
+    "longest_under_water_days": 837.1666666666666,
+    "mean_exposure_percent_realised": 19.581244469554235,
+    "median_exposure_percent_realised": 19.609956810684082,
+    "turnover_ratio": 15.665607282345542,
+    "traded_notional": 22667.5334092806,
+    "fees_paid": 22.66178429389362,
+    "dropped_by_floor_bars": 7502,
+    "dropped_at_band_edge_bars": 5099,
+    "gap_total": {
+      "underPercentPoints": -6614.511135350989,
+      "overPercentPoints": 5743.8872459922795,
+      "underBars": 4141,
+      "overBars": 3457
+    },
+    "gap_by_asset": {
+      "BNB": {
+        "underPercentPoints": -1323.9458986562486,
+        "overPercentPoints": 1982.1071208940746,
+        "underBars": 3507,
+        "overBars": 4064
+      },
+      "BTC": {
+        "underPercentPoints": -1224.5214445756787,
+        "overPercentPoints": 3145.332677227709,
+        "underBars": 2968,
+        "overBars": 4570
+      },
+      "ETH": {
+        "underPercentPoints": -1533.1580453793244,
+        "overPercentPoints": 2791.9388165121845,
+        "underBars": 3201,
+        "overBars": 4281
+      },
+      "XRP": {
+        "underPercentPoints": -5236.188739846868,
+        "overPercentPoints": 527.8116244654291,
+        "underBars": 5694,
+        "overBars": 1930
+      }
+    },
+    "gap_by_cause": {
+      "frozen": {
+        "underPercentPoints": -2805.901840760851,
+        "overPercentPoints": 1991.5421909662903,
+        "underBars": 3963,
+        "overBars": 3204
+      },
+      "cap": {
+        "underPercentPoints": 0,
+        "overPercentPoints": 0,
+        "underBars": 0,
+        "overBars": 0
+      },
+      "floor": {
+        "underPercentPoints": -6511.912287697282,
+        "overPercentPoints": 6455.648048133131,
+        "underBars": 11407,
+        "overBars": 11641
+      }
+    },
+    "pending_not_executed": 0,
+    "state_bars": {
+      "constant": 7662
+    }
+  },
+  "equal_weight_reference": {
+    "openingEquity": 1000,
+    "closingEquity": 6042.45207991721,
+    "netReturnPercent": 504.245207991721,
+    "note": "does NOT respect the per-asset caps — external reference only"
+  },
+  "arms": [
+    {
+      "name": "A",
+      "bands": {
+        "defensive": {
+          "lowPercent": 0,
+          "highPercent": 20
+        },
+        "neutral": {
+          "lowPercent": 20,
+          "highPercent": 45
+        },
+        "constructive": {
+          "lowPercent": 45,
+          "highPercent": 70
+        }
+      },
+      "metrics": {
+        "bars": 7662,
+        "opening_equity": 1000,
+        "closing_equity": 2672.383841993446,
+        "net_return_percent": 167.23838419934458,
+        "cagr_percent": 32.46539162787745,
+        "max_drawdown_percent": 32.12858747022338,
+        "time_under_water_days": 1244.6666666666667,
+        "longest_under_water_days": 832.1666666666666,
+        "mean_exposure_percent_realised": 36.80843769928855,
+        "median_exposure_percent_realised": 43.80564703745605,
+        "turnover_ratio": 65.53530744838234,
+        "traded_notional": 133436.26157593858,
+        "fees_paid": 133.40259451451502,
+        "dropped_by_floor_bars": 7284,
+        "dropped_at_band_edge_bars": 4202,
+        "gap_total": {
+          "underPercentPoints": -4176.340788542635,
+          "overPercentPoints": 2800.6821030036967,
+          "underBars": 2763,
+          "overBars": 1853
+        },
+        "gap_by_asset": {
+          "BNB": {
+            "underPercentPoints": -2409.891189359932,
+            "overPercentPoints": 1937.3061437724332,
+            "underBars": 4057,
+            "overBars": 3294
+          },
+          "BTC": {
+            "underPercentPoints": -2235.5043620756046,
+            "overPercentPoints": 2816.64018633472,
+            "underBars": 3593,
+            "overBars": 3662
+          },
+          "ETH": {
+            "underPercentPoints": -2588.1736923082804,
+            "overPercentPoints": 1923.8117126069426,
+            "underBars": 3822,
+            "overBars": 3383
+          },
+          "XRP": {
+            "underPercentPoints": -2371.7489286576024,
+            "overPercentPoints": 1551.9014441484126,
+            "underBars": 4429,
+            "overBars": 2973
+          }
+        },
+        "gap_by_cause": {
+          "frozen": {
+            "underPercentPoints": -3751.383498229661,
+            "overPercentPoints": 2530.167077729962,
+            "underBars": 4176,
+            "overBars": 2568
+          },
+          "cap": {
+            "underPercentPoints": 0,
+            "overPercentPoints": 0,
+            "underBars": 0,
+            "overBars": 0
+          },
+          "floor": {
+            "underPercentPoints": -5853.934674171757,
+            "overPercentPoints": 5699.492409132537,
+            "underBars": 11725,
+            "overBars": 10744
+          }
+        },
+        "pending_not_executed": 0,
+        "state_bars": {
+          "constructive": 3646,
+          "neutral": 3583,
+          "defensive": 433
+        }
+      },
+      "witness": {
+        "constant_target_percent": 37.75,
+        "realised_mean_exposure_percent": 36.74387699772249,
+        "mismatch_points": 0.06456070156605875,
+        "is_sound": true,
+        "targets_evaluated": 401,
+        "metrics": {
+          "bars": 7662,
+          "opening_equity": 1000,
+          "closing_equity": 2237.996124869777,
+          "net_return_percent": 123.79961248697768,
+          "cagr_percent": 25.91209197044919,
+          "max_drawdown_percent": 35.831077829186945,
+          "time_under_water_days": 1248.1666666666667,
+          "longest_under_water_days": 853.5,
+          "mean_exposure_percent_realised": 36.74387699772249,
+          "median_exposure_percent_realised": 37.79063657891267,
+          "turnover_ratio": 72.28524747865211,
+          "traded_notional": 134243.84419272305,
+          "fees_paid": 134.21015664230293,
+          "dropped_by_floor_bars": 7275,
+          "dropped_at_band_edge_bars": 4999,
+          "gap_total": {
+            "underPercentPoints": -5893.580524834025,
+            "overPercentPoints": 7648.891721494989,
+            "underBars": 3258,
+            "overBars": 4239
+          },
+          "gap_by_asset": {
+            "BNB": {
+              "underPercentPoints": -1754.8426570697593,
+              "overPercentPoints": 2529.295928366722,
+              "underBars": 3306,
+              "overBars": 4028
+            },
+            "BTC": {
+              "underPercentPoints": -1796.561587159958,
+              "overPercentPoints": 2849.492995139269,
+              "underBars": 3073,
+              "overBars": 4236
+            },
+            "ETH": {
+              "underPercentPoints": -2450.662030200094,
+              "overPercentPoints": 2669.883702313671,
+              "underBars": 3127,
+              "overBars": 4071
+            },
+            "XRP": {
+              "underPercentPoints": -1782.1937666455894,
+              "overPercentPoints": 1490.8986119167023,
+              "underBars": 3898,
+              "overBars": 3473
+            }
+          },
+          "gap_by_cause": {
+            "frozen": {
+              "underPercentPoints": -3661.1124585329735,
+              "overPercentPoints": 2713.80436961805,
+              "underBars": 3357,
+              "overBars": 3317
+            },
+            "cap": {
+              "underPercentPoints": 0,
+              "overPercentPoints": 0,
+              "underBars": 0,
+              "overBars": 0
+            },
+            "floor": {
+              "underPercentPoints": -4123.147582542429,
+              "overPercentPoints": 6825.7668681183495,
+              "underBars": 10047,
+              "overBars": 12491
+            }
+          },
+          "pending_not_executed": 0,
+          "state_bars": {
+            "constant": 7662
+          }
+        }
+      },
+      "excess_cagr_vs_constant_witness_points": 6.553299657428262,
+      "eligibility": {
+        "drawdownOk": true,
+        "beatsBaseline": true,
+        "excessOk": true,
+        "eligible": true,
+        "reasons": []
+      }
+    },
+    {
+      "name": "B",
+      "bands": {
+        "defensive": {
+          "lowPercent": 0,
+          "highPercent": 25
+        },
+        "neutral": {
+          "lowPercent": 35,
+          "highPercent": 60
+        },
+        "constructive": {
+          "lowPercent": 65,
+          "highPercent": 90
+        }
+      },
+      "metrics": {
+        "bars": 7662,
+        "opening_equity": 1000,
+        "closing_equity": 2290.9773970237884,
+        "net_return_percent": 129.09773970237885,
+        "cagr_percent": 26.75755220927487,
+        "max_drawdown_percent": 42.12366025745322,
+        "time_under_water_days": 1253.3333333333333,
+        "longest_under_water_days": 963.1666666666666,
+        "mean_exposure_percent_realised": 43.32996768012401,
+        "median_exposure_percent_realised": 47.81940232872104,
+        "turnover_ratio": 209.06053448567795,
+        "traded_notional": 402847.0657808151,
+        "fees_paid": 402.7461582093895,
+        "dropped_by_floor_bars": 6729,
+        "dropped_at_band_edge_bars": 1246,
+        "gap_total": {
+          "underPercentPoints": -8592.774798808985,
+          "overPercentPoints": 4886.657064339738,
+          "underBars": 3680,
+          "overBars": 2302
+        },
+        "gap_by_asset": {
+          "BNB": {
+            "underPercentPoints": -3242.4125059241155,
+            "overPercentPoints": 2252.425902097819,
+            "underBars": 3927,
+            "overBars": 2832
+          },
+          "BTC": {
+            "underPercentPoints": -3266.5430310996626,
+            "overPercentPoints": 2606.6502399345854,
+            "underBars": 3543,
+            "overBars": 2895
+          },
+          "ETH": {
+            "underPercentPoints": -3395.800151414017,
+            "overPercentPoints": 2273.563052058393,
+            "underBars": 3584,
+            "overBars": 2811
+          },
+          "XRP": {
+            "underPercentPoints": -3006.4898530781225,
+            "overPercentPoints": 2072.4886129559222,
+            "underBars": 3944,
+            "overBars": 2991
+          }
+        },
+        "gap_by_cause": {
+          "frozen": {
+            "underPercentPoints": -5546.091220610243,
+            "overPercentPoints": 3508.207819432916,
+            "underBars": 4067,
+            "overBars": 2627
+          },
+          "cap": {
+            "underPercentPoints": 0,
+            "overPercentPoints": 0,
+            "underBars": 0,
+            "overBars": 0
+          },
+          "floor": {
+            "underPercentPoints": -7365.154320905725,
+            "overPercentPoints": 5696.91998761378,
+            "underBars": 10931,
+            "overBars": 8902
+          }
+        },
+        "pending_not_executed": 0,
+        "state_bars": {
+          "constructive": 3646,
+          "neutral": 3583,
+          "defensive": 433
+        }
+      },
+      "witness": {
+        "constant_target_percent": 45.5,
+        "realised_mean_exposure_percent": 43.30011221312822,
+        "mismatch_points": 0.029855466995783786,
+        "is_sound": true,
+        "targets_evaluated": 401,
+        "metrics": {
+          "bars": 7662,
+          "opening_equity": 1000,
+          "closing_equity": 2370.023760814138,
+          "net_return_percent": 137.0023760814138,
+          "cagr_percent": 27.9933744878188,
+          "max_drawdown_percent": 40.5756412211445,
+          "time_under_water_days": 1250.6666666666667,
+          "longest_under_water_days": 963.1666666666666,
+          "mean_exposure_percent_realised": 43.30011221312822,
+          "median_exposure_percent_realised": 45.0896860591148,
+          "turnover_ratio": 111.54463072450159,
+          "traded_notional": 215342.55710685515,
+          "fees_paid": 215.28861012242817,
+          "dropped_by_floor_bars": 7123,
+          "dropped_at_band_edge_bars": 4928,
+          "gap_total": {
+            "underPercentPoints": -7497.151826481372,
+            "overPercentPoints": 6642.968383698785,
+            "underBars": 3909,
+            "overBars": 3599
+          },
+          "gap_by_asset": {
+            "BNB": {
+              "underPercentPoints": -2038.4372097776384,
+              "overPercentPoints": 2419.5247683195125,
+              "underBars": 3341,
+              "overBars": 3827
+            },
+            "BTC": {
+              "underPercentPoints": -2830.8915545874247,
+              "overPercentPoints": 2865.0405712412035,
+              "underBars": 3470,
+              "overBars": 3583
+            },
+            "ETH": {
+              "underPercentPoints": -2686.5132789044187,
+              "overPercentPoints": 2631.6590377298357,
+              "underBars": 3067,
+              "overBars": 3927
+            },
+            "XRP": {
+              "underPercentPoints": -2761.88899613571,
+              "overPercentPoints": 1547.3232193320698,
+              "underBars": 3964,
+              "overBars": 3308
+            }
+          },
+          "gap_by_cause": {
+            "frozen": {
+              "underPercentPoints": -4878.026847726978,
+              "overPercentPoints": 3137.648534161043,
+              "underBars": 3528,
+              "overBars": 3249
+            },
+            "cap": {
+              "underPercentPoints": 0,
+              "overPercentPoints": 0,
+              "underBars": 0,
+              "overBars": 0
+            },
+            "floor": {
+              "underPercentPoints": -5439.704191678191,
+              "overPercentPoints": 6325.899062461601,
+              "underBars": 10314,
+              "overBars": 11396
+            }
+          },
+          "pending_not_executed": 0,
+          "state_bars": {
+            "constant": 7662
+          }
+        }
+      },
+      "excess_cagr_vs_constant_witness_points": -1.2358222785439317,
+      "eligibility": {
+        "drawdownOk": false,
+        "beatsBaseline": true,
+        "excessOk": false,
+        "eligible": false,
+        "reasons": [
+          "max drawdown 42.12% exceeds 35%",
+          "excess CAGR vs constant witness -1.24pt is below 1pt"
+        ]
+      }
+    },
+    {
+      "name": "C",
+      "bands": {
+        "defensive": {
+          "lowPercent": 0,
+          "highPercent": 30
+        },
+        "neutral": {
+          "lowPercent": 50,
+          "highPercent": 75
+        },
+        "constructive": {
+          "lowPercent": 85,
+          "highPercent": 100
+        }
+      },
+      "metrics": {
+        "bars": 7662,
+        "opening_equity": 1000,
+        "closing_equity": 2108.3410232619517,
+        "net_return_percent": 110.83410232619516,
+        "cagr_percent": 23.781057468908685,
+        "max_drawdown_percent": 45.662019091276065,
+        "time_under_water_days": 1253.6666666666667,
+        "longest_under_water_days": 1145.6666666666667,
+        "mean_exposure_percent_realised": 46.602135614998744,
+        "median_exposure_percent_realised": 49.918123209890524,
+        "turnover_ratio": 273.448638242423,
+        "traded_notional": 500522.51479263493,
+        "fees_paid": 500.3972785026843,
+        "dropped_by_floor_bars": 6606,
+        "dropped_at_band_edge_bars": 2136,
+        "gap_total": {
+          "underPercentPoints": -9465.57508417061,
+          "overPercentPoints": 6697.461973069722,
+          "underBars": 4000,
+          "overBars": 2743
+        },
+        "gap_by_asset": {
+          "BNB": {
+            "underPercentPoints": -2945.070478513176,
+            "overPercentPoints": 2378.223276562673,
+            "underBars": 3534,
+            "overBars": 3061
+          },
+          "BTC": {
+            "underPercentPoints": -3283.101454984612,
+            "overPercentPoints": 3143.8333169630937,
+            "underBars": 3293,
+            "overBars": 2976
+          },
+          "ETH": {
+            "underPercentPoints": -3623.8361748420743,
+            "overPercentPoints": 2590.5037991718077,
+            "underBars": 3354,
+            "overBars": 2870
+          },
+          "XRP": {
+            "underPercentPoints": -2947.45442253343,
+            "overPercentPoints": 1918.7890270748865,
+            "underBars": 4089,
+            "overBars": 2734
+          }
+        },
+        "gap_by_cause": {
+          "frozen": {
+            "underPercentPoints": -6323.290976443039,
+            "overPercentPoints": 3942.095450981347,
+            "underBars": 3897,
+            "overBars": 2675
+          },
+          "cap": {
+            "underPercentPoints": 0,
+            "overPercentPoints": 0,
+            "underBars": 0,
+            "overBars": 0
+          },
+          "floor": {
+            "underPercentPoints": -6476.171554430301,
+            "overPercentPoints": 6089.253968791136,
+            "underBars": 10373,
+            "overBars": 8966
+          }
+        },
+        "pending_not_executed": 0,
+        "state_bars": {
+          "constructive": 3646,
+          "neutral": 3583,
+          "defensive": 433
+        }
+      },
+      "witness": {
+        "constant_target_percent": 50.25,
+        "realised_mean_exposure_percent": 46.742885336715915,
+        "mismatch_points": 0.14074972171717093,
+        "is_sound": true,
+        "targets_evaluated": 401,
+        "metrics": {
+          "bars": 7662,
+          "opening_equity": 1000,
+          "closing_equity": 2289.8771923212703,
+          "net_return_percent": 128.987719232127,
+          "cagr_percent": 26.74013813740388,
+          "max_drawdown_percent": 44.7675993998855,
+          "time_under_water_days": 1253.1666666666667,
+          "longest_under_water_days": 963.1666666666666,
+          "mean_exposure_percent_realised": 46.742885336715915,
+          "median_exposure_percent_realised": 49.19216314060402,
+          "turnover_ratio": 155.64501807492698,
+          "traded_notional": 290971.12995268236,
+          "fees_paid": 290.8982996910718,
+          "dropped_by_floor_bars": 7005,
+          "dropped_at_band_edge_bars": 4044,
+          "gap_total": {
+            "underPercentPoints": -9436.125011399976,
+            "overPercentPoints": 7405.17606579412,
+            "underBars": 3912,
+            "overBars": 3542
+          },
+          "gap_by_asset": {
+            "BNB": {
+              "underPercentPoints": -2623.705576942613,
+              "overPercentPoints": 2525.090641137122,
+              "underBars": 3275,
+              "overBars": 3702
+            },
+            "BTC": {
+              "underPercentPoints": -2997.5620798780114,
+              "overPercentPoints": 3092.9392611169187,
+              "underBars": 3179,
+              "overBars": 3610
+            },
+            "ETH": {
+              "underPercentPoints": -3522.154990562984,
+              "overPercentPoints": 2774.619643968473,
+              "underBars": 3236,
+              "overBars": 3512
+            },
+            "XRP": {
+              "underPercentPoints": -2834.5820458778,
+              "overPercentPoints": 1554.4062014330912,
+              "underBars": 4036,
+              "overBars": 3090
+            }
+          },
+          "gap_by_cause": {
+            "frozen": {
+              "underPercentPoints": -5755.968970139205,
+              "overPercentPoints": 3543.6135722451063,
+              "underBars": 3529,
+              "overBars": 2963
+            },
+            "cap": {
+              "underPercentPoints": 0,
+              "overPercentPoints": 0,
+              "underBars": 0,
+              "overBars": 0
+            },
+            "floor": {
+              "underPercentPoints": -6222.0357231222115,
+              "overPercentPoints": 6403.442175410504,
+              "underBars": 10197,
+              "overBars": 10951
+            }
+          },
+          "pending_not_executed": 0,
+          "state_bars": {
+            "constant": 7662
+          }
+        }
+      },
+      "excess_cagr_vs_constant_witness_points": -2.9590806684951936,
+      "eligibility": {
+        "drawdownOk": false,
+        "beatsBaseline": true,
+        "excessOk": false,
+        "eligible": false,
+        "reasons": [
+          "max drawdown 45.66% exceeds 35%",
+          "excess CAGR vs constant witness -2.96pt is below 1pt"
+        ]
+      }
+    }
+  ],
+  "selected_arm": "A",
+  "limit": "the three arms differ on all three states at once; a winning arm does not identify which band carried the result"
+}
