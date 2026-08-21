@@ -26,6 +26,14 @@ import { config as productionConfig } from '../../config/index.js';
 
 /** Per-leg costs. Pinned by the protocol; no BNB fee discount is assumed. */
 export const FEE_PERCENT_PER_LEG = 0.1;
+/**
+ * THE RSI BRAKE — a ONE-WAY brake against buying into a broadly overbought market.
+ *
+ * Active when the replayed 4h close carries `medianH4Rsi >= 70` (bound INCLUSIVE). A high
+ * median RSI is treated as caution; a LOW one is deliberately not treated as an opportunity,
+ * so the brake has no symmetric counterpart that would quietly become a second controller.
+ */
+export const RSI_BRAKE_THRESHOLD_RSI = 70;
 export const SLIPPAGE_PERCENT_PER_LEG = 0.05;
 
 export interface ExperimentConfig {
@@ -41,6 +49,17 @@ export interface ExperimentConfig {
   readonly peakStopPercent: number;
   readonly feePercentPerLeg: number;
   readonly slippagePercentPerLeg: number;
+  /**
+   * THE RSI BRAKE'S THRESHOLD, in RSI points, INCLUSIVE (`medianH4Rsi >= threshold` brakes).
+   *
+   * It belongs to the deterministic configuration and to its digest — not to a policy flag —
+   * because a run that moved this number would be a different experiment while producing an
+   * output folder indistinguishable from the previous one.
+   *
+   * Whether the brake is ENABLED is a per-run variant: the protocol tests RSI-in against
+   * RSI-out on the SAME band. The threshold it uses when enabled is fixed here, once.
+   */
+  readonly rsiBrakeThresholdRsi: number;
   // NO cash floor. See the header — its absence is the guarantee.
 }
 
@@ -93,6 +112,7 @@ export function buildExperimentConfig(
   peakStopPercent: number = productionConfig.transition.peakStopPercent,
   feePercentPerLeg: number = FEE_PERCENT_PER_LEG,
   slippagePercentPerLeg: number = SLIPPAGE_PERCENT_PER_LEG,
+  rsiBrakeThresholdRsi: number = RSI_BRAKE_THRESHOLD_RSI,
 ): ExperimentConfig {
   const problems: string[] = [];
 
@@ -118,6 +138,12 @@ export function buildExperimentConfig(
       problems.push(`${label} must be in [0, 100) (got ${value})`);
     }
   }
+  // Bounded like every other surface: RSI lives on [0, 100], and a threshold at either
+  // extreme would make the brake either permanently on or permanently off while still
+  // reading as configured.
+  if (!(Number.isFinite(rsiBrakeThresholdRsi) && rsiBrakeThresholdRsi > 0 && rsiBrakeThresholdRsi < 100)) {
+    problems.push(`rsiBrakeThresholdRsi must be in (0, 100) (got ${rsiBrakeThresholdRsi})`);
+  }
   if (problems.length > 0) {
     throw new Error(`Invalid experiment config: ${problems.join('; ')}`);
   }
@@ -136,6 +162,7 @@ export function buildExperimentConfig(
     peakStopPercent,
     feePercentPerLeg,
     slippagePercentPerLeg,
+    rsiBrakeThresholdRsi,
   });
 }
 
@@ -156,6 +183,11 @@ export function experimentConfigSha256(cfg: ExperimentConfig): string {
     peakStopPercent: cfg.peakStopPercent,
     feePercentPerLeg: cfg.feePercentPerLeg,
     slippagePercentPerLeg: cfg.slippagePercentPerLeg,
+    // The threshold AND the rule travel in the digest. Recording the number alone would let
+    // the rule change under a hash that still matched.
+    rsiBrakeThresholdRsi: cfg.rsiBrakeThresholdRsi,
+    rsiBrakeRule:
+      'one-way brake: when medianH4Rsi >= threshold at the replayed 4h close, a requested INCREASE of total exposure is capped at the current exposure. Never changes the context state, never forces defensive, never triggers a reduction; a stable or decreasing target is untouched; rotations at constant total exposure are not blocked.',
     cashFloor: 'none',
   };
   return createHash('sha256').update(`${JSON.stringify(canonical, null, 2)}\n`, 'utf8').digest('hex');

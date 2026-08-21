@@ -166,6 +166,66 @@ export function projectOntoBand(currentPercent: number, band: Band): number {
   return currentPercent;
 }
 
+/**
+ * THE RSI BRAKE — one-way, and every word of that matters.
+ *
+ * When the replayed 4h close carries a median RSI at or above the threshold, the market is
+ * broadly overbought and the harness refuses to BUY INTO it. That is the whole rule:
+ *
+ *   - it caps a requested INCREASE of total exposure at the exposure already held;
+ *   - it never changes the context state, and never forces the defensive one;
+ *   - it never triggers a reduction — braking is not selling;
+ *   - a stable or decreasing target passes through untouched;
+ *   - rotations at constant total exposure are not blocked, because the cap is on the TOTAL,
+ *     never per line: swapping BTC for ETH at the same total sails straight through;
+ *   - `risk_off`, the stops and every reduction keep their priority, because they act on the
+ *     LINES through the gate, upstream of this, and this can only ever lower a target.
+ *
+ * A LOW median RSI is deliberately NOT treated as an opportunity. Giving the brake a
+ * symmetric counterpart would quietly turn it into a second controller, and the protocol
+ * admits exactly one candidate input.
+ *
+ * `medianH4Rsi` is nullable in production (no asset produced a 4h RSI on that bar). After the
+ * evaluation window opens, that is not a case to classify silently — it is a hole in the one
+ * input the variant is being judged on, so the RSI replay FAILS rather than pretending the
+ * brake was simply inactive. See `MissingMedianRsiError`.
+ */
+export class MissingMedianRsiError extends Error {
+  constructor(atMs: number) {
+    super(
+      `exposure controller: no median 4h RSI at ${new Date(atMs).toISOString()}, inside the ` +
+        'evaluation window. The RSI variant is judged on this input; a hole in it fails the ' +
+        'replay rather than being silently classified as "brake inactive".',
+    );
+    this.name = 'MissingMedianRsiError';
+  }
+}
+
+/**
+ * Applies the brake to a band target. Returns the target unchanged unless the brake is both
+ * ACTIVE and the move is an INCREASE.
+ *
+ * Deliberately applied to the BAND target, before the feasible projection — never after. The
+ * feasible interval stays the final authority, so the brake can never produce a target the
+ * book could not hold. The one consequence worth stating: if the feasible FLOOR sits above
+ * the current exposure (lines that cannot be reduced), the projection still lifts the target
+ * back up. That is a structural constraint, not a discretionary purchase, and the brake was
+ * never meant to override it.
+ */
+export function applyRsiBrake(params: {
+  bandTargetPercent: number;
+  currentExposurePercent: number;
+  medianH4Rsi: number | null;
+  thresholdRsi: number;
+  atMs: number;
+}): { targetPercent: number; braked: boolean } {
+  if (params.medianH4Rsi == null) throw new MissingMedianRsiError(params.atMs);
+  const active = params.medianH4Rsi >= params.thresholdRsi;
+  const isIncrease = params.bandTargetPercent > params.currentExposurePercent;
+  if (!active || !isIncrease) return { targetPercent: params.bandTargetPercent, braked: false };
+  return { targetPercent: params.currentExposurePercent, braked: true };
+}
+
 /** Fails loudly on a band that could never behave. Bounded at construction, like everything. */
 export function validateBandPolicy(name: string, policy: BandPolicy): void {
   const problems: string[] = [];

@@ -14,10 +14,12 @@ import {
   basketSumPercent,
   buildExperimentConfig,
   deterministicBasket,
+  experimentConfigSha256,
 } from '../calibration/exposure/config.js';
 import { allocate, feasibleInterval, type LineConstraint } from '../calibration/exposure/allocate.js';
 import { constraintFromGate, runReplay, type AssetTape } from '../calibration/exposure/engine.js';
 import { prepareTape, CALIBRATION_WINDOW, VALIDATION_WINDOW } from '../calibration/exposure/tape.js';
+import { applyRsiBrake, MissingMedianRsiError } from '../calibration/exposure/controller.js';
 import { runPolicy } from '../calibration/exposure/arms.js';
 import { canonicalJson } from '../calibration/exposure/outputs.js';
 import { SealBrokenError, decisionsDigest, loadSelection } from '../calibration/exposure/validate.js';
@@ -158,6 +160,85 @@ console.log('\nProof 5 — overrides apply BEFORE classification, and the interv
     { asset: 'XRP', currentPercent: 50, canReduce: true, canIncrease: true, reason: 'free' },
   ];
   ok('a line above its cap adds no headroom', feasibleInterval(overCap, cfg.caps).highPercent === 0);
+}
+
+// ── THE RSI BRAKE — one-way, and every clause of it ─────────────────────────────────
+console.log('\nThe RSI brake — a one-way brake against buying into an overbought market:');
+{
+  const cfg = buildExperimentConfig();
+  const T = cfg.rsiBrakeThresholdRsi;
+  ok('the threshold is 70 and lives in the deterministic config', T === 70);
+  // It must be in the digest: two runs differing only by the threshold must not be
+  // mistakable for one another.
+  const other = buildExperimentConfig(undefined, undefined, undefined, undefined, undefined, 65);
+  ok('the threshold changes the config digest', experimentConfigSha256(cfg) !== experimentConfigSha256(other));
+
+  const brake = (bandTarget: number, current: number, rsi: number | null) =>
+    applyRsiBrake({ bandTargetPercent: bandTarget, currentExposurePercent: current, medianH4Rsi: rsi, thresholdRsi: T, atMs: 0 });
+
+  // The bound is INCLUSIVE.
+  ok('RSI 70 brakes an increase (bound inclusive)', brake(60, 40, 70).braked === true);
+  ok('…and caps the target at the CURRENT exposure', brake(60, 40, 70).targetPercent === 40);
+  ok('RSI 69.99 does not brake', brake(60, 40, 69.99).braked === false);
+  ok('…and leaves the target untouched', brake(60, 40, 69.99).targetPercent === 60);
+
+  // One-way: a decrease or a stable target is never touched, however overbought.
+  ok('a DECREASING target passes through at RSI 95', brake(20, 40, 95).targetPercent === 20);
+  ok('…and is not reported as braked', brake(20, 40, 95).braked === false);
+  ok('a STABLE target passes through at RSI 95', brake(40, 40, 95).targetPercent === 40);
+  ok('the brake never triggers a reduction — it can only lower a target to CURRENT',
+    brake(100, 40, 99).targetPercent === 40);
+
+  // A low RSI is NOT an opportunity: no symmetric counterpart.
+  ok('RSI 5 does not raise anything — the brake has no mirror image', brake(30, 40, 5).targetPercent === 30);
+
+  // A missing median RSI FAILS the RSI replay rather than being silently classified.
+  assert.throws(() => brake(60, 40, null), MissingMedianRsiError);
+  console.log('  ok: a MISSING median RSI fails the replay instead of reading as "inactive"'); passed += 1;
+
+  // It does not change the context state: same reading with and without the brake.
+  const lines: LineConstraint[] = cfg.assets.map((a) => ({
+    asset: a, currentPercent: 10, canReduce: true, canIncrease: true, reason: 'free' as const,
+  }));
+  const band = { lowPercent: 60, highPercent: 90 };
+  const withBrake = allocate({
+    cfg, lines, currentExposurePercent: 40, band,
+    rsiBrake: { medianH4Rsi: 80, thresholdRsi: T, atMs: 0 },
+  });
+  const without = allocate({ cfg, lines, currentExposurePercent: 40, band });
+  ok('with the brake, the requested increase is capped at the current 40 %', withBrake.bandTargetPercent === 40);
+  ok('without it, the same bar targets the band floor of 60 %', without.bandTargetPercent === 60);
+  ok('the braked bar is flagged as such', withBrake.rsiBraked === true && without.rsiBraked === false);
+
+  // ROTATIONS AT CONSTANT TOTAL ARE NOT BLOCKED. The cap is on the TOTAL, never per line,
+  // so a book already at its target still redistributes across the basket.
+  const lopsided: LineConstraint[] = [
+    { asset: 'BTC', currentPercent: 40, canReduce: true, canIncrease: true, reason: 'free' },
+    { asset: 'ETH', currentPercent: 0, canReduce: true, canIncrease: true, reason: 'free' },
+    { asset: 'BNB', currentPercent: 0, canReduce: true, canIncrease: true, reason: 'free' },
+    { asset: 'XRP', currentPercent: 0, canReduce: true, canIncrease: true, reason: 'free' },
+  ];
+  const rotation = allocate({
+    cfg, lines: lopsided, currentExposurePercent: 40,
+    band: { lowPercent: 40, highPercent: 40 },
+    rsiBrake: { medianH4Rsi: 95, thresholdRsi: T, atMs: 0 },
+  });
+  ok('a rotation at constant total exposure is NOT blocked by the brake',
+    rotation.targets.ETH! > 0 && rotation.targets.BTC! < 40);
+  ok('…and the total stays where it was', Math.abs(rotation.reachedPercent - 40) < 1e-9);
+
+  // risk_off and the stop keep their priority: they act on the LINES, upstream of the brake,
+  // and the brake can only ever lower a target — it can never re-open a frozen line.
+  const underRiskOff: LineConstraint[] = cfg.assets.map((a) => ({
+    asset: a, currentPercent: 15, canReduce: true, canIncrease: false, reason: 'risk_off_reduce_only' as const,
+  }));
+  const braked = allocate({
+    cfg, lines: underRiskOff, currentExposurePercent: 60,
+    band: { lowPercent: 0, highPercent: 25 },
+    rsiBrake: { medianH4Rsi: 99, thresholdRsi: T, atMs: 0 },
+  });
+  ok('under risk_off the de-risking still happens at RSI 99 — the brake blocks buying, not selling',
+    braked.projectedPercent === 0);
 }
 
 // ── PROOF 10 — BUNDLE VERIFICATION ───────────────────────────────────────────────────

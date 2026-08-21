@@ -62,7 +62,13 @@ export interface EngineInput {
  * between them attributable to the controller rather than to the plumbing.
  */
 export type ExposurePolicy =
-  | { kind: 'band'; bands: BandPolicy }
+  | { kind: 'band'; bands: BandPolicy; rsiBrake?: boolean }
+  /**
+   * The constant-exposure control. It deliberately carries NO RSI brake, whatever the arm it
+   * is paired with: the brake is part of the CONTROLLER under test, and putting the treatment
+   * into the control is exactly what a control exists to avoid. What the witness must share
+   * with the arm is the MECHANICS — the gate, the stops, the movement floor — and it does.
+   */
   | { kind: 'constant'; targetPercent: number };
 
 /** Starting capital, fixed by the protocol. */
@@ -107,6 +113,10 @@ export interface BarRecord {
   deviations: LineDeviation[];
   droppedByFloor: string[];
   droppedAtBandEdge: boolean;
+  /** True when the one-way RSI brake capped a requested increase on this bar. */
+  rsiBraked: boolean;
+  /** The median 4h RSI this bar was judged on. Null only when the brake is not in the run. */
+  medianH4Rsi: number | null;
 }
 
 export interface EngineResult {
@@ -119,16 +129,14 @@ export interface EngineResult {
 }
 
 /**
- * INFERRED, NOT SPECIFIED — flagged rather than buried.
+ * The asymmetry the protocol confirms explicitly: a line with no usable regime may NOT be
+ * increased, and the absence of a regime is not on its own a reason to block its REDUCTION.
+ * The gate's other constraints keep applying, and the stop and `risk_off` keep their own
+ * overrides — this rule adds nothing and removes nothing from them.
  *
- * The protocol fixes that a line with no usable regime is "not actionable for an INCREASE".
- * It does not say what happens to a REDUCTION on that line. Two things point the same way:
- * the protocol restricts only the increase (had it meant both, "not actionable" alone would
- * have said so), and production's own ladder states the invariant explicitly — "absence of
- * individual information is not a reason to hold", reducing must always stay possible.
- *
- * So a `no_regime` line is reducible here. It is a single constant precisely so the choice
- * is visible and reversible in one edit if Julien reads it the other way.
+ * It matches production's own ladder, which states the invariant in the same direction:
+ * "absence of individual information is not a reason to hold". Kept as a named constant so
+ * the asymmetry is legible at the call site rather than buried in a switch arm.
  */
 export const NO_REGIME_MAY_REDUCE = true;
 
@@ -304,7 +312,19 @@ export function runReplay(input: EngineInput): EngineResult {
         ? policy.bands[reading.state]
         : { lowPercent: policy.targetPercent, highPercent: policy.targetPercent };
 
-    const result = allocate({ cfg, lines, currentExposurePercent: exposurePercent, band });
+    // The brake rides on the RSI variant only. Passing `undefined` says "not part of this
+    // run"; passing a null median says "this run needs it and the bar has none", which is a
+    // failure rather than an inactive brake. See applyRsiBrake / MissingMedianRsiError.
+    const rsiBrake =
+      policy.kind === 'band' && policy.rsiBrake === true
+        ? {
+            medianH4Rsi: point.global.medianH4Rsi,
+            thresholdRsi: cfg.rsiBrakeThresholdRsi,
+            atMs: t,
+          }
+        : undefined;
+
+    const result = allocate({ cfg, lines, currentExposurePercent: exposurePercent, band, rsiBrake });
 
     // ── Schedule for the NEXT bar's open. Never fill on the close we just read. ───────
     const hasNextBar = cfg.assets.every((asset) => tapes[asset]!.h4[indices[asset]! + 1] != null);
@@ -339,6 +359,8 @@ export function runReplay(input: EngineInput): EngineResult {
       deviations: result.deviations,
       droppedByFloor: result.droppedByFloor,
       droppedAtBandEdge: result.droppedAtBandEdge,
+      rsiBraked: result.rsiBraked,
+      medianH4Rsi: rsiBrake ? point.global.medianH4Rsi : null,
     });
   }
 

@@ -1,6 +1,6 @@
 import type { ExperimentConfig } from './config.js';
 import type { Band } from './controller.js';
-import { projectOntoBand } from './controller.js';
+import { applyRsiBrake, projectOntoBand } from './controller.js';
 
 /**
  * FROM A BAND TO AN ALLOCATION — the seven steps, in order, with no exception.
@@ -101,6 +101,8 @@ export interface AllocationResult {
   /** Per-asset, per-cause deviations from the nominal basket target. */
   deviations: LineDeviation[];
   interval: FeasibleInterval;
+  /** True when the RSI brake capped a requested increase on this bar. */
+  rsiBraked: boolean;
   /** Moves dropped because they were smaller than the movement floor. */
   droppedByFloor: string[];
   /** True when the drop happened while the book sat on a band edge — a calibration smell. */
@@ -132,11 +134,27 @@ export function allocate(params: {
   lines: readonly LineConstraint[];
   currentExposurePercent: number;
   band: Band;
+  /**
+   * Present ONLY on the RSI variant. Absent means the brake is not part of this run at all
+   * — not that it evaluated to inactive, which is why it is an optional parameter rather
+   * than a boolean flag with a default.
+   */
+  rsiBrake?: { medianH4Rsi: number | null; thresholdRsi: number; atMs: number };
 }): AllocationResult {
   const { cfg, lines, currentExposurePercent, band } = params;
 
-  // ── 1. the band ───────────────────────────────────────────────────────────────────
-  const bandTargetPercent = projectOntoBand(currentExposurePercent, band);
+  // ── 1. the band, then the one-way RSI brake if this run carries it ────────────────
+  const rawBandTarget = projectOntoBand(currentExposurePercent, band);
+  const braked = params.rsiBrake
+    ? applyRsiBrake({
+        bandTargetPercent: rawBandTarget,
+        currentExposurePercent,
+        medianH4Rsi: params.rsiBrake.medianH4Rsi,
+        thresholdRsi: params.rsiBrake.thresholdRsi,
+        atMs: params.rsiBrake.atMs,
+      })
+    : { targetPercent: rawBandTarget, braked: false };
+  const bandTargetPercent = braked.targetPercent;
 
   // ── 2. the feasible interval, for the direction we are actually travelling ─────────
   const interval = feasibleInterval(lines, cfg.caps);
@@ -220,6 +238,7 @@ export function allocate(params: {
     targets,
     deviations,
     interval,
+    rsiBraked: braked.braked,
     droppedByFloor,
     droppedAtBandEdge: droppedByFloor.length > 0 && onEdge,
   };
