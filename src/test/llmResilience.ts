@@ -22,7 +22,11 @@ import {
   type RunOutcome,
 } from '../scheduler/policy.js';
 import { formatAlert, formatDuration } from '../alerting/messages.js';
-import { countFailedRunsSince, readIncidentState } from '../persistence/schedulerState.js';
+import {
+  countFailedRunsSince,
+  readIncidentState,
+  readRunFinishedAt,
+} from '../persistence/schedulerState.js';
 import { runHeartbeat } from '../scheduler/heartbeat.js';
 import type { DecideResult } from '../decision/decide.js';
 import { validateDecisionConfig, config, type DecisionConfig } from '../config/index.js';
@@ -578,10 +582,21 @@ console.log('\nEnd to end — a reset between the snapshot and the claim emits n
       // The row AS IT REALLY IS once we hold the claim.
       from: (table: string) => {
         calls.push(`select:${table}`);
+        if (table === 'bot_state') {
+          return {
+            select: () => ({
+              eq: () => ({ maybeSingle: async () => ({ data: rowAfterReset, error: null }) }),
+            }),
+          };
+        }
+        // scheduler_runs — answered fully so the recovery path runs clean here rather than
+        // limping through its best-effort fallbacks. A warning nobody expects is a warning
+        // nobody reads, and it would hide a real one later.
         return {
-          select: () => ({
-            eq: () => ({ maybeSingle: async () => ({ data: rowAfterReset, error: null }) }),
-          }),
+          select: (columns: string) =>
+            columns === 'finished_at'
+              ? { eq: () => ({ maybeSingle: async () => ({ data: { finished_at: '2026-08-21T00:00:00.000Z' }, error: null }) }) }
+              : { eq: () => ({ eq: () => ({ lte: () => ({ gt: async () => ({ count: 3, error: null }) }) }) }) },
         };
       },
     } as unknown as SupabaseClient;
@@ -614,19 +629,30 @@ console.log('\nEnd to end — a reset between the snapshot and the claim emits n
   }
 }
 
-// The recovery must be dated at the cycle's COMPLETION, not at the claim.
-console.log('\nRecovery measured at completion, not at the claim (Codex P2 #2):');
-{
-  const CLAIM_MS = Date.parse('2026-08-20T23:10:03.681Z');
-  const CYCLE_MS = 92_697; // the real runtime of the 20/08 recovering cycle
-  const supabase = {
+// The recovery must be dated at the cycle's COMPLETION, not at the claim (Codex P2 #2),
+// and that completion must come from the DATABASE's own stamp rather than from app-side
+// arithmetic that cannot see the claim's return trip (Codex P2 #3).
+console.log("\nRecovery dated by the database's own finished_at stamp (Codex P2 #2 and #3):");
+
+const PREV_SUCCESS = '2026-08-20T18:01:49.898Z';
+const CLAIM_MS = Date.parse('2026-08-20T23:10:03.681Z');
+/** The real completion of the 20/08 recovering run — `scheduler_runs.finished_at`. */
+const FINISHED_AT = '2026-08-20T23:11:36.655Z';
+
+/**
+ * A beat whose DB claim is SLOW to come back. `claimLatencyMs` is the gap Codex named: the
+ * database stamps `db_now`, then the response spends that long in flight. Any app-side
+ * timer started after the claim returns is blind to it.
+ */
+function recoveringBeat(opts: { finishedAt: string | null; claimLatencyMs: number }): SupabaseClient {
+  return {
     rpc: async (fn: string) => {
       if (fn === 'record_heartbeat') {
         return {
           data: [{
             next_check_at: new Date(CLAIM_MS - 60_000).toISOString(), run_token: null, locked_until: null,
             last_heartbeat_at: new Date(CLAIM_MS).toISOString(),
-            last_success_at: '2026-08-20T18:01:49.898Z',
+            last_success_at: PREV_SUCCESS,
             consecutive_failures: 4, floor_delay_streak: 0,
             floor_alert_sent: false, failure_alert_sent: true,
           }],
@@ -634,9 +660,11 @@ console.log('\nRecovery measured at completion, not at the claim (Codex P2 #2):'
         };
       }
       if (fn === 'claim_due_run') {
+        // db_now is produced HERE; the response only arrives claimLatencyMs later.
+        await new Promise((r) => setTimeout(r, opts.claimLatencyMs));
         return {
           data: [{
-            run_id: 1, prev_next_check_at: null, db_now: new Date(CLAIM_MS).toISOString(),
+            run_id: 1467, prev_next_check_at: null, db_now: new Date(CLAIM_MS).toISOString(),
             consecutive_failures: 4, floor_delay_streak: 0,
             consecutive_blind_cycles: 0, blind_alert_sent: false,
           }],
@@ -646,61 +674,118 @@ console.log('\nRecovery measured at completion, not at the claim (Codex P2 #2):'
       if (fn === 'finish_run') return { data: true, error: null };
       return { data: null, error: null };
     },
-    from: (table: string) =>
-      table === 'bot_state'
-        ? {
-            select: () => ({
-              eq: () => ({
-                maybeSingle: async () => ({
-                  data: { failure_alert_sent: true, last_success_at: '2026-08-20T18:01:49.898Z' },
-                  error: null,
-                }),
+    from: (table: string) => {
+      if (table === 'bot_state') {
+        return {
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () => ({
+                data: { failure_alert_sent: true, last_success_at: PREV_SUCCESS },
+                error: null,
               }),
             }),
-          }
-        : {
-            // scheduler_runs: the four errors of the incident.
-            select: () => ({
-              eq: () => ({ eq: () => ({ lte: () => ({ gt: async () => ({ count: 4, error: null }) }) }) }),
-            }),
-          },
+          }),
+        };
+      }
+      // scheduler_runs answers two different questions; dispatch on the projection.
+      return {
+        select: (columns: string) =>
+          columns === 'finished_at'
+            ? {
+                eq: () => ({
+                  maybeSingle: async () =>
+                    opts.finishedAt == null
+                      ? { data: null, error: { message: 'unreachable' } }
+                      : { data: { finished_at: opts.finishedAt }, error: null },
+                }),
+              }
+            : {
+                // The four errors of the incident.
+                eq: () => ({ eq: () => ({ lte: () => ({ gt: async () => ({ count: 4, error: null }) }) }) }),
+              },
+      };
+    },
   } as unknown as SupabaseClient;
+}
 
-  // A cycle that genuinely TAKES time, so claim-time and completion-time differ.
-  const slowDecidedCycle = async () => {
-    await new Promise((r) => setTimeout(r, 60));
-    return {
-      outcome: {
-        status: 'decided' as const, appliedDelayMinutes: 60, decisionId: 1, detail: 'status=decided',
-        equitySnapshot: null, marketData: 'sighted' as const, llmFailure: null,
-      },
-      settled: true,
-      result: null as unknown as DecideResult,
-    };
+/** A cycle that genuinely takes time, so claim-time and completion-time cannot coincide. */
+const slowDecidedCycle = async () => {
+  await new Promise((r) => setTimeout(r, 60));
+  return {
+    outcome: {
+      status: 'decided' as const, appliedDelayMinutes: 60, decisionId: 1, detail: 'status=decided',
+      equitySnapshot: null, marketData: 'sighted' as const, llmFailure: null,
+    },
+    settled: true,
+    result: null as unknown as DecideResult,
   };
+};
 
-  const res = await runHeartbeat({ supabase, runCycle: slowDecidedCycle });
+{
+  // NOMINAL: the DB stamp is readable, so the recovery is dated exactly, not estimated.
+  const res = await runHeartbeat({
+    supabase: recoveringBeat({ finishedAt: FINISHED_AT, claimLatencyMs: 80 }),
+    runCycle: slowDecidedCycle,
+  });
   const recovery = (res.alerts ?? []).find((a) => a.trigger === 'degraded_recovered');
   assert.ok(recovery && recovery.trigger === 'degraded_recovered');
   ok('the recovery fires', recovery.trigger === 'degraded_recovered');
   ok('it reports the rebuilt failure count (4), not consecutive_failures', recovery.failureCount === 4);
-
-  const claimBasedOutage = CLAIM_MS - Date.parse('2026-08-20T18:01:49.898Z');
-  assert.ok(recovery.outageMs != null);
   ok(
-    'the outage is measured PAST the claim instant — the cycle runtime is included',
-    recovery.outageMs > claimBasedOutage,
+    "it is dated by the database's finished_at stamp, exactly",
+    recovery.timestamp === new Date(Date.parse(FINISHED_AT)).toISOString(),
   );
   ok(
-    'the recovery timestamp is dated AFTER the claim, i.e. once the decision existed',
+    'the outage runs from the previous success to that stamp',
+    recovery.outageMs === Date.parse(FINISHED_AT) - Date.parse(PREV_SUCCESS),
+  );
+  ok('the recovery is dated AFTER the claim — once the decision existed', Date.parse(recovery.timestamp) > CLAIM_MS);
+  // The size of the correction on the real incident: the recovering cycle ran 92.7 s,
+  // a whole minute of outage that a claim-based measure simply dropped.
+  const claimBasedOutage = CLAIM_MS - Date.parse(PREV_SUCCESS);
+  ok(
+    'on 20/08 that is worth ~93 s of otherwise under-reported outage',
+    formatDuration(claimBasedOutage) === '5 h 8 min' && formatDuration(recovery.outageMs!) === '5 h 9 min',
+  );
+}
+
+{
+  // FALLBACK: the stamp is unreadable. The estimate must still not run early — its anchor
+  // is taken BEFORE the claim RPC is issued, so it covers the claim's whole round trip.
+  // With a 250 ms claim latency, an anchor taken after the claim returned would lose all
+  // 250 ms; this one cannot.
+  const CLAIM_LATENCY = 250;
+  const res = await runHeartbeat({
+    supabase: recoveringBeat({ finishedAt: null, claimLatencyMs: CLAIM_LATENCY }),
+    runCycle: slowDecidedCycle,
+  });
+  const recovery = (res.alerts ?? []).find((a) => a.trigger === 'degraded_recovered');
+  assert.ok(recovery && recovery.trigger === 'degraded_recovered');
+  ok('an unreadable stamp still produces a recovery (best-effort, never a dead cycle)', recovery.failureCount === 4);
+  assert.ok(recovery.outageMs != null);
+  const claimBasedOutage = CLAIM_MS - Date.parse(PREV_SUCCESS);
+  ok(
+    'the fallback estimate INCLUDES the claim round trip, not just the cycle',
+    recovery.outageMs - claimBasedOutage >= CLAIM_LATENCY,
+  );
+  ok(
+    'the fallback is biased LATE — it can never date the all-clear before the decision',
     Date.parse(recovery.timestamp) > CLAIM_MS,
   );
-  // The size of the correction, on the real incident: the 20/08 recovering cycle ran
-  // 92.7 s, which is a whole minute of outage the claim-based measure simply dropped.
+}
+
+{
+  // The reader itself, in its three failure shapes plus the nominal one.
+  const runs = (row: unknown, error: unknown = null) =>
+    ({
+      from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: row, error }) }) }) }),
+    }) as unknown as SupabaseClient;
+  ok('readRunFinishedAt returns the stamp', (await readRunFinishedAt(runs({ finished_at: FINISHED_AT }), 1)) === FINISHED_AT);
+  ok('a rejected read returns null', (await readRunFinishedAt(runs(null, { message: 'boom' }), 1)) === null);
+  ok('a missing row returns null', (await readRunFinishedAt(runs(null), 1)) === null);
   ok(
-    'on 20/08 that correction is worth ~93 s of under-reported outage',
-    formatDuration(claimBasedOutage) === '5 h 8 min' &&
-      formatDuration(claimBasedOutage + CYCLE_MS) === '5 h 9 min',
+    'a throwing client returns null rather than failing the beat',
+    (await readRunFinishedAt({ from: () => { throw new Error('down'); } } as unknown as SupabaseClient, 1)) === null,
   );
 }
 

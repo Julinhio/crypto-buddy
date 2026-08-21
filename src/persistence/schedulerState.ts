@@ -238,6 +238,51 @@ export async function readIncidentState(supabase: SupabaseClient): Promise<Incid
 }
 
 /**
+ * WHEN THE RECOVERING RUN ACTUALLY FINISHED, on the DATABASE's clock.
+ *
+ * `finish_run` stamps `scheduler_runs.finished_at = now()` in the same transaction that
+ * releases the lock, so once it has returned true this row holds the exact instant the
+ * cycle completed — readable with a plain select, no migration, no new RPC.
+ *
+ * It replaces an arithmetic estimate (`claim.dbNow` plus a locally measured duration),
+ * which was wrong in the one direction that matters: the interval between the database
+ * producing `dbNow` and the application receiving the claim response is invisible to any
+ * app-side timer, so the estimate always ran EARLY — and an all-clear dated before the
+ * decision that justifies it is precisely what the recovery notification must never say.
+ * Reading the stamp removes the estimation instead of tightening it.
+ *
+ * BEST-EFFORT: `null` on any failure, and the caller falls back to the conservative
+ * estimate. It exists only to date a Telegram message, on a cycle that has already placed
+ * real orders.
+ */
+export async function readRunFinishedAt(
+  supabase: SupabaseClient,
+  runId: number,
+): Promise<string | null> {
+  try {
+    const { data, error } = await supabase
+      .from('scheduler_runs')
+      .select('finished_at')
+      .eq('id', runId)
+      .maybeSingle();
+    if (error || !data) {
+      console.warn(
+        `[warn] recovery: could not read finished_at for run #${runId} ` +
+          `(${error?.message ?? 'no row'}) — falling back to the estimated completion time.`,
+      );
+      return null;
+    }
+    return ((data as Record<string, unknown>).finished_at as string | null) ?? null;
+  } catch (err) {
+    console.warn(
+      `[warn] recovery: could not read finished_at for run #${runId} ` +
+        `(${err instanceof Error ? err.message : String(err)}) — falling back to the estimated completion time.`,
+    );
+    return null;
+  }
+}
+
+/**
  * HOW MANY CYCLES REALLY FAILED DURING THE INCIDENT THAT JUST ENDED.
  *
  * The recovery message wants one number: failures between the last valid decision and this

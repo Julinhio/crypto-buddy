@@ -8,6 +8,7 @@ import {
   countFailedRunsSince,
   finishRun,
   readIncidentState,
+  readRunFinishedAt,
 } from '../persistence/schedulerState.js';
 import type { EquitySnapshotInsert } from '../persistence/equitySnapshots.js';
 import { armCycleWatchdog, runGuardedCycle, type GuardedCycle } from './cycleGuard.js';
@@ -128,6 +129,21 @@ export async function runHeartbeat(
     // 3. The atomic claim is authoritative (it re-checks under a row lock, closing
     //    the race between step 2 and now). null → another beat won, or it just locked.
     const runToken = randomUUID();
+    /*
+     * Local anchor for the recovery's FALLBACK completion estimate, taken BEFORE the RPC is
+     * issued rather than after it returns.
+     *
+     * The database stamps `dbNow` somewhere inside this call, and the app can never see
+     * when: any timer started after the response arrives is blind to the return trip, so
+     * such an estimate runs systematically EARLY — the one direction a recovery must never
+     * err in, since it would date the all-clear before the decision existed. Anchoring here
+     * makes the estimate a conservative UPPER bound instead (it can only include the
+     * outbound hop, never miss the inbound one). Over-stating an outage by a network hop is
+     * harmless; under-stating one is a false report.
+     *
+     * Only ever a fallback: the nominal path reads the real `finished_at` stamp below.
+     */
+    const claimIssuedLocalMs = Date.now();
     const claim = await claimDueRun(supabase, runToken, config.scheduler.lockTtlSeconds);
     if (!claim) {
       console.log('[beat] no-op (claim refused — another beat won it, or it became locked).');
@@ -144,25 +160,7 @@ export async function runHeartbeat(
     // 4. Run the cycle exactly ONCE on the current market (no replay of missed beats),
     //    under the hard timeout, capturing whether it SETTLED (returned/threw → no
     //    orphan) or timed out (an orphan keeps running in the background).
-    /*
-     * THE CYCLE'S OWN ELAPSED TIME, anchored on the DATABASE's clock.
-     *
-     * `claim.dbNow` is the claim instant, which PRECEDES the whole cycle — using it as the
-     * recovery's completion time would date the all-clear before the decision that caused
-     * it existed, and would understate the outage by the cycle's full runtime (93 s on the
-     * 20/08 recovery, and up to the 300 s budget on a slow one). The brief measures the
-     * outage "until the completion of the new decided cycle", so the completion instant is
-     * what it must be.
-     *
-     * `finish_run` returns only a boolean, so there is no DB completion timestamp to read
-     * without a migration. Instead: the DB anchor PLUS a locally measured DURATION. A
-     * duration is immune to clock skew between the app and the database, which a bare
-     * `Date.now()` would not be — so this stays on the DB's timeline rather than silently
-     * mixing two clocks.
-     */
-    const cycleStartedLocalMs = Date.now();
     const { outcome, settled, result } = await runCycle();
-    const cycleElapsedMs = Date.now() - cycleStartedLocalMs;
     const {
       status,
       appliedDelayMinutes: appliedDelay,
@@ -329,12 +327,24 @@ export async function runHeartbeat(
       // of where the outage started. Null (never a success, or a reset) → the duration is
       // reported as unknown, never invented.
       //
-      // The end of the outage is the CYCLE'S COMPLETION, not the claim: DB anchor plus the
-      // locally measured cycle duration. Dating it at `claim.dbNow` would announce the
-      // all-clear before the decision that justifies it existed.
+      // The end of the outage is the CYCLE'S COMPLETION, not the claim — dating it at
+      // `claim.dbNow` would announce the all-clear before the decision that justifies it
+      // existed, and would drop the whole cycle runtime from the outage (92.7 s on the
+      // 20/08 recovery, up to the 300 s budget on a slow one).
+      //
+      // Taken from the DATABASE's own stamp: `finish_run` has just written
+      // `scheduler_runs.finished_at = now()` for this very run. That is the completion
+      // instant itself, not an estimate of it — no clock skew, no invisible network hop.
+      // The fallback below only runs if that read fails, and is deliberately biased late.
       const previousSuccessMs = previousSuccessAt ? Date.parse(previousSuccessAt) : NaN;
       const claimedAtMs = Date.parse(claim.dbNow);
-      const recoveredAtMs = Number.isNaN(claimedAtMs) ? NaN : claimedAtMs + cycleElapsedMs;
+      const finishedAt = await readRunFinishedAt(supabase, claim.runId);
+      const finishedAtMs = finishedAt ? Date.parse(finishedAt) : NaN;
+      const recoveredAtMs = !Number.isNaN(finishedAtMs)
+        ? finishedAtMs
+        : Number.isNaN(claimedAtMs)
+          ? NaN
+          : claimedAtMs + (Date.now() - claimIssuedLocalMs);
       const outageMs =
         Number.isNaN(previousSuccessMs) || Number.isNaN(recoveredAtMs)
           ? null
