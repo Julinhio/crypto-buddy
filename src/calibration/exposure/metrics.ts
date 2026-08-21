@@ -170,6 +170,7 @@ export function computeMetrics(result: EngineResult, assets: readonly string[]):
     frozen: emptyBucket(),
     cap: emptyBucket(),
     floor: emptyBucket(),
+    stop: emptyBucket(),
   };
   const stateBars: Record<string, number> = {};
 

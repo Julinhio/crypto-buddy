@@ -5,7 +5,14 @@ import type { BandPolicy } from './controller.js';
 import { runPolicy, type SharedTape, type WindowBounds } from './arms.js';
 import { CALIBRATION_WINDOW, VALIDATION_WINDOW, prepareTape } from './tape.js';
 import { excessVsWitness, type Metrics } from './metrics.js';
-import { buildManifest, sha256Of, writeArtefact, type WrittenFile } from './outputs.js';
+import {
+  buildManifest,
+  currentSourceTreeSha,
+  gitIsDirty,
+  sha256Of,
+  writeArtefact,
+  type WrittenFile,
+} from './outputs.js';
 import type { EngineState } from './engine.js';
 
 /**
@@ -48,8 +55,17 @@ export interface SelectionFile {
   schema_version: number;
   /** The bundle the selection was made on — a different bundle invalidates it. */
   bundle_sha256: string;
-  /** The commit the calibration ran from. */
+  /** The commit the calibration ran from — provenance, not the identity that is checked. */
   crypto_buddy_commit: string | null;
+  /**
+   * THE IDENTITY OF THE ENGINE THAT CALIBRATED. `git rev-parse HEAD:src`.
+   *
+   * Checked at validation, and part of the decisions digest. Without it the sealed window
+   * could be opened after the replay mechanics had changed: the bundle would still match and
+   * the digest would still verify, and the out-of-sample comparison would be measuring one
+   * engine against bands and witnesses calibrated by another.
+   */
+  source_tree_sha: string | null;
   selected_arm: string;
   rsi_retained: boolean;
   asymmetry_admissible: boolean;
@@ -73,6 +89,7 @@ export function decisionsDigest(selection: Omit<SelectionFile, 'decisions_sha256
     `${JSON.stringify(
       {
         bundle_sha256: selection.bundle_sha256,
+        source_tree_sha: selection.source_tree_sha,
         selected_arm: selection.selected_arm,
         rsi_retained: selection.rsi_retained,
         asymmetry_admissible: selection.asymmetry_admissible,
@@ -88,7 +105,22 @@ export function decisionsDigest(selection: Omit<SelectionFile, 'decisions_sha256
  * Loads the frozen selection, or REFUSES. Every failure here is a refusal to open the
  * window, never a warning followed by a run.
  */
-export function loadSelection(file: string | undefined, expectedBundleSha256: string): SelectionFile {
+export function loadSelection(
+  file: string | undefined,
+  expectedBundleSha256: string,
+  /**
+   * The git facts this check rests on. Defaulted to the real ones; the sealed command passes
+   * nothing.
+   *
+   * Injectable so the REFUSALS below are provable rather than accidental — a test that could
+   * only run on a clean checkout would silently stop asserting anything the moment a developer
+   * had an edit in flight, which is precisely when a seal matters.
+   */
+  env: { sourceTreeSha: string | null; dirty: boolean | null } = {
+    sourceTreeSha: currentSourceTreeSha(),
+    dirty: gitIsDirty(),
+  },
+): SelectionFile {
   if (!file || file.trim() === '') {
     throw new SealBrokenError(
       'no selection file given. The out-of-sample window may only be opened against a ' +
@@ -116,6 +148,39 @@ export function loadSelection(file: string | undefined, expectedBundleSha256: st
         `${expectedBundleSha256}. A selection is only valid on the data it was made from.`,
     );
   }
+  /*
+   * THE SOURCE TREE MUST STILL BE THE ONE THAT CALIBRATED.
+   *
+   * Compared on `src/`'s tree hash rather than on the commit: the selection is produced at
+   * one commit and committed at the next, and an artefact-only commit must not invalidate it.
+   * The tree hash is insensitive to that and sensitive to every engine change — which is
+   * exactly the line to draw.
+   *
+   * A DIRTY source is refused too. `rev-parse` reads the committed tree, so uncommitted
+   * engine edits would slip past a tree comparison while genuinely changing what runs.
+   */
+  const currentTree = env.sourceTreeSha;
+  if (parsed.source_tree_sha == null || currentTree == null) {
+    throw new SealBrokenError(
+      'the selection carries no source-tree identity, or git cannot report the current one. ' +
+        'The sealed window may only be opened by the engine that calibrated it.',
+    );
+  }
+  if (parsed.source_tree_sha !== currentTree) {
+    throw new SealBrokenError(
+      `the selection was calibrated by source tree ${parsed.source_tree_sha}, this run carries ` +
+        `${currentTree}. The replay mechanics changed since the bands and witnesses were fixed, ` +
+        'so the out-of-sample comparison would no longer be between comparable things.',
+    );
+  }
+  if (env.dirty !== false) {
+    throw new SealBrokenError(
+      'the source tree has uncommitted changes (or git could not say). The recorded tree hash ' +
+        'reads the COMMITTED source, so a dirty tree would pass the check while running ' +
+        'different code.',
+    );
+  }
+
   const recomputed = decisionsDigest(parsed);
   if (recomputed !== parsed.decisions_sha256) {
     throw new SealBrokenError(

@@ -15,7 +15,13 @@ import {
 } from './arms.js';
 import { CALIBRATION_WINDOW, prepareTape } from './tape.js';
 import { excessVsWitness, type Metrics } from './metrics.js';
-import { buildManifest, currentGitCommit, writeArtefact, type WrittenFile } from './outputs.js';
+import {
+  buildManifest,
+  currentGitCommit,
+  currentSourceTreeSha,
+  writeArtefact,
+  type WrittenFile,
+} from './outputs.js';
 import { freezeWitness, judgeAsymmetry, judgeRsi } from './select.js';
 import { decisionsDigest, type SelectionFile, type ValidableConfiguration } from './validate.js';
 import type { FreezeMode } from './engine.js';
@@ -406,6 +412,7 @@ async function main(): Promise<number> {
       schema_version: 1 as const,
       bundle_sha256: bundle.manifest.bundle_sha256,
       crypto_buddy_commit: currentGitCommit(),
+      source_tree_sha: currentSourceTreeSha(),
       selected_arm: selected.name,
       rsi_retained: rsi,
       asymmetry_admissible: asymVerdict.admissible,

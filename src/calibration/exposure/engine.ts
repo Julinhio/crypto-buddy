@@ -170,7 +170,15 @@ export function constraintFromGate(
   switch (gate) {
     // The stop is exiting the whole line: fully sellable, never buyable.
     case 'stop_exit':
-      return { asset, currentPercent, canReduce: true, canIncrease: false, reason: 'stop_exit' };
+      return {
+        asset,
+        currentPercent,
+        canReduce: true,
+        canIncrease: false,
+        reason: 'stop_exit',
+        // Not merely sellable: SOLD. See LineConstraint.forceExit.
+        forceExit: true,
+      };
     // A confirmed global risk_off lifts the individual freeze FOR REDUCTIONS ONLY. This is
     // the case that makes the feasible interval direction-dependent: treating the line as
     // immovable would forbid exactly the de-risking the posture exists to force.
@@ -301,7 +309,19 @@ export function runReplay(input: EngineInput): EngineResult {
     }
     const equity = state.cash.plus(deployed);
     state.equity = equity;
-    if (openingEquity == null) openingEquity = equity.toNumber();
+    // THE REBASING ANCHOR.
+    //
+    // On a RESUMED run it is the equity carried across the boundary — not this first bar's
+    // close. Anchoring after the bar would silently exclude the boundary order's fees and
+    // slippage AND the whole first candle's P&L from the net return, the CAGR and the
+    // drawdown measured against boundary capital. A window is not allowed to start by
+    // forgetting its own first move.
+    //
+    // On a fresh run there is nothing to carry, and marking a flat book gives exactly the
+    // starting cash, so the two readings coincide.
+    if (openingEquity == null) {
+      openingEquity = input.resume ? input.resume.equity.toNumber() : equity.toNumber();
+    }
 
     const exposurePercent = equity.gt(0) ? deployed.div(equity).times(100).toNumber() : 0;
 

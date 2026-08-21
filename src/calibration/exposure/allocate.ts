@@ -31,6 +31,21 @@ export interface LineConstraint {
   canIncrease: boolean;
   /** Why it is blocked, when it is — for the per-cause journal. */
   reason: 'free' | 'frozen' | 'stop_exit' | 'risk_off_reduce_only' | 'no_regime';
+  /**
+   * THE DETERMINISTIC STOP FIRED: this line must go to ZERO, exempt from the movement floor.
+   *
+   * "Permitted to reduce" is NOT what production's stop means, and the difference is not
+   * academic. `computeStopExits` synthesizes a sell of the WHOLE quantity with
+   * `fullExit: true`, and `isBelowFloor(notional, floor, fullExit)` returns
+   * `!fullExit && notional.lt(floor)` — so a full exit is explicitly exempt from the 2 %
+   * plumbing floor.
+   *
+   * A harness that only PERMITTED a reduction would let the basket decide the target: a
+   * stopped line sitting BELOW its nominal weight would be held untouched (the move reads as
+   * an increase, which the stop forbids), one above would be trimmed only back to nominal,
+   * and a small trim would be dropped by the floor. The stop would then fire and do nothing.
+   */
+  forceExit?: boolean;
 }
 
 /** The aggregate interval, recomputed per direction of travel. */
@@ -78,7 +93,15 @@ export function projectOntoFeasible(targetPercent: number, interval: FeasibleInt
 }
 
 /** Why a line failed to reach its nominal target. Both signs use the same vocabulary. */
-export type DeviationCause = 'frozen' | 'cap' | 'floor';
+/**
+ * Why a line missed its nominal target.
+ *
+ * `stop` is a FOURTH cause, beyond the three the protocol names (gel, plafond, plancher). A
+ * forced exit is none of those, and folding it into "frozen" would mislabel the one event
+ * that is supposed to be the most legible in the journal. Named separately so the per-cause
+ * ventilation keeps meaning what it says.
+ */
+export type DeviationCause = 'frozen' | 'cap' | 'floor' | 'stop';
 
 export interface LineDeviation {
   asset: string;
@@ -217,6 +240,17 @@ export function allocate(params: {
     if (!line) {
       // Not in the book and not constrained: treat as a flat, fully actionable line.
       targets[asset] = Math.min(want, cap);
+      continue;
+    }
+
+    // ── 3b. THE DETERMINISTIC STOP, ahead of every other per-line rule ───────────────
+    //
+    // Evaluated before the freeze and before the floor because in production it outranks
+    // both: it is rung 1 of the gate's ladder, and it is floor-exempt. Its shortfall against
+    // the nominal target is journaled under its own cause and is NEVER redistributed.
+    if (line.forceExit) {
+      targets[asset] = 0;
+      if (want > 0) deviations.push({ asset, cause: 'stop', signedPercent: -want });
       continue;
     }
 

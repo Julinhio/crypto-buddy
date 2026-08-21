@@ -23,7 +23,7 @@ import { applyRsiBrake, MissingMedianRsiError } from '../calibration/exposure/co
 import { ARMS, runPolicy } from '../calibration/exposure/arms.js';
 import { checkAgainstReference, type ArmReference, type CalibrationOutcome } from '../calibration/exposure/calibrate.js';
 import type { Metrics } from '../calibration/exposure/metrics.js';
-import { buildManifest, canonicalJson, sha256Of } from '../calibration/exposure/outputs.js';
+import { buildManifest, canonicalJson, currentSourceTreeSha, sha256Of } from '../calibration/exposure/outputs.js';
 import { SealBrokenError, decisionsDigest, loadSelection, validateConfiguration } from '../calibration/exposure/validate.js';
 
 /**
@@ -269,6 +269,75 @@ console.log('\nThe freeze asymmetry — sell-only freeze, with the deterministic
     feasibleInterval(frozenLine, cfgA.caps).highPercent === 10 + (35 - 10));
 }
 
+// ── THE DETERMINISTIC STOP IS AN EXIT, NOT A PERMISSION ──────────────────────────────
+//
+// Codex P1. Production's `computeStopExits` sells the WHOLE quantity with `fullExit: true`,
+// and `isBelowFloor(n, floor, fullExit) = !fullExit && n < floor` exempts it from the 2 %
+// plumbing floor. A harness that merely PERMITTED a reduction would let the basket set the
+// target — and a stopped line below its nominal weight would then be held untouched.
+console.log('\nThe deterministic stop performs a FULL, floor-exempt exit:');
+{
+  const cfg = buildExperimentConfig();
+  const others = ['ETH', 'BNB', 'XRP'].map((asset) => ({
+    asset, currentPercent: 10, canReduce: true, canIncrease: true, reason: 'free' as const,
+  }));
+
+  // THE CASE THAT EXPOSED THE DEFECT: the stopped line sits BELOW its nominal weight, so the
+  // move reads as an increase — which the stop forbids — and the line would be held at 5 %.
+  const below = allocate({
+    cfg,
+    lines: [
+      { asset: 'BTC', currentPercent: 5, canReduce: true, canIncrease: false, reason: 'stop_exit', forceExit: true },
+      ...others,
+    ],
+    currentExposurePercent: 35,
+    band: { lowPercent: 60, highPercent: 60 },
+  });
+  ok('a stopped line BELOW its nominal target is exited to ZERO, not held', below.targets.BTC === 0);
+
+  // Above nominal: exited entirely, not merely trimmed back to the basket weight.
+  const above = allocate({
+    cfg,
+    lines: [
+      { asset: 'BTC', currentPercent: 40, canReduce: true, canIncrease: false, reason: 'stop_exit', forceExit: true },
+      ...others,
+    ],
+    currentExposurePercent: 70,
+    band: { lowPercent: 60, highPercent: 60 },
+  });
+  ok('a stopped line ABOVE its nominal target is exited to ZERO, not trimmed to nominal',
+    above.targets.BTC === 0);
+
+  // Floor-exempt: a 0.5 % line is far under the 2 % floor and must still be exited.
+  const tiny = allocate({
+    cfg,
+    lines: [
+      { asset: 'BTC', currentPercent: 0.5, canReduce: true, canIncrease: false, reason: 'stop_exit', forceExit: true },
+      ...others,
+    ],
+    currentExposurePercent: 30.5,
+    band: { lowPercent: 30, highPercent: 30 },
+  });
+  ok(`a 0.5 % stopped line is exited despite the ${cfg.minMovementPercent} % movement floor`,
+    tiny.targets.BTC === 0 && !tiny.droppedByFloor.includes('BTC'));
+
+  // The shortfall is journaled under its OWN cause and never redistributed.
+  const dev = below.deviations.find((d) => d.asset === 'BTC');
+  ok('the exit is journaled under the cause "stop", not "frozen"', dev?.cause === 'stop');
+  ok('…with a NEGATIVE sign — imposed under-exposure', (dev?.signedPercent ?? 0) < 0);
+  ok('…and nothing was redistributed to the other lines',
+    Math.abs(below.targets.ETH! - (below.projectedPercent * cfg.basket.ETH!) / 100) < 1e-9);
+
+  // And the wiring: the production verdict really produces a forced exit.
+  ok('the gate verdict stop_exit maps to forceExit', constraintFromGate('BTC', 'stop_exit', 10).forceExit === true);
+  for (const gate of ['frozen', 'risk_off_reduction', 'no_regime', 'actionable']) {
+    if (constraintFromGate('BTC', gate, 10).forceExit) {
+      ok(`${gate} must NOT force an exit`, false);
+    }
+  }
+  ok('no other gate verdict forces an exit', true);
+}
+
 // ── PROOF 10 — BUNDLE VERIFICATION ───────────────────────────────────────────────────
 console.log('\nProof 10 — the bundle gate refuses every kind of tampering:');
 {
@@ -467,11 +536,17 @@ function idxHas(tape: AssetTape, ts: number): boolean {
 console.log('\nProof 9 — the validation command refuses to open without a frozen selection:');
 {
   const BUNDLE = EXPECTED_BUNDLE_SHA256;
-  assert.throws(() => loadSelection(undefined, BUNDLE), SealBrokenError);
+  // The seal binds to the SOURCE TREE, so a synthetic selection has to carry the real one —
+  // the proofs below are about the OTHER refusals, not about that check.
+  const TREE = currentSourceTreeSha();
+  // A CLEAN git environment, injected: these proofs are about the seal's own refusals, and
+  // must not depend on whether the developer running them happens to have an edit in flight.
+  const CLEAN = { sourceTreeSha: TREE, dirty: false as const };
+  assert.throws(() => loadSelection(undefined, BUNDLE, CLEAN), SealBrokenError);
   console.log('  ok: NO selection file → refused'); passed += 1;
-  assert.throws(() => loadSelection('', BUNDLE), SealBrokenError);
+  assert.throws(() => loadSelection('', BUNDLE, CLEAN), SealBrokenError);
   console.log('  ok: an empty path → refused'); passed += 1;
-  assert.throws(() => loadSelection('does-not-exist.json', BUNDLE), SealBrokenError);
+  assert.throws(() => loadSelection('does-not-exist.json', BUNDLE, CLEAN), SealBrokenError);
   console.log('  ok: a missing file → refused'); passed += 1;
 
   const dir = mkdtempSync(path.join(tmpdir(), 'seal-'));
@@ -479,6 +554,7 @@ console.log('\nProof 9 — the validation command refuses to open without a froz
     schema_version: 1 as const,
     bundle_sha256: BUNDLE,
     crypto_buddy_commit: 'deadbeef',
+    source_tree_sha: TREE,
     selected_arm: 'B',
     rsi_retained: false,
     asymmetry_admissible: false,
@@ -502,25 +578,65 @@ console.log('\nProof 9 — the validation command refuses to open without a froz
   };
 
   const valid = write('valid.json', { ...base, decisions_sha256: decisionsDigest(base) });
-  const loaded = loadSelection(valid, BUNDLE);
+  const loaded = loadSelection(valid, BUNDLE, CLEAN);
   ok('a properly frozen selection IS accepted', loaded.selected_arm === 'B');
 
   const tampered = { ...base, selected_arm: 'C' };
   const tamperedFile = write('tampered.json', { ...tampered, decisions_sha256: decisionsDigest(base) });
-  assert.throws(() => loadSelection(tamperedFile, BUNDLE), SealBrokenError);
+  assert.throws(() => loadSelection(tamperedFile, BUNDLE, CLEAN), SealBrokenError);
   console.log('  ok: a decision edited AFTER freezing → refused'); passed += 1;
 
   const otherBundle = write('otherbundle.json', {
     ...base, bundle_sha256: 'a'.repeat(64),
     decisions_sha256: decisionsDigest({ ...base, bundle_sha256: 'a'.repeat(64) }),
   });
-  assert.throws(() => loadSelection(otherBundle, BUNDLE), SealBrokenError);
+  assert.throws(() => loadSelection(otherBundle, BUNDLE, CLEAN), SealBrokenError);
   console.log('  ok: a selection made on ANOTHER bundle → refused'); passed += 1;
 
   const noConfigs = { ...base, configurations: [] };
   const noConfigsFile = write('noconfigs.json', { ...noConfigs, decisions_sha256: decisionsDigest(noConfigs) });
-  assert.throws(() => loadSelection(noConfigsFile, BUNDLE), SealBrokenError);
+  assert.throws(() => loadSelection(noConfigsFile, BUNDLE, CLEAN), SealBrokenError);
   console.log('  ok: a selection registering no validable configuration → refused'); passed += 1;
+
+  // THE SOURCE-TREE BINDING (Codex P1). Without it the sealed window could be opened after
+  // the replay mechanics had changed: the bundle would still match, the digest would still
+  // verify, and the out-of-sample comparison would pit one engine against bands and witnesses
+  // calibrated by another.
+  const otherTree = { ...base, source_tree_sha: 'b'.repeat(40) };
+  const otherTreeFile = write('othertree.json', { ...otherTree, decisions_sha256: decisionsDigest(otherTree) });
+  assert.throws(() => loadSelection(otherTreeFile, BUNDLE, CLEAN), SealBrokenError);
+  console.log('  ok: a selection calibrated by a DIFFERENT source tree → refused'); passed += 1;
+
+  const noTree = { ...base, source_tree_sha: null };
+  const noTreeFile = write('notree.json', { ...noTree, decisions_sha256: decisionsDigest(noTree) });
+  assert.throws(() => loadSelection(noTreeFile, BUNDLE, CLEAN), SealBrokenError);
+  console.log('  ok: a selection with NO source-tree identity → refused'); passed += 1;
+
+  // …and the identity is the one an artefact-only commit does not move. That is the whole
+  // reason it is the tree of `src/` and not the commit SHA: the selection is produced at one
+  // commit and committed at the next.
+  ok('the source-tree identity is the tree of src/, insensitive to an artefact-only commit',
+    TREE != null && TREE === currentSourceTreeSha());
+  ok('…and it is part of the decisions digest, so it cannot be edited afterwards',
+    decisionsDigest(base) !== decisionsDigest({ ...base, source_tree_sha: 'c'.repeat(40) }));
+
+  // A DIRTY source is refused too. `rev-parse` reads the COMMITTED tree, so uncommitted
+  // engine edits would sail past a tree comparison while genuinely changing what runs.
+  assert.throws(
+    () => loadSelection(valid, BUNDLE, { sourceTreeSha: TREE, dirty: true }),
+    SealBrokenError,
+  );
+  console.log('  ok: a DIRTY source tree → refused (rev-parse reads the committed tree)'); passed += 1;
+  assert.throws(
+    () => loadSelection(valid, BUNDLE, { sourceTreeSha: TREE, dirty: null }),
+    SealBrokenError,
+  );
+  console.log('  ok: a source tree whose state git cannot report → refused'); passed += 1;
+  assert.throws(
+    () => loadSelection(valid, BUNDLE, { sourceTreeSha: null, dirty: false }),
+    SealBrokenError,
+  );
+  console.log('  ok: no current source-tree identity at all → refused'); passed += 1;
 
   rmSync(dir, { recursive: true, force: true });
 }

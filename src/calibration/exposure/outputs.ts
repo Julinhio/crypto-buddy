@@ -47,6 +47,30 @@ export function currentGitCommit(): string | null {
 }
 
 /**
+ * THE IDENTITY OF THE CODE, not of the commit.
+ *
+ * `git rev-parse HEAD:src` is the tree hash of `src/`. It changes the moment the engine
+ * changes, and it does NOT change when a commit only adds artefacts — which is exactly the
+ * distinction a sealed window needs: the selection is produced at one commit and committed at
+ * the next, and only the second one exists when the window is opened.
+ *
+ * Comparing raw commit SHAs would therefore refuse every legitimate run; comparing nothing
+ * would let the out-of-sample window be opened with engine code that never calibrated
+ * anything. This is the middle, and it is the honest one.
+ */
+export function currentSourceTreeSha(): string | null {
+  try {
+    const out = execFileSync('git', ['rev-parse', 'HEAD:src'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return out.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Was the SOURCE dirty when this ran — i.e. is the recorded commit really the code that
  * produced these numbers?
  *
@@ -115,6 +139,7 @@ export function buildManifest(input: ManifestInput): unknown {
     bundle_as_of_exclusive: input.bundle.as_of_exclusive,
     crypto_buddy_commit: currentGitCommit(),
     crypto_buddy_tree_dirty: gitIsDirty(),
+    crypto_buddy_src_tree_sha: currentSourceTreeSha(),
     regime_version: REGIME_VERSION,
     experiment_config_sha256: experimentConfigSha256(input.cfg),
     experiment_config: {
