@@ -20,11 +20,11 @@ import { allocate, feasibleInterval, type LineConstraint } from '../calibration/
 import { constraintFromGate, runReplay, type AssetTape } from '../calibration/exposure/engine.js';
 import { prepareTape, CALIBRATION_WINDOW, VALIDATION_WINDOW } from '../calibration/exposure/tape.js';
 import { applyRsiBrake, MissingMedianRsiError } from '../calibration/exposure/controller.js';
-import { runPolicy } from '../calibration/exposure/arms.js';
+import { ARMS, runPolicy } from '../calibration/exposure/arms.js';
 import { checkAgainstReference, type ArmReference, type CalibrationOutcome } from '../calibration/exposure/calibrate.js';
 import type { Metrics } from '../calibration/exposure/metrics.js';
 import { buildManifest, canonicalJson, sha256Of } from '../calibration/exposure/outputs.js';
-import { SealBrokenError, decisionsDigest, loadSelection } from '../calibration/exposure/validate.js';
+import { SealBrokenError, decisionsDigest, loadSelection, validateConfiguration } from '../calibration/exposure/validate.js';
 
 /**
  * THE TWELVE PROOFS of the exposure-calibration harness.
@@ -595,16 +595,73 @@ console.log('\nThe regression guard — steps 1-2 must reproduce a reference EXA
 // the output of a run whose two extra dimensions happen to be off.
 console.log('\nThe sealed window replays the FROZEN configuration, not just its band:');
 {
-  const src = readFileSync(path.join(ROOT, 'src', 'calibration', 'exposure', 'validate.ts'), 'utf8');
-  const body = src.slice(src.indexOf('export function validateConfiguration'));
-  ok('the validation policy carries the frozen RSI verdict', body.includes('rsiBrake: cfg.rsi'));
-  ok('…and the frozen freeze variant', body.includes('freeze: cfg.freeze'));
-  ok('the witness carries the freeze variant too (mechanics held constant)',
-    body.includes('targetPercent: cfg.witnessTargetPercent') && body.includes('freeze: cfg.freeze'));
-  // …and never the brake, which is the treatment under test.
-  const witnessBlock = body.slice(body.indexOf('const witnessPolicy'), body.indexOf('const excess'));
-  ok('…but NEVER the RSI brake — the control must not carry the treatment',
-    !witnessBlock.includes('rsiBrake'));
+  const { shared } = prepareTape(ROOT);
+
+  // TWO SLICES OF THE CALIBRATION WINDOW. The out-of-sample window is never touched: this is
+  // a wiring question, and spending the single OOS opening on it would be absurd.
+  //
+  // The first slice is chosen to CONTAIN a bar where the median 4h RSI reaches the brake's
+  // threshold — otherwise a brake that was correctly wired and a brake that was silently
+  // dropped would produce identical numbers, and the proof would pass either way.
+  const braking = shared.points.filter(
+    (p) =>
+      p.timestamp >= CALIBRATION_WINDOW.fromMs &&
+      p.timestamp < CALIBRATION_WINDOW.toMs &&
+      p.global.medianH4Rsi != null &&
+      p.global.medianH4Rsi >= buildExperimentConfig().rsiBrakeThresholdRsi,
+  );
+  ok(`the calibration window really contains braking bars (${braking.length}) — else the proof is vacuous`,
+    braking.length > 0);
+
+  const anchor = braking[Math.floor(braking.length / 2)]!.timestamp;
+  const span = 400 * shared.barMs;
+  const windows = {
+    calibration: { fromMs: anchor - span, toMs: anchor + span },
+    validation: { fromMs: anchor + span, toMs: anchor + 2 * span },
+  };
+
+  const base = {
+    name: 'synthetic',
+    bands: ARMS.A!,
+    witnessTargetPercent: 37.75,
+    witnessMismatchPoints: 0,
+  };
+
+  // THE BEHAVIOURAL PROOF. The SAME function the sealed command calls, on a synthetic
+  // selection that switches both extra dimensions ON. If either were dropped on the way to
+  // the engine, these verdicts would be indistinguishable from the plain one.
+  const plain = validateConfiguration(shared, { ...base, rsi: false, freeze: 'symmetric' }, windows);
+  const withRsi = validateConfiguration(shared, { ...base, rsi: true, freeze: 'symmetric' }, windows);
+  const withAsym = validateConfiguration(shared, { ...base, rsi: false, freeze: 'asymmetric' }, windows);
+  const withBoth = validateConfiguration(shared, { ...base, rsi: true, freeze: 'asymmetric' }, windows);
+
+  // 1) THE RSI DIMENSION REALLY REACHES THE REPLAY.
+  ok('rsi:false → the brake fires on no bar at all',
+    plain.calibrationBrakedBars === 0 && plain.validationBrakedBars === 0);
+  ok(`rsi:true → the brake actually fires (${withRsi.calibrationBrakedBars} bars in the first leg)`,
+    withRsi.calibrationBrakedBars > 0);
+  ok('…and that changes the trajectory, not just a flag',
+    withRsi.validationMetrics.closingEquity !== plain.validationMetrics.closingEquity);
+
+  // 2) THE FREEZE DIMENSION REALLY REACHES THE REPLAY.
+  ok('freeze:asymmetric → a different trajectory from the symmetric one',
+    withAsym.validationMetrics.closingEquity !== plain.validationMetrics.closingEquity);
+  ok('…and a different realised exposure — a frozen line can now be reinforced',
+    withAsym.validationMetrics.meanExposurePercent !== plain.validationMetrics.meanExposurePercent);
+
+  // 3) BOTH AT ONCE, and distinct from either alone — neither silently overrides the other.
+  ok('both dimensions together differ from RSI alone',
+    withBoth.validationMetrics.closingEquity !== withRsi.validationMetrics.closingEquity);
+  ok('…and from the asymmetry alone',
+    withBoth.validationMetrics.closingEquity !== withAsym.validationMetrics.closingEquity);
+  ok('…while the brake still fires under the asymmetric gate', withBoth.calibrationBrakedBars > 0);
+
+  // 4) THE WITNESS SHARES THE MECHANICS AND NEVER THE TREATMENT.
+  //    Same frozen target, so any difference in the witness comes from the gate variant alone.
+  ok('the witness follows the FREEZE variant (mechanics held constant)',
+    withAsym.witnessValidationMetrics.closingEquity !== plain.witnessValidationMetrics.closingEquity);
+  ok('the witness does NOT follow the RSI brake (the treatment stays out of the control)',
+    withRsi.witnessValidationMetrics.closingEquity === plain.witnessValidationMetrics.closingEquity);
 }
 
 // ── PROOF 1 (artefacts) — THE MANIFEST CARRIES NOTHING THAT CANNOT REPRODUCE ─────────

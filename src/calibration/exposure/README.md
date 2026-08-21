@@ -158,6 +158,40 @@ faire exactement la même chose pour la même raison.
 
 ---
 
+## Les artefacts, et ce que leurs empreintes prouvent
+
+Trois artefacts sont **commités** — `selection.json`, `summary.json`, `manifest.json` — parce
+que le protocole exige que la sélection soit figée et commitée **avant** toute ouverture de la
+fenêtre scellée, et parce que les deux autres sont le résultat publié.
+
+`trajectory.json` (~13,5 Mo, la trajectoire barre par barre) n'est **pas** commité : il se
+régénère intégralement depuis le bundle figé et le commit du manifeste, et il ajouterait un
+blob de 13,5 Mo à l'historique à chaque run.
+
+**Son SHA-256 dans le manifeste est un engagement d'intégrité, pas une vérification.** Il ne
+devient une vérification qu'une fois le fichier régénéré et comparé. Pour le faire :
+
+```bash
+npx tsx src/calibration/exposure/calibrate.ts
+```
+
+puis, depuis la racine du dépôt :
+
+```bash
+node -e "const c=require('node:crypto'),f=require('node:fs');const m=require('./out/exposure-calibration/manifest.json');const e=m.outputs.find(o=>o.file==='trajectory.json');const g=c.createHash('sha256').update(f.readFileSync('out/exposure-calibration/trajectory.json')).digest('hex');console.log(g===e.sha256?'MATCH '+g:'DIVERGENCE\ncommitted '+e.sha256+'\nregenerated '+g)"
+```
+
+Un `MATCH` prouve que la trajectoire régénérée est celle qui a produit les chiffres publiés.
+Une divergence signifie que le code, le bundle ou la configuration ont bougé depuis — et le
+manifeste dit lequel, puisqu'il épingle le commit, le `bundle_sha256` et
+l'`experiment_config_sha256`.
+
+Le manifeste ne porte **aucune durée d'exécution**, et ce n'est pas un oubli : une durée ne
+peut jamais se reproduire, donc un manifeste qui en contiendrait ne pourrait jamais être
+byte-identique entre deux runs — ce qui rendrait la preuve de déterminisme invérifiable sur
+l'artefact même dont le rôle est de certifier les autres. Les durées vont sur la sortie
+standard et dans la description de PR.
+
 ## Limite à lire à côté des résultats
 
 Les trois bras diffèrent sur les **trois** états à la fois. Si C gagne, **on ne saura pas** si

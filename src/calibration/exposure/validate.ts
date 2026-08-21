@@ -2,7 +2,7 @@ import { pathToFileURL } from 'node:url';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import type { BandPolicy } from './controller.js';
-import { runPolicy, type SharedTape } from './arms.js';
+import { runPolicy, type SharedTape, type WindowBounds } from './arms.js';
 import { CALIBRATION_WINDOW, VALIDATION_WINDOW, prepareTape } from './tape.js';
 import { excessVsWitness, type Metrics } from './metrics.js';
 import { buildManifest, sha256Of, writeArtefact, type WrittenFile } from './outputs.js';
@@ -141,6 +141,16 @@ export interface ValidationVerdict {
   excessCagrPercent: number;
   rejected: boolean;
   reasons: string[];
+  /**
+   * How often the one-way RSI brake actually fired, per leg.
+   *
+   * Published because "the brake is on" and "the brake did anything" are different facts: on
+   * the calibration window it bit 42 bars out of 7 662, which is why the candidate could not
+   * move a CAGR by 1.5 points. A reader judging an out-of-sample result needs the same
+   * number, and it is zero by construction on a configuration that froze the RSI out.
+   */
+  calibrationBrakedBars: number;
+  validationBrakedBars: number;
 }
 
 /**
@@ -157,6 +167,18 @@ export interface ValidationVerdict {
 export function validateConfiguration(
   shared: SharedTape,
   cfg: ValidableConfiguration,
+  /**
+   * The two windows. Defaulted to the real ones; production passes neither.
+   *
+   * The seam exists so the behavioural proof can exercise THIS function — the one the sealed
+   * command actually calls — on two slices of the CALIBRATION window, without spending the
+   * single out-of-sample opening to check a wiring question. Testing a copy of the policy
+   * construction would prove something about the copy.
+   */
+  windows: { calibration: WindowBounds; validation: WindowBounds } = {
+    calibration: CALIBRATION_WINDOW,
+    validation: VALIDATION_WINDOW,
+  },
 ): ValidationVerdict {
   /*
    * THE FROZEN CONFIGURATION IS REPLAYED IN FULL — band, RSI verdict AND freeze variant.
@@ -175,10 +197,10 @@ export function validateConfiguration(
   };
 
   // Calibration leg — run for its ending STATE, which is what the validation resumes from.
-  const calibration = runPolicy(shared, policy, CALIBRATION_WINDOW);
+  const calibration = runPolicy(shared, policy, windows.calibration);
   const resume: EngineState = calibration.result.finalState;
 
-  const validation = runPolicy(shared, policy, VALIDATION_WINDOW, resume);
+  const validation = runPolicy(shared, policy, windows.validation, resume);
 
   // The witness crosses the boundary the same way, from its own calibration state. It shares
   // the FREEZE (mechanics) and never the RSI brake (the treatment under test).
@@ -187,11 +209,11 @@ export function validateConfiguration(
     targetPercent: cfg.witnessTargetPercent,
     freeze: cfg.freeze,
   };
-  const witnessCalibration = runPolicy(shared, witnessPolicy, CALIBRATION_WINDOW);
+  const witnessCalibration = runPolicy(shared, witnessPolicy, windows.calibration);
   const witnessValidation = runPolicy(
     shared,
     witnessPolicy,
-    VALIDATION_WINDOW,
+    windows.validation,
     witnessCalibration.result.finalState,
   );
 
@@ -218,6 +240,8 @@ export function validateConfiguration(
     excessCagrPercent: excess.excessCagrPercent,
     rejected: reasons.length > 0,
     reasons,
+    calibrationBrakedBars: calibration.result.bars.filter((b) => b.rsiBraked).length,
+    validationBrakedBars: validation.result.bars.filter((b) => b.rsiBraked).length,
   };
 }
 
