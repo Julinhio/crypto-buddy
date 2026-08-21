@@ -55,19 +55,24 @@ export interface FeasibleInterval {
 }
 
 /**
- * THE FEASIBLE INTERVAL, for ONE direction of travel.
+ * THE FEASIBLE INTERVAL — the total exposure the book could reach at all.
  *
- *   low  = Σ weights of the lines we may not REDUCE   (the floor we are stuck above)
- *   high = min(100, that floor + Σ caps of the lines we may INCREASE)
+ * BOTH BOUNDS ARE TOTALS, summed per line:
  *
- * Recomputed per direction, and that is load-bearing rather than tidy. `risk_off` is exactly
- * the case: it freezes increases while explicitly ALLOWING reductions. Treating a line as
- * immovable in both directions — the obvious reading of "frozen" — would make the harness
- * refuse to sell precisely when the production posture demands selling, and the defensive
- * band would then be unreachable by construction.
+ *   low  = Σ minimum reachable = Σ (may be sold ? 0 : the weight it is stuck at)
+ *   high = Σ maximum reachable = Σ (leaving ? 0 : may be bought ? max(cap, current) : current)
  *
- * `direction` is the move the caller is trying to make. A line only pins the floor if it
- * cannot be reduced; it only lifts the ceiling if it can be increased.
+ * The ceiling used to be written as a HEADROOM — `floor + Σ (cap − current)` — and that was
+ * the defect two published rounds rested on. It measures how much MORE could be bought and
+ * adds it to a floor that deliberately excludes every reducible line, so a held weight landed
+ * in neither term: an all-actionable book at 70 % came out with a ceiling of 35 %, "do
+ * nothing" was declared infeasible, and half the book was sold on a bar where nothing should
+ * have moved. Staying put is always reachable; a ceiling has to say so.
+ *
+ * Each bound is direction-aware, and that is load-bearing rather than tidy. `risk_off` is the
+ * case: it forbids increases while explicitly ALLOWING reductions, so its lines pin no floor
+ * (they may be sold) and lift no ceiling (they may not be bought) — while still contributing
+ * the weight they already hold, because the posture forbids buying, it does not force selling.
  */
 export function feasibleInterval(
   lines: readonly LineConstraint[],
@@ -107,9 +112,8 @@ export function projectOntoFeasible(targetPercent: number, interval: FeasibleInt
   return targetPercent;
 }
 
-/** Why a line failed to reach its nominal target. Both signs use the same vocabulary. */
 /**
- * Why a line missed its nominal target.
+ * Why a line missed its nominal target. Both signs use the same vocabulary.
  *
  * `stop` is a FOURTH cause, beyond the three the protocol names (gel, plafond, plancher). A
  * forced exit is none of those, and folding it into "frozen" would mislabel the one event
@@ -215,6 +219,49 @@ export function allocate(params: {
    * silently producing a purchase the brake had just refused.
    */
   const FLOOR_EPSILON = 1e-9;
+
+  /*
+   * TWO INVARIANTS ON THE INTERVAL, both of which the ceiling defect violated.
+   *
+   * (a) THE BOOK FITS UNDER ITS OWN CEILING — once the lines the stop is taking out are set
+   *     aside. "Reachable" includes STAYING PUT, so a ceiling below the weight actually held
+   *     is arithmetic, never a market fact. A forced exit is the one exception and it is a
+   *     real one: that line is leaving whatever the band wants, so it belongs to neither
+   *     side of the comparison.
+   *
+   *     With the ceiling written as a TOTAL this holds by construction — each line
+   *     contributes at least its current weight. That is exactly why it is asserted: it is
+   *     free, and it fires on the first bar if anyone ever turns the ceiling back into a
+   *     headroom. The old formulation gave a 70 % book a ceiling of 35 %, and the next line
+   *     of code turned that into selling half the book.
+   *
+   * (b) THE TWO VIEWS OF THE BOOK AGREE — the scalar exposure the caller passes and the sum
+   *     of the per-line weights it passes alongside it. They are computed from the same
+   *     equity in the engine, so a divergence means the two arguments describe different
+   *     books, and every bound below would be judging one against the other.
+   */
+  let heldExcludingForcedExits = 0;
+  let heldTotal = 0;
+  for (const line of lines) {
+    heldTotal += line.currentPercent;
+    if (!line.forceExit) heldExcludingForcedExits += line.currentPercent;
+  }
+
+  const BOOK_EPSILON = 1e-6;
+  if (Math.abs(heldTotal - currentExposurePercent) > BOOK_EPSILON) {
+    throw new Error(
+      `exposure allocator: the per-line weights sum to ${heldTotal}% but the exposure passed ` +
+        `alongside them is ${currentExposurePercent}%. The two describe different books.`,
+    );
+  }
+  if (heldExcludingForcedExits > interval.highPercent + FLOOR_EPSILON) {
+    throw new Error(
+      `exposure allocator: the book holds ${heldExcludingForcedExits}% outside forced exits, but ` +
+        `the feasible ceiling is ${interval.highPercent}%. Staying put is always reachable, so a ` +
+        'ceiling below the book is an arithmetic error — refusing to turn it into a sale.',
+    );
+  }
+
   if (interval.lowPercent > currentExposurePercent + FLOOR_EPSILON) {
     throw new Error(
       `exposure allocator: the feasible floor (${interval.lowPercent}) exceeds the current ` +

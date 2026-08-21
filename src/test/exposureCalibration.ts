@@ -901,6 +901,81 @@ console.log('\nThe feasible ceiling is a TOTAL reachable weight, not a headroom:
   ok('…and the ceiling is its weight plus the actionable line’s cap', frozen.highPercent === 30 + 35);
 }
 
+// ── THE INVARIANT THAT WOULD HAVE CAUGHT IT ─────────────────────────────────────────
+//
+// Two published rounds rested on a ceiling that could sit BELOW the book it was describing.
+// The cheap invariant that fires on the very first bar: staying put is always reachable, so
+// the current exposure must always lie inside its own feasible interval.
+console.log('\nThe book always lies inside its own feasible interval:');
+{
+  const cfg = buildExperimentConfig();
+  const free = (asset: string, currentPercent: number): LineConstraint =>
+    ({ asset, currentPercent, canReduce: true, canIncrease: true, reason: 'free' });
+
+  // A book that would have tripped the old ceiling: 70 % held, all actionable.
+  const invested = [free('BTC', 25), free('ETH', 25), free('BNB', 10), free('XRP', 10)];
+  assert.doesNotThrow(() =>
+    allocate({ cfg, lines: invested, currentExposurePercent: 70, band: { lowPercent: 45, highPercent: 70 } }),
+  );
+  console.log('  ok: a 70 % book against a 45–70 band allocates without tripping the invariant');
+  passed += 1;
+
+  // And both invariants are ARMED, not decorative.
+  //
+  // (b) the two views of the book must agree: 30 % of lines against a 70 % scalar.
+  const mismatched: LineConstraint[] = [
+    { asset: 'BTC', currentPercent: 30, canReduce: true, canIncrease: false, reason: 'no_regime' },
+  ];
+  assert.throws(
+    () => allocate({ cfg, lines: mismatched, currentExposurePercent: 70, band: { lowPercent: 45, highPercent: 70 } }),
+    /describe different books/,
+  );
+  console.log('  ok: per-line weights that disagree with the scalar exposure FAIL the run');
+  passed += 1;
+
+  // (a) a forced exit is excluded from BOTH sides — the line is leaving, so it neither
+  //     counts against the ceiling nor has to fit under it. This is the case that showed the
+  //     first formulation of the invariant was too naive: it fired on a healthy replay.
+  const stoppedBook: LineConstraint[] = [
+    { asset: 'BTC', currentPercent: 30, canReduce: true, canIncrease: false, reason: 'stop_exit', forceExit: true },
+    free('ETH', 28),
+  ];
+  assert.doesNotThrow(() =>
+    allocate({ cfg, lines: stoppedBook, currentExposurePercent: 58, band: { lowPercent: 45, highPercent: 70 } }),
+  );
+  console.log('  ok: a book holding a line the stop is exiting does NOT trip the invariant');
+  passed += 1;
+
+  // The whole calibration window must satisfy it, on every arm — the real regression net.
+  const { shared } = prepareTape(ROOT);
+  for (const [name, bands] of Object.entries(ARMS)) {
+    assert.doesNotThrow(() => runPolicy(shared, { kind: 'band', bands }, CALIBRATION_WINDOW));
+    console.log(`  ok: arm ${name} satisfies it on all 7 662 calibration bars`);
+    passed += 1;
+  }
+}
+
+// ── REALISED EXPOSURE MUST TRACK THE BAND ───────────────────────────────────────────
+//
+// The tell I missed: arm C spent 3 646 bars in a constructive band of 85–100 % and realised a
+// mean exposure of 46,6 %. That was not a market fact, it was the ceiling bug — and a glance
+// at the ordering would have raised it. Pinned so the next such compression is caught here.
+console.log('\nRealised exposure tracks the bands — strictly ordered A < B < C:');
+{
+  const { shared } = prepareTape(ROOT);
+  const realised = Object.entries(ARMS).map(([name, bands]) => ({
+    name,
+    mean: runPolicy(shared, { kind: 'band', bands }, CALIBRATION_WINDOW).metrics.meanExposurePercent,
+  }));
+  const [a, b, c] = realised;
+  ok(`A ${a!.mean.toFixed(1)} % < B ${b!.mean.toFixed(1)} % < C ${c!.mean.toFixed(1)} %`,
+    a!.mean < b!.mean && b!.mean < c!.mean);
+  // C's neutral band alone starts at 50 %, and it spends most of its bars at or above neutral.
+  // A realised mean far below that means the book is being held down by something other than
+  // the policy — which is exactly what the broken ceiling was doing.
+  ok('C realises at least its neutral floor of 50 % on average', c!.mean >= 50);
+}
+
 // ── THE DRAWDOWN IS SEEDED FROM THE CARRIED EQUITY ──────────────────────────────────
 console.log('\nDrawdown on a resumed window starts from the boundary equity:');
 {
