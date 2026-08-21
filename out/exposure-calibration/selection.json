@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "bundle_sha256": "517563c6a9ec9a29eba769049b7154a2a2a2b9c5ce6fd8730dfc019f17e487ce",
+  "crypto_buddy_commit": "ef7034422f1119f2cffdaaa7ca2104f2d605a5c1",
+  "selected_arm": "A",
+  "rsi_retained": false,
+  "asymmetry_admissible": false,
+  "configurations": [
+    {
+      "name": "A-norsi-symmetric",
+      "bands": {
+        "defensive": {
+          "lowPercent": 0,
+          "highPercent": 20
+        },
+        "neutral": {
+          "lowPercent": 20,
+          "highPercent": 45
+        },
+        "constructive": {
+          "lowPercent": 45,
+          "highPercent": 70
+        }
+      },
+      "rsi": false,
+      "freeze": "symmetric",
+      "witnessTargetPercent": 37.75,
+      "witnessMismatchPoints": 0.06456070156605875
+    }
+  ],
+  "decisions_sha256": "1c69993fec1e5e73d3e06f6adf02d071cbb9f004703977d42a4a529a658cb765"
+}
