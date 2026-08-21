@@ -200,6 +200,23 @@ doit être écrit à côté du chiffre.
 
 ---
 
+## Ce que le stop mesuré ici autorise à dire, et ce qu'il n'autorise pas
+
+Sur cette fenêtre, le stop de pic tel que la production l'implémente — sortie totale de la
+ligne, exempte du plancher de mouvement — **coûte du rendement et aggrave le drawdown**. Le
+mécanisme est visible : sortie au creux, réentrée plus haut dès que le régime le permet, frais
+et slippage à chaque aller-retour.
+
+**Cette phrase ne porte que sur ce système-ci.** Ce qui est mesuré, c'est le stop de
+production **combiné à l'allocateur proxy et à ses réentrées**, sur 2021–2024. Le bot complet
+ne réentre pas de la même façon : ses réentrées passent par le modèle, qui peut refuser de
+racheter ce que le stop vient de vendre — exactement là où le proxy, lui, rachète
+mécaniquement dès que la bande et la porte le permettent.
+
+Rien ici ne prouve donc que le stop coûte autant au bot complet. Établir cela demanderait une
+mesure où le modèle est présent, c'est-à-dire le mode observation en production — le même
+chantier que celui dont dépend la question principale.
+
 ## Issue négative pré-écrite
 
 Si **aucun bras n'est éligible**, on ne livre pas de bande. Le résultat négatif est publié.

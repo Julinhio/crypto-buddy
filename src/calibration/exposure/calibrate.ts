@@ -15,6 +15,7 @@ import {
 } from './arms.js';
 import { CALIBRATION_WINDOW, prepareTape } from './tape.js';
 import { excessVsWitness, type Metrics } from './metrics.js';
+import type { BarRecord } from './engine.js';
 import {
   buildManifest,
   currentGitCommit,
@@ -58,6 +59,15 @@ export interface ArmReport {
   metrics: Metrics;
   witness: WitnessSelection;
   witnessMetrics: Metrics;
+  /**
+   * The per-bar trajectories, kept so the RAW artefact can be written without replaying
+   * anything. A negative outcome is still an experiment to audit — arguably more so, since
+   * the only way to disagree with "no band is deliverable" is to look at what produced it.
+   *
+   * CALIBRATION ONLY. Nothing here ever touches the out-of-sample window.
+   */
+  bars: BarRecord[];
+  witnessBars: BarRecord[];
   excessCagrPercent: number;
   /** True when the witness landed inside the pre-registered exposure tolerance. */
   witnessIsSound: boolean;
@@ -78,12 +88,12 @@ export function evaluateArm(
   bands: BandPolicy,
   baseline: Metrics,
 ): ArmReport {
-  const { metrics } = runPolicy(shared, { kind: 'band', bands }, window);
+  const { metrics, result } = runPolicy(shared, { kind: 'band', bands }, window);
 
   // The witness is matched to THIS arm's realised mean exposure — never to its nominal band,
   // which the gate, the stops and the movement floor all conspire to miss.
   const witness = searchConstantWitness(shared, window, metrics.meanExposurePercent);
-  const { metrics: witnessMetrics } = runPolicy(
+  const { metrics: witnessMetrics, result: witnessResult } = runPolicy(
     shared,
     { kind: 'constant', targetPercent: witness.targetPercent },
     window,
@@ -127,6 +137,8 @@ export function evaluateArm(
     metrics,
     witness,
     witnessMetrics,
+    bars: result.bars,
+    witnessBars: witnessResult.bars,
     excessCagrPercent: excess.excessCagrPercent,
     witnessIsSound: excess.witnessIsSound,
     eligibility: {
@@ -189,6 +201,7 @@ function summarizeMetrics(m: Metrics): Record<string, unknown> {
 export interface CalibrationOutcome {
   reports: ArmReport[];
   baseline: Metrics;
+  baselineBars: BarRecord[];
   selected: ArmReport | null;
   equalWeight: { openingEquity: number; closingEquity: number; netReturnPercent: number };
 }
@@ -256,7 +269,7 @@ export function checkAgainstReference(
 /** Steps 1 and 2 of the protocol: the three arms, then the selection. */
 export function runArmSelection(shared: SharedTape, window: WindowBounds): CalibrationOutcome {
   validateArms();
-  const { metrics: baseline } = runPolicy(
+  const { metrics: baseline, result: baselineResult } = runPolicy(
     shared,
     { kind: 'constant', targetPercent: BASELINE_TARGET_PERCENT },
     window,
@@ -267,6 +280,7 @@ export function runArmSelection(shared: SharedTape, window: WindowBounds): Calib
   return {
     reports,
     baseline,
+    baselineBars: baselineResult.bars,
     selected: selectArm(reports),
     equalWeight: equalWeightBuyAndHold(shared, window),
   };
@@ -430,12 +444,46 @@ async function main(): Promise<number> {
     console.log('COMMIT IT before opening the sealed window. The validation command will refuse otherwise.');
   }
 
+  /*
+   * THE RAW TRAJECTORY — always written, and never more useful than on a negative outcome.
+   *
+   * "No band is deliverable" is a claim like any other, and the only way to disagree with it
+   * is to look at what produced it. So the artefact carries the three arms, the three
+   * witnesses they were judged against, and the deterministic baseline — the exact runs
+   * behind every number in the summary. Nothing is replayed to build it: these bars are the
+   * ones the selection already computed.
+   *
+   * CALIBRATION ONLY. Every trajectory here comes from CALIBRATION_WINDOW. The sealed window
+   * contributes nothing, on a passing run or a failing one.
+   */
   written.push(
     writeArtefact(outDir, 'trajectory.json', {
       kind: 'raw-trajectory',
-      note: 'the full per-bar trajectory of every configuration pre-registered for validation',
-      configurations: frozen.map((f) => ({
+      window: {
+        from: new Date(CALIBRATION_WINDOW.fromMs).toISOString(),
+        to_exclusive: new Date(CALIBRATION_WINDOW.toMs).toISOString(),
+      },
+      note: 'calibration only — the sealed out-of-sample window contributes nothing to this file',
+      deterministic_baseline: {
+        target_percent: BASELINE_TARGET_PERCENT,
+        bars: outcome.baselineBars,
+      },
+      arms: outcome.reports.map((r) => ({
+        name: r.name,
+        bands: r.bands,
+        eligible: r.eligibility.eligible,
+        bars: r.bars,
+      })),
+      witnesses: outcome.reports.map((r) => ({
+        arm: r.name,
+        constant_target_percent: r.witness.targetPercent,
+        bars: r.witnessBars,
+      })),
+      // Present only when an arm qualified; empty on the pre-written negative outcome.
+      validable_configurations: frozen.map((f) => ({
         name: f.configuration.name,
+        rsi: f.configuration.rsi,
+        freeze: f.configuration.freeze,
         bars: runPolicy(
           shared,
           { kind: 'band', bands: f.configuration.bands, rsiBrake: f.configuration.rsi, freeze: f.configuration.freeze },
@@ -444,7 +492,6 @@ async function main(): Promise<number> {
       })),
     }),
   );
-
   written.push(
     writeArtefact(outDir, 'summary.json', {
       kind: 'arm-selection',
@@ -503,6 +550,10 @@ async function main(): Promise<number> {
       })),
       limit:
         'the three arms differ on all three states at once; a winning arm does not identify which band carried the result',
+      // The nuance travels WITH the number, not only in the README. A reader pulling this
+      // file into a notebook a year from now gets the caveat attached to the finding.
+      stop_finding_scope:
+        'on this window the production peak stop (full, floor-exempt exit) costs return AND worsens drawdown — but what is measured is that stop COMBINED WITH THE PROXY ALLOCATOR AND ITS RE-ENTRIES. The full bot re-enters through the model, which may refuse to buy back what the stop just sold. Nothing here establishes the same cost for the full bot; that needs the production observation mode.',
     }),
   );
 
