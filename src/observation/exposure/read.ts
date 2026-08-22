@@ -54,6 +54,12 @@ const DECISION_COLUMNS =
 export interface ObservationRowRead {
   id: number;
   decision_id: number;
+  /**
+   * When the verdict was WRITTEN, which is not when its bar closed and not when its cycle
+   * started. Selected because a cycle is not atomic: a decision row can land just before the
+   * cutoff and its verdicts just after it, and without this column that leak is invisible.
+   */
+  created_at: string;
   asset: string;
   bar_at: string | null;
   actionable: boolean;
@@ -84,7 +90,7 @@ export interface ObservationRowRead {
 }
 
 const OBSERVATION_COLUMNS =
-  'id, decision_id, asset, bar_at, actionable, confirmed_regime, raw_regime, run_length, label_run, ' +
+  'id, decision_id, created_at, asset, bar_at, actionable, confirmed_regime, raw_regime, run_length, label_run, ' +
   'risk_off, stop_armed, stop_would_fire, stop_threshold_percent, peak_price, price, ' +
   'drawdown_from_peak_percent, stop_abstained_reason, gate, gate_reason, order_side, order_notional, ' +
   'order_verdict, order_reason, leg_side, leg_notional, leg_verdict, leg_reason, atomic_refusal, ' +

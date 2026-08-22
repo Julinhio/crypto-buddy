@@ -169,10 +169,24 @@ paramètre caché de chaque chiffre publié.
 npm run observe:exposure -- --from 2026-08-12T00:00:00Z --cutoff 2026-08-22T03:15:50Z
 ```
 
+Les deux bornes doivent porter un **fuseau explicite** (`Z` ou un offset). Sans lui,
+`Date.parse` les lit dans le fuseau de la machine : la même ligne de commande sélectionnerait
+une population différente ailleurs, et l'artefact renormaliserait la borne en `Z` en sortie —
+la divergence ne laisserait donc aucune trace dans le fichier qu'elle a changé.
+
 Le cutoff doit être **stabilisé** : au moins un TTL de run-lock dans le passé. `decide()`
 insère la décision AVANT de placer les ordres et de journaliser les verdicts, donc un cutoff
 tombant au milieu de cette séquence capturerait un cycle sans mouvements ni verdicts — et le
 même cutoff rejoué une heure plus tard produirait un fichier différent. Le run refuse.
+
+Ce délai garantit qu'un cycle commencé avant le cutoff est **terminé au moment de la
+lecture** ; il ne garantit pas qu'il s'est terminé **avant le cutoff**. Un cycle à cheval —
+décision avant, verdicts ou mouvements après — est donc détecté séparément par
+`every_cycle_settled_before_the_cutoff`, qui fait échouer le run. Le cycle est conservé
+**entier** plutôt que tronqué : borner les tables filles sur leur propre `created_at`
+amputerait ce cycle, qui se lirait alors comme un réveil n'ayant rien réservé — un fait
+fabriqué, en silence. Le remède est d'un seul drapeau : reculer le cutoff au-delà de la fin
+de ce réveil.
 
 Preuve de déterminisme, deux exécutions sur le même cutoff :
 
@@ -209,6 +223,7 @@ et un livre réels, régénérables à tout instant depuis le même cutoff.
 | les cycles en échec ne sont pas éliminés | `failed_cycles_are_preserved` |
 | une bougie compte une fois | `bars_partition_the_cycles` + la preuve 7 |
 | un épisode de stop n'est pas un compte de lignes | `stop_episodes_cover_every_fired_verdict` + la preuve 9 |
+| aucun cycle ne chevauche le cutoff | `every_cycle_settled_before_the_cutoff` |
 | rien ne dépasse le cutoff | `no_instant_at_or_after_the_cutoff` |
 
 Les douze contrôles tournent à chaque run, sont écrits dans `summary.json`, et un seul en échec

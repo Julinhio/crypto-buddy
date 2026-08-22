@@ -87,6 +87,15 @@ export interface StopView {
 
 export interface TransitionVerdictView {
   asset: string;
+  /**
+   * When the verdict was WRITTEN — not the bar it was computed on, and not the wake-up time.
+   *
+   * Published because a cycle is not atomic: `decide()` inserts the decision, THEN places the
+   * orders, THEN journals these verdicts. A cutoff landing between the two would pull a
+   * post-cutoff fact into the snapshot, and without this field in the payload the cutoff scan
+   * would have nothing to catch it with.
+   */
+  written_at: string | null;
   bar_at: string | null;
   actionable: boolean;
   gate: string;
@@ -107,6 +116,8 @@ export interface MovementFact {
   asset: string;
   symbol: string;
   side: string;
+  /** When the sovereign intent was written. Same reason as `written_at` on a verdict. */
+  booked_at: string | null;
   /** The sovereign intent was booked into the ledger — the movement really RESERVED. */
   booked: boolean;
   validation_status: string | null;
@@ -120,6 +131,7 @@ export interface MovementFact {
   gross_notional_quote: number | null;
   /** The venue trace: what the exchange did with it. Null when no trace was journaled. */
   venue: {
+    traced_at: string | null;
     execution_outcome: string | null;
     executed_qty: number | null;
     exchange_avg_price: number | null;
@@ -261,6 +273,7 @@ function verdictView(row: ObservationRowRead): TransitionVerdictView {
   const hasOrder = row.order_verdict != null || row.order_side != null;
   return {
     asset: row.asset,
+    written_at: canonicalInstant(row.created_at),
     bar_at: canonicalInstant(row.bar_at),
     actionable: row.actionable,
     gate: row.gate,
@@ -330,6 +343,7 @@ export function movementsOf(rows: readonly ExecutionRowRead[]): MovementFact[] {
         asset: baseAssetOf(intent.symbol),
         symbol: intent.symbol,
         side: intent.side,
+        booked_at: canonicalInstant(intent.created_at),
         booked: intent.validation_status === 'executed',
         validation_status: intent.validation_status,
         validation_reason: intent.validation_reason,
@@ -342,6 +356,7 @@ export function movementsOf(rows: readonly ExecutionRowRead[]): MovementFact[] {
           qty == null || price == null ? null : round(new Decimal(qty).times(price).abs(), PERCENT_DP),
         venue: trace
           ? {
+              traced_at: canonicalInstant(trace.created_at),
               execution_outcome: trace.execution_outcome,
               executed_qty: numberOrNull(trace.executed_qty),
               exchange_avg_price: numberOrNull(trace.exchange_avg_price),

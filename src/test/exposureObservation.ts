@@ -143,6 +143,8 @@ interface VerdictFixture {
   wouldFire?: boolean;
   armed?: boolean;
   drawdown?: number | null;
+  /** When the verdict was WRITTEN — the column that makes a straddling cutoff visible. */
+  writtenAt?: string;
 }
 
 function observationRow(f: VerdictFixture): ObservationRowRead {
@@ -151,6 +153,7 @@ function observationRow(f: VerdictFixture): ObservationRowRead {
   return {
     id: observationId,
     decision_id: f.decisionId,
+    created_at: f.writtenAt ?? '2026-08-12T00:00:30.000Z',
     asset: f.asset,
     bar_at: f.barAt,
     actionable: !wouldFire,
@@ -182,12 +185,19 @@ function observationRow(f: VerdictFixture): ObservationRowRead {
 }
 
 let executionId = 0;
-function intentRow(decisionId: number, symbol: string, side: 'buy' | 'sell', qty: number, price = 100): ExecutionRowRead {
+function intentRow(
+  decisionId: number,
+  symbol: string,
+  side: 'buy' | 'sell',
+  qty: number,
+  price = 100,
+  createdAt = '2026-08-12T00:00:30.000Z',
+): ExecutionRowRead {
   executionId += 1;
   return {
     id: executionId,
     decision_id: decisionId,
-    created_at: '2026-08-12T00:00:00.000Z',
+    created_at: createdAt,
     symbol,
     side,
     event_type: 'intent',
@@ -526,8 +536,17 @@ console.log('Proof 11 — the cutoff is explicit, settled, and never defaulted:'
   );
   ok('a cutoff too recent to be settled is refused — a cycle may still be writing', true);
 
+  assert.throws(
+    () => parseWindow(['--from', '2026-08-12T00:00:00', '--cutoff', '2026-08-20T00:00:00Z'], now),
+    WindowError,
+  );
+  ok('a bound with no timezone is refused — it would be read in the host timezone', true);
+
   const w = parseWindow(['--from', '2026-08-12T00:00:00Z', '--cutoff', '2026-08-22T00:00:00Z'], now);
   ok('a settled window parses', w.from === '2026-08-12T00:00:00.000Z' && w.toExclusive === '2026-08-22T00:00:00.000Z');
+
+  const offset = parseWindow(['--from', '2026-08-12T07:00:00+07:00', '--cutoff', '2026-08-20T00:00:00Z'], now);
+  ok('an explicit offset is accepted, and normalised to UTC', offset.from === '2026-08-12T00:00:00.000Z');
 }
 
 // ── PROOF 12 — nothing in the payload reaches past the cutoff ────────────────────────
@@ -613,6 +632,14 @@ console.log('Proof 14 — an absent regime is a fact, a malformed one is a defec
   const malformed = contextOf({ version: 'r1', barAt: '2026-08-12T00:00:00.000Z', global: { riskOff: false }, assets: { BTC: { regime: 'sideways', raw: 'range', signals: {} } } }, UNIVERSE);
   ok('an unknown regime label is a malformed journal, not a missing one', !malformed.ok && malformed.reason === 'malformed_regime_journal');
 
+  // A string `barAt` nobody can parse used to escape the guard and abort the whole run, taking
+  // the failed check that reports it down with the snapshot.
+  const badBar = contextOf(
+    { version: 'r1', barAt: 'the-eleventh-of-never', global: { riskOff: false }, assets: {} },
+    UNIVERSE,
+  );
+  ok('an unparsable barAt is a malformed journal, not a crash', !badBar.ok && badBar.reason === 'malformed_regime_journal');
+
   const partial = contextOf(journalOf('2026-08-12T00:00:00.000Z', { BTC: 'trend_up', ETH: 'trend_up' }), UNIVERSE);
   ok('a universe asset with no point is counted unavailable, never guessed', partial.ok && partial.context.unavailable === 2);
   ok('and the breadth denominator stays the configured universe', partial.ok && partial.context.net_breadth === 0.5);
@@ -687,6 +714,36 @@ console.log('Proof 15 — the integrity checks are falsifiable:');
     UNIVERSE,
   );
   ok('a decided cycle missing an exposure fails its check', !named(incomplete, 'decided_cycles_carry_both_exposures').ok);
+
+  // THE STRADDLING CYCLE. The decision lands 10 s before the cutoff; its verdicts and its
+  // movement are written after it, because a wake-up is not atomic. Fetched by `decision_id`,
+  // those post-cutoff facts would otherwise ride in with nothing able to see them.
+  const straddle = buildSnapshot(
+    {
+      decisions: [decisionRow({ id: 805, at: '2026-08-12T23:59:50.000Z', barAt: '2026-08-12T20:00:00.000Z' })],
+      observations: UNIVERSE.map((asset) =>
+        observationRow({
+          decisionId: 805,
+          asset,
+          barAt: '2026-08-12T20:00:00.000Z',
+          writtenAt: '2026-08-13T00:00:05.000Z',
+        }),
+      ),
+      executions: [intentRow(805, 'BTC/USDT', 'buy', 0.001, 100, '2026-08-13T00:00:02.000Z')],
+    },
+    window,
+    UNIVERSE,
+  );
+  ok(
+    'a cycle straddling the cutoff fails its own check',
+    !named(straddle, 'every_cycle_settled_before_the_cutoff').ok,
+  );
+  ok('and the generic scan sees it too, now that the write instants are published', !named(straddle, 'no_instant_at_or_after_the_cutoff').ok);
+  ok(
+    'the cycle is kept WHOLE rather than amputated — a truncated one would read as booking nothing',
+    straddle.cycles.cycles[0]!.transition.verdicts.length === UNIVERSE.length &&
+      straddle.cycles.cycles[0]!.movements.length === 1,
+  );
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────────────

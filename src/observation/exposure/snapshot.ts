@@ -367,6 +367,40 @@ function runChecks(
     ),
   );
 
+  /**
+   * A CYCLE IS NOT ATOMIC, AND THE CUTOFF CAN LAND INSIDE ONE.
+   *
+   * `decide()` inserts the decision row FIRST, then places the orders, then journals the
+   * transition verdicts. A decision written a second before the cutoff can therefore carry
+   * verdicts and movements written after it — and the child tables are fetched by
+   * `decision_id`, so those post-cutoff facts would ride in unnoticed.
+   *
+   * Bounding the child rows by their own `created_at` would be worse: it would AMPUTATE the
+   * straddling cycle, which would then read as a wake-up that booked nothing — a fabricated
+   * fact, silently. So the cycle is kept whole and the run refuses instead. The remedy is one
+   * flag: move the cutoff back past the end of that wake-up.
+   */
+  const straddling = cycles
+    .map((cycle) => ({
+      decision_id: cycle.decision_id,
+      late: [
+        ...cycle.transition.verdicts.map((verdict) => verdict.written_at),
+        ...cycle.movements.flatMap((movement) => [movement.booked_at, movement.venue?.traced_at ?? null]),
+      ].filter((at): at is string => at != null && Date.parse(at) >= window.toMs),
+    }))
+    .filter((entry) => entry.late.length > 0);
+  checks.push(
+    check(
+      'every_cycle_settled_before_the_cutoff',
+      straddling.length === 0,
+      straddling.length === 0
+        ? 'no verdict and no movement was written at or after the cutoff — no cycle straddles it'
+        : `${straddling.length} cycle(s) straddle the cutoff (${ids(straddling)}): the decision landed ` +
+          'before it and a verdict or a movement after it. A cycle is not atomic — move the cutoff ' +
+          'back past the end of that wake-up rather than keeping a half-observed one.',
+    ),
+  );
+
   const late = [
     ...instantsAtOrAfter(cyclesArtefact, window.toMs),
     ...instantsAtOrAfter(summaryBase, window.toMs),

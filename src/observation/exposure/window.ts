@@ -56,7 +56,24 @@ function flag(argv: readonly string[], name: string): string | null {
   return value;
 }
 
+/**
+ * AN EXPLICIT ZONE IS REQUIRED, and that is a reproducibility rule rather than pedantry.
+ *
+ * `Date.parse('2026-08-12T00:00:00')` — no `Z`, no offset — resolves in the HOST's local
+ * timezone. The identical command line would then select a different population on a laptop in
+ * Bangkok and on a runner in UTC, and the artefact normalises the bound back to `Z` on its way
+ * out — so the divergence would leave no trace in the very file it changed.
+ */
+const ISO_WITH_ZONE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/;
+
 function parseInstant(label: string, raw: string): number {
+  if (!ISO_WITH_ZONE.test(raw)) {
+    throw new WindowError(
+      `${label}="${raw}" carries no explicit timezone — expected ISO-8601 with a "Z" or an offset ` +
+        '(e.g. 2026-08-12T00:00:00Z). Without one the bound is read in the host timezone, and the ' +
+        'same command would select a different window on another machine.',
+    );
+  }
   const ms = Date.parse(raw);
   if (!Number.isFinite(ms)) {
     throw new WindowError(`${label}="${raw}" is not a parsable instant — expected ISO-8601 UTC`);

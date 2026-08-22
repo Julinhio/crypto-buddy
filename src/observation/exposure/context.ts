@@ -170,7 +170,13 @@ export function parseRegimeJournal(raw: unknown): RegimeJournal | null {
   if (!isRecord(raw)) throw new Error('regime is not an object');
   const { version, barAt, global, assets } = raw;
   if (typeof version !== 'string') throw new Error('regime.version is not a string');
+  // PARSABILITY, not just type. A string `barAt` nobody can parse is exactly as unusable as a
+  // missing one, and the difference matters here: validated below, it is caught by the caller
+  // and classified as a malformed journal; validated only in `regimePointFromJournal`, it would
+  // throw OUTSIDE that guard and abort the whole run without producing the snapshot — or the
+  // failed check that exists to report it.
   if (typeof barAt !== 'string') throw new Error('regime.barAt is not a string');
+  if (!Number.isFinite(Date.parse(barAt))) throw new Error(`regime.barAt is not a parsable instant ("${barAt}")`);
   if (!isRecord(global)) throw new Error('regime.global is not an object');
   if (typeof global.riskOff !== 'boolean') throw new Error('regime.global.riskOff is not a boolean');
   if (!isRecord(assets)) throw new Error('regime.assets is not an object');
