@@ -93,6 +93,22 @@ export interface StopEpisode {
   /** The run ended because a cycle produced no verdict for this asset, not because it healed. */
   broken_by_missing_verdict: boolean;
   /**
+   * THE EPISODE TOUCHES A WINDOW EDGE, so its boundary is censored rather than observed.
+   *
+   * `truncated_at_window_start` means no in-window cycle was ever seen NOT firing on this asset
+   * before the run — the stop may well have been firing before `--from`, and this is a
+   * CONTINUATION rather than a beginning. Two adjacent snapshots would otherwise count one
+   * physical episode twice, each convinced it had watched it start.
+   *
+   * `truncated_at_window_end` means the run was still open at the cutoff: the episode has not
+   * been seen to end, so its duration is a lower bound and its `re_entry` is necessarily null.
+   *
+   * The boundary is PUBLISHED, never guessed at: reading the verdict before `--from` would pull
+   * a fact from outside the declared window into a snapshot whose whole contract is that window.
+   */
+  truncated_at_window_start: boolean;
+  truncated_at_window_end: boolean;
+  /**
    * The first BOOKED BUY on this asset in a cycle strictly after the episode. Null when none
    * was observed before the cutoff — which is a result, not a gap, and is never censored.
    *
@@ -165,10 +181,18 @@ export function buildStopFacts(cycles: readonly CycleObservation[]): StopFacts {
   const episodes: StopEpisode[] = [];
   for (const asset of observedAssets(ordered)) {
     let run: CycleObservation[] = [];
+    // Has this asset already been SEEN not firing inside the window? Until it has, a run that is
+    // open cannot be known to have begun here — it may have been running before `--from`.
+    let seenNotFiring = false;
 
-    const close = (endIndex: number, gap: boolean): void => {
+    const close = (endIndex: number, gap: boolean, atWindowEnd: boolean): void => {
       if (run.length === 0) return;
-      episodes.push(buildEpisode(asset, run, ordered, endIndex, gap));
+      episodes.push(
+        buildEpisode(asset, run, ordered, endIndex, gap, {
+          atWindowStart: !seenNotFiring,
+          atWindowEnd,
+        }),
+      );
       run = [];
     };
 
@@ -178,16 +202,19 @@ export function buildStopFacts(cycles: readonly CycleObservation[]): StopFacts {
       if (verdict == null) {
         // No verdict on this asset this cycle: the run cannot continue through what nobody
         // observed, and it did not "stop firing" either. Break, and say which it was.
-        close(i, true);
+        close(i, true, false);
         continue;
       }
       if (verdict.stop.would_fire) {
         run.push(cycle);
         continue;
       }
-      close(i, false);
+      close(i, false, false);
+      // The stop is observed NOT firing on this asset. Every later run provably begins inside
+      // the window.
+      seenNotFiring = true;
     }
-    close(ordered.length, false);
+    close(ordered.length, false, true);
   }
 
   episodes.sort((a, b) =>
@@ -214,6 +241,7 @@ function buildEpisode(
   ordered: readonly CycleObservation[],
   endIndex: number,
   brokenByGap: boolean,
+  boundary: { atWindowStart: boolean; atWindowEnd: boolean },
 ): StopEpisode {
   const first = run[0]!;
   const last = run[run.length - 1]!;
@@ -279,6 +307,8 @@ function buildEpisode(
           : 'no_sell_booked: the episode had decided cycles and none of them booked a sell on this asset',
     exit,
     broken_by_missing_verdict: brokenByGap,
+    truncated_at_window_start: boundary.atWindowStart,
+    truncated_at_window_end: boundary.atWindowEnd,
     re_entry: reEntry,
     cycles_after_episode_in_window: after.length,
   };

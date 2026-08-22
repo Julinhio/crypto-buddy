@@ -312,7 +312,11 @@ console.log('Proof 3 — the observer imports no band and writes nothing:');
     queryFiles.length === 1 && path.basename(queryFiles[0]!) === 'read.ts',
   );
 
-  const writeCalls = /\.(insert|upsert|delete|rpc)\s*\(/;
+  // `update` is IN the list. It was dropped once because `createHash(...).update(...)` matched —
+  // but that call lives in `provenance/`, and this regex is scoped to the observer's own files,
+  // which contain no such thing. Leaving it out meant a future `.update(...)` added to the
+  // already-authorised `read.ts` would pass both halves of this proof.
+  const writeCalls = /\.(insert|upsert|update|delete|rpc)\s*\(/;
   const observerFiles = sourceFiles(path.join(ROOT, 'src/observation'));
   const writers = observerFiles.filter((file) => writeCalls.test(readFileSync(file, 'utf8')));
   ok(
@@ -607,6 +611,42 @@ console.log('Proof 9 — a stop that stays fired for twenty wake-ups is ONE epis
   ok('no re-entry was observed', facts.episodes[0]!.re_entry === null);
   ok('and the honest denominator travels with it', facts.episodes[0]!.cycles_after_episode_in_window === 4);
   ok('armed and not fired is counted apart', facts.armed_not_fired_verdicts === facts.armed_verdicts - facts.would_fire_verdicts);
+  ok(
+    'the first episode began at the window edge and is flagged as a possible continuation',
+    facts.episodes[0]!.truncated_at_window_start && !facts.episodes[0]!.truncated_at_window_end,
+  );
+  ok(
+    'the second provably began inside the window — the stop was seen not firing before it',
+    !facts.episodes[1]!.truncated_at_window_start,
+  );
+
+  // THE OTHER EDGE. A run still open at the cutoff has not been seen to end: its duration is a
+  // lower bound and its re-entry is necessarily null, so the boundary is published rather than
+  // read as an episode that simply never resolved.
+  const stillOpen = buildStopFacts(
+    buildCycles(
+      {
+        decisions: [
+          decisionRow({ id: 550, at: '2026-08-12T00:10:00.000Z', barAt: '2026-08-12T00:00:00.000Z' }),
+          decisionRow({ id: 551, at: '2026-08-12T04:10:00.000Z', barAt: '2026-08-12T04:00:00.000Z' }),
+        ],
+        observations: UNIVERSE.flatMap((asset) => [
+          observationRow({ decisionId: 550, asset, barAt: '2026-08-12T00:00:00.000Z' }),
+          observationRow({ decisionId: 551, asset, barAt: '2026-08-12T04:00:00.000Z', wouldFire: asset === 'BTC' }),
+        ]),
+        executions: [],
+      },
+      OPTIONS,
+    ),
+  );
+  ok(
+    'a run still open at the cutoff is flagged at the end and not at the start',
+    stillOpen.episodes[0]!.truncated_at_window_end && !stillOpen.episodes[0]!.truncated_at_window_start,
+  );
+  ok(
+    '…and it carries no re-entry, with a zero denominator saying why',
+    stillOpen.episodes[0]!.re_entry === null && stillOpen.episodes[0]!.cycles_after_episode_in_window === 0,
+  );
 }
 
 // ── PROOF 10 — an exit that booked, and a re-entry that is a REAL order ──────────────

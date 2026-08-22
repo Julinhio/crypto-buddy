@@ -134,6 +134,15 @@ rien ne sort, le pic n'est jamais réinitialisé et la ligne reste sous son seui
 peut donc être vrai sur des dizaines de réveils consécutifs pour ce que le contrat compte comme
 **une seule** sortie. Un épisode est une suite maximale de cycles consécutifs, par actif.
 
+**Un épisode qui touche une borne de fenêtre le dit.** `truncated_at_window_start` signale
+qu'aucun cycle de la fenêtre n'a jamais vu le stop NE PAS tirer sur cet actif avant la suite :
+il tirait peut-être déjà avant `--from`, donc c'est une continuation et non un début. Sans ce
+drapeau, deux snapshots voisins compteraient deux fois un seul épisode physique, chacun
+convaincu de l'avoir vu commencer. `truncated_at_window_end` signale une suite encore ouverte
+au cutoff : sa durée est une borne inférieure et sa réentrée est nécessairement nulle. La
+borne est **publiée**, jamais devinée — lire le verdict antérieur à `--from` ferait entrer
+dans le snapshot un fait extérieur à la fenêtre dont il tire tout son contrat.
+
 Un cycle qui n'a produit **aucun verdict** sur cet actif ne prolonge pas la suite : il la
 coupe, et l'épisode le dit (`broken_by_missing_verdict`). Ponter le trou affirmerait une
 continuité que personne n'a observée ; le traiter comme une guérison affirmerait l'inverse.
