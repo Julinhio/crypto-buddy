@@ -50,7 +50,29 @@ export function parseZonedInstant(raw: string): number | null {
 }
 
 /**
+ * A WINDOW BOUND — stricter than a journal instant, because it decides which rows are read.
+ *
+ * `Date.parse` silently truncates anything finer than a millisecond, and `timestamptz` carries
+ * microseconds: a bound typed as `…:00.123456Z` would reach PostgREST as `…:00.123Z`, select a
+ * different half-open window than the one asked for, and be recorded in the manifest only in its
+ * altered form. The typo — or the deliberate microsecond bracket — would be invisible in the very
+ * file it moved. So sub-millisecond precision is REFUSED rather than quietly dropped.
+ *
+ * Journal instants keep the permissive parser above: they are read, not typed, and the database
+ * renders them with six fractional digits on every row.
+ */
+export function parseWindowBound(raw: string): number | null {
+  const fraction = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}\.(\d+))?/.exec(raw)?.[1];
+  if (fraction != null && fraction.length > 3) return null;
+  return parseZonedInstant(raw);
+}
+
+/**
  * Normalises a stored instant so two spellings of the same bar compare equal.
+ *
+ * Millisecond precision, which is all `Date` represents. That is a display normalisation of a
+ * value nothing selects on — rows are selected by PostgREST on the raw column, and joined back
+ * by `decision_id` — never a bound.
  *
  * Null on anything without an explicit zone, which is what makes a bar key comparable across
  * machines. A value the database renders without an offset would surface as a missing bar and

@@ -564,6 +564,21 @@ export function buildCycle(
     .slice()
     .sort((a, b) => (a.asset < b.asset ? -1 : a.asset > b.asset ? 1 : 0));
 
+  const book = bookView(decision.market_context);
+  /**
+   * THE RESERVE THIS CYCLE'S BOOK ACTUALLY NAMED, plus the configured ones.
+   *
+   * Reading today's quote asset into a historical allocation would treat the cash key of the
+   * time as an ordinary coin and add it straight to `exposure_percent` — silently, since
+   * `unknown_assets` is published and never rejected. Every cycle journals its own
+   * `reserveAsset`; the union keeps a retired cash key and a current one both out of the
+   * exposure, and it costs nothing while the two lists agree, which is every cycle so far.
+   */
+  const reserves =
+    book.reserve_asset == null || options.reserves.includes(book.reserve_asset)
+      ? options.reserves
+      : [...options.reserves, book.reserve_asset].sort();
+
   const atomic = sorted.find((row) => row.atomic_refusal != null) ?? null;
 
   return {
@@ -577,16 +592,16 @@ export function buildCycle(
     bar: resolveBar(context, sorted),
     context,
     context_unavailable: result.ok ? null : { reason: result.reason, detail: result.detail },
-    book: bookView(decision.market_context),
+    book,
     model_decision: {
       action_type: decision.action_type,
       confidence: decision.confidence,
       clamped: decision.clamped,
       clamp_reason: decision.clamp_reason,
       applied_divergence_cause: decision.applied_divergence_cause,
-      raw_target: allocationView(decision.target_allocation, options.universe, options.reserves),
-      applied_target: allocationView(decision.applied_allocation, options.universe, options.reserves),
-      intent_target: allocationView(decision.intent_allocation, options.universe, options.reserves),
+      raw_target: allocationView(decision.target_allocation, options.universe, reserves),
+      applied_target: allocationView(decision.applied_allocation, options.universe, reserves),
+      intent_target: allocationView(decision.intent_allocation, options.universe, reserves),
     },
     transition: {
       verdicts: sorted.map(verdictView),

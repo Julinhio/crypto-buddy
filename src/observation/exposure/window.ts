@@ -1,7 +1,7 @@
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { config } from '../../config/index.js';
-import { parseZonedInstant } from './instants.js';
+import { parseWindowBound } from './instants.js';
 
 /**
  * THE WINDOW — half-open `[from, cutoff)`, both bounds EXPLICIT, neither defaulted.
@@ -69,12 +69,13 @@ function flag(argv: readonly string[], name: string): string | null {
  * reader, so the CLI and the stored `barAt` cannot drift apart on it.
  */
 function parseInstant(label: string, raw: string): number {
-  const ms = parseZonedInstant(raw);
+  const ms = parseWindowBound(raw);
   if (ms == null) {
     throw new WindowError(
       `${label}="${raw}" is not an ISO-8601 instant with an explicit timezone (e.g. ` +
-        '2026-08-12T00:00:00Z, or an offset). Without a zone the bound is read in the host ' +
-        'timezone, and the same command would select a different window on another machine.',
+        '2026-08-12T00:00:00Z, or an offset), and no finer than a millisecond. Without a zone the ' +
+        'bound is read in the host timezone, and the same command would select a different window ' +
+        'on another machine; below a millisecond it would be truncated and select a different one here.',
     );
   }
   return ms;

@@ -15,7 +15,7 @@ import { buildSnapshot, instantsAtOrAfter } from '../observation/exposure/snapsh
 import { DEFAULT_OUT_DIR, parseOutDir, parseWindow, WindowError, type ObservationWindow } from '../observation/exposure/window.js';
 import { readWindow, ReadError } from '../observation/exposure/read.js';
 import type { DecisionRowRead, ExecutionRowRead, ObservationRowRead, RawWindow } from '../observation/exposure/read.js';
-import { canonicalInstant, parseZonedInstant } from '../observation/exposure/instants.js';
+import { canonicalInstant, parseWindowBound, parseZonedInstant } from '../observation/exposure/instants.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 /**
@@ -521,6 +521,32 @@ console.log('Proof 6 — the exposure is Σ non-reserve, and a malformed total s
     coerced.unreadable_assets.join(',') === 'BNB,BTC,ETH,XRP',
   );
   ok('a numeric string is still a number — PostgREST renders `numeric` as one', coerced.reserve_percent === 70);
+
+  // THE RESERVE IS THE ONE THE CYCLE'S OWN BOOK NAMED. Reading today's quote asset into a
+  // historical allocation would treat the cash key of the time as an ordinary coin and add it
+  // straight to the exposure — silently, since `unknown_assets` is published and never rejected.
+  const legacyQuote = decisionRow({
+    id: 20,
+    at: '2026-08-12T00:10:00.000Z',
+    barAt: '2026-08-12T00:00:00.000Z',
+    target: { BTC: 10, ETH: 5, BNB: 0, XRP: 0, BUSD: 85 } as unknown as Record<string, number>,
+  });
+  (legacyQuote.market_context as { account: { portfolio: Record<string, unknown> } }).account.portfolio.reserveAsset =
+    'BUSD';
+  const legacyCycle = buildCycles({ decisions: [legacyQuote], observations: [], executions: [] }, OPTIONS)[0]!;
+  ok(
+    'a retired cash key is read as the reserve its own book named, not as exposure',
+    legacyCycle.model_decision.raw_target!.exposure_percent === 15 &&
+      legacyCycle.model_decision.raw_target!.reserve_percent === 85,
+  );
+  ok('and it is not reported as an unknown asset', legacyCycle.model_decision.raw_target!.unknown_assets.length === 0);
+  ok(
+    'while a book naming the configured reserve is unchanged',
+    buildCycles(
+      { decisions: [decisionRow({ id: 21, at: '2026-08-12T00:20:00.000Z', barAt: '2026-08-12T00:00:00.000Z' })], observations: [], executions: [] },
+      OPTIONS,
+    )[0]!.model_decision.raw_target!.exposure_percent === 15,
+  );
 }
 
 // ── PROOF 7 — the bar synthesis does not over-weight multiple wake-ups ───────────────
@@ -1114,6 +1140,25 @@ console.log('Proof 14 — an absent regime is a fact, a malformed one is a defec
   ok('a leap day that exists is accepted', parseZonedInstant('2028-02-29T00:00:00Z') != null);
   ok('one that does not is refused', parseZonedInstant('2026-02-29T00:00:00Z') === null);
   ok('and the last day of a 31-day month passes', parseZonedInstant('2026-08-31T23:59:59Z') != null);
+
+  // A BOUND IS STRICTER THAN A JOURNAL INSTANT, because it decides which rows are read.
+  // `timestamptz` carries microseconds, and `Date.parse` drops them without a word: the window
+  // sent to PostgREST would not be the one that was typed.
+  ok('a sub-millisecond bound is refused rather than truncated', parseWindowBound('2026-08-12T00:00:00.123456Z') === null);
+  ok('three fractional digits are fine', parseWindowBound('2026-08-12T00:00:00.123Z') === Date.parse('2026-08-12T00:00:00.123Z'));
+  ok(
+    'while a journal instant keeps the permissive parser — the database renders six digits on every row',
+    canonicalInstant('2026-08-22T03:15:49.556954+00:00') === '2026-08-22T03:15:49.556Z',
+  );
+  assert.throws(
+    () =>
+      parseWindow(
+        ['--from', '2026-08-12T00:00:00.123456Z', '--cutoff', '2026-08-20T00:00:00Z'],
+        Date.parse('2026-08-22T12:00:00.000Z'),
+      ),
+    WindowError,
+  );
+  ok('and the CLI refuses it', true);
 
   const partial = contextOf(journalOf('2026-08-12T00:00:00.000Z', { BTC: 'trend_up', ETH: 'trend_up' }), UNIVERSE);
   ok('a universe asset with no point is counted unavailable, never guessed', partial.ok && partial.context.unavailable === 2);

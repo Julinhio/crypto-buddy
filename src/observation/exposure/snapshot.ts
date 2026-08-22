@@ -53,6 +53,14 @@ export interface SnapshotSummary {
     /** The reserve stables. Their weight is the complement of the exposure, never part of it. */
     reserves: string[];
     /**
+     * The reserve assets the BOOKS actually named, cycle by cycle.
+     *
+     * Published beside the configured list because they can disagree: a window predating a change
+     * of quote asset carries the cash key of its time, and an allocation is read against the one
+     * its own book named.
+     */
+    reserves_observed: string[];
+    /**
      * Assets the regime journal carries that the controller does not allocate to — production
      * computes its regime over tradable AND reference pairs. See `context.ts`.
      */
@@ -178,6 +186,7 @@ export function buildSnapshot(raw: RawWindow, window: ObservationWindow, univers
     universe: {
       controller: [...universe],
       reserves: [...options.reserves],
+      reserves_observed: [...new Set(cycles.map((c) => c.book.reserve_asset).filter((v): v is string => v != null))].sort(),
       journal_only: [...journalOnly].sort(),
     },
     population: {
