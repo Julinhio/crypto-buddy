@@ -651,6 +651,27 @@ console.log('Proof 14 — an absent regime is a fact, a malformed one is a defec
     UNIVERSE,
   );
   ok('a barAt with no timezone is refused too', !zoneless.ok && zoneless.reason === 'malformed_regime_journal');
+
+  // EVERY field the cast promises, not only the ones this module reads. A journal missing
+  // `effective` would otherwise be accepted, and `JSON.stringify` would simply omit the key
+  // from the published context while every check stayed green.
+  const complete = journalOf('2026-08-12T00:00:00.000Z', ALL_RANGE);
+  for (const field of ['effective', 'regime', 'raw', 'pendingRegime', 'pendingBars', 'bearish', 'signals']) {
+    const holed = JSON.parse(JSON.stringify(complete)) as { assets: Record<string, Record<string, unknown>> };
+    delete holed.assets.BTC![field];
+    const result = contextOf(holed, UNIVERSE);
+    assert.ok(!result.ok && result.reason === 'malformed_regime_journal', `a journal missing ${field} must be refused`);
+  }
+  ok('a journal missing any asset field is refused, field by field', true);
+
+  const wrongType = JSON.parse(JSON.stringify(complete)) as { assets: Record<string, Record<string, unknown>> };
+  wrongType.assets.BTC!.bearish = 'no';
+  const typed = contextOf(wrongType, UNIVERSE);
+  ok('and so is one whose types drifted', !typed.ok && typed.reason === 'malformed_regime_journal');
+
+  // The live corpus is the counter-check: on 22/08 the tightening rejected none of the 592
+  // journals (2 960 asset entries) the bot has written.
+  ok('while the shape production actually writes is accepted', contextOf(complete, UNIVERSE).ok);
   ok('no instant in this module is ever read in the host timezone', parseZonedInstant('2026-08-12T00:00:00') === null);
   ok('an offset is honoured', canonicalInstant('2026-08-12T07:00:00+07:00') === '2026-08-12T00:00:00.000Z');
   ok('and the offset PostgREST renders is honoured', canonicalInstant('2026-08-12T00:00:00+00:00') === '2026-08-12T00:00:00.000Z');

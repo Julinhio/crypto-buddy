@@ -126,6 +126,9 @@ const REGIMES: ReadonlySet<string> = new Set<AssetRegime>([
   'reversal_down',
 ]);
 
+/** The five directional labels PLUS the posture — the vocabulary of `effective`, and of it alone. */
+const EFFECTIVE_REGIMES: ReadonlySet<string> = new Set([...REGIMES, 'risk_off']);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -192,7 +195,15 @@ export function parseRegimeJournal(raw: unknown): RegimeJournal | null {
   }
   if (!isRecord(global)) throw new Error('regime.global is not an object');
   if (typeof global.riskOff !== 'boolean') throw new Error('regime.global.riskOff is not a boolean');
+  if (typeof global.raw !== 'boolean') throw new Error('regime.global.raw is not a boolean');
   if (!isRecord(assets)) throw new Error('regime.assets is not an object');
+  // EVERY field the cast below promises, not only the ones this module reads.
+  //
+  // The cast turns an untyped jsonb into a `RegimeJournal`, and the type system then believes
+  // it. A journal missing `effective` would sail through, `contextOf` would report success,
+  // `no_malformed_regime_journal` would stay green — and `JSON.stringify` would simply OMIT the
+  // undefined key from the published `context.assets`. A field that vanishes from an artefact
+  // while every check passes is the exact failure mode this brick exists to make impossible.
   for (const [asset, entry] of Object.entries(assets)) {
     if (!isRecord(entry)) throw new Error(`regime.assets.${asset} is not an object`);
     if (typeof entry.regime !== 'string' || !REGIMES.has(entry.regime)) {
@@ -201,6 +212,20 @@ export function parseRegimeJournal(raw: unknown): RegimeJournal | null {
     if (typeof entry.raw !== 'string' || !REGIMES.has(entry.raw)) {
       throw new Error(`regime.assets.${asset}.raw is not a known regime (got ${String(entry.raw)})`);
     }
+    // `risk_off` is admissible here and nowhere else: `effective` is the only field that
+    // carries the portfolio POSTURE alongside the five directional labels.
+    if (typeof entry.effective !== 'string' || !EFFECTIVE_REGIMES.has(entry.effective)) {
+      throw new Error(`regime.assets.${asset}.effective is not a known effective regime (got ${String(entry.effective)})`);
+    }
+    if (
+      !(entry.pendingRegime === null || (typeof entry.pendingRegime === 'string' && REGIMES.has(entry.pendingRegime)))
+    ) {
+      throw new Error(`regime.assets.${asset}.pendingRegime is neither null nor a known regime`);
+    }
+    if (typeof entry.pendingBars !== 'number' || !Number.isFinite(entry.pendingBars)) {
+      throw new Error(`regime.assets.${asset}.pendingBars is not a finite number`);
+    }
+    if (typeof entry.bearish !== 'boolean') throw new Error(`regime.assets.${asset}.bearish is not a boolean`);
     if (!isRecord(entry.signals)) throw new Error(`regime.assets.${asset}.signals is not an object`);
   }
   return raw as unknown as RegimeJournal;
