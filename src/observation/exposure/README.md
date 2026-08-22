@@ -193,7 +193,7 @@ Les deux bornes sont **obligatoires** et jamais défaultées. Une borne par déf
 paramètre caché de chaque chiffre publié.
 
 ```bash
-npm run observe:exposure -- --from 2026-08-12T00:00:00Z --cutoff 2026-08-22T03:15:50Z
+npm run observe:exposure -- -- --from 2026-08-12T00:00:00Z --cutoff 2026-08-22T03:15:50Z
 ```
 
 Les deux bornes doivent porter un **fuseau explicite** (`Z` ou un offset). Sans lui,
@@ -218,8 +218,8 @@ de ce réveil.
 Preuve de déterminisme, deux exécutions sur le même cutoff :
 
 ```bash
-npm run observe:exposure -- --from 2026-08-12T00:00:00Z --cutoff 2026-08-22T03:15:50Z --out out/exposure-observation/run-a
-npm run observe:exposure -- --from 2026-08-12T00:00:00Z --cutoff 2026-08-22T03:15:50Z --out out/exposure-observation/run-b
+npm run observe:exposure -- -- --from 2026-08-12T00:00:00Z --cutoff 2026-08-22T03:15:50Z --out out/exposure-observation/run-a
+npm run observe:exposure -- -- --from 2026-08-12T00:00:00Z --cutoff 2026-08-22T03:15:50Z --out out/exposure-observation/run-b
 diff -r out/exposure-observation/run-a out/exposure-observation/run-b
 ```
 
@@ -279,7 +279,7 @@ et un livre réels, régénérables à tout instant depuis le même cutoff.
 | aucun cycle ne chevauche le cutoff | `every_cycle_settled_before_the_cutoff` |
 | rien ne dépasse le cutoff | `no_instant_at_or_after_the_cutoff` |
 
-Les douze contrôles tournent à chaque run, sont écrits dans `summary.json`, et un seul en échec
+Les seize contrôles tournent à chaque run, sont écrits dans `summary.json`, et un seul en échec
 fait sortir le processus en code non nul. Les artefacts sont quand même écrits — pour être
 inspectés — mais rien ne peut en être cité tant que l'échec n'est pas compris.
 
