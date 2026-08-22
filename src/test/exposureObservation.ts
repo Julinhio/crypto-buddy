@@ -430,6 +430,27 @@ console.log('Proof 5 — a cycle without a valid model response stays in the pop
   ok('…and the check fails', !readable(namelessEntries));
   ok('while a well-formed book passes', readable(bookWith([{ asset: 'ETH', qty: 0.5, price: 100, weightPercent: 5, priceStale: false }])));
 
+  // THE VALUATION METADATA, on the same rule — and `priceStale` is the sharpest of the three.
+  // `=== true` reads a missing or wrongly typed flag as `false`, i.e. as "valued at a LIVE
+  // price", which is the exact opposite of what the field exists to say.
+  const noStaleFlag = bookWith([{ asset: 'ETH', qty: 0.5, price: 100, weightPercent: 5 }]);
+  ok('a missing stale flag is null, never a false', noStaleFlag.cycles.cycles[0]!.book.positions[0]!.price_stale === null);
+  ok('it is named', noStaleFlag.cycles.cycles[0]!.book.unreadable_valuation_assets.join(',') === 'ETH');
+  ok('…and it fails the check rather than presenting a cost basis as live', !readable(noStaleFlag));
+  ok(
+    'a missing price is caught too',
+    !readable(bookWith([{ asset: 'ETH', qty: 0.5, weightPercent: 5, priceStale: false }])),
+  );
+  ok(
+    'and a wrongly typed weight',
+    !readable(bookWith([{ asset: 'ETH', qty: 0.5, price: 100, weightPercent: true, priceStale: false }])),
+  );
+  ok(
+    'a genuinely stale position is still reported as stale',
+    bookWith([{ asset: 'ETH', qty: 0.5, price: 100, weightPercent: 5, priceStale: true }]).cycles.cycles[0]!.book
+      .price_stale_assets.join(',') === 'ETH',
+  );
+
   // THE SUMMARY, ON THE SAME RULE. `exposure_percent` is what every per-bar extremum rests on,
   // and a corrupted `deployedPercent` reaches the artefact as a clean null — indistinguishable
   // from the cycle above that journaled no book at all, which is legitimate and already visible.

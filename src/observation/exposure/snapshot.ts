@@ -385,6 +385,7 @@ function runChecks(
   const unreadableBook = cycles.filter(
     (c) =>
       c.book.unreadable_qty_assets.length > 0 ||
+      c.book.unreadable_valuation_assets.length > 0 ||
       c.book.positions_unreadable ||
       c.book.unreadable_position_entries > 0,
   );
@@ -393,9 +394,11 @@ function runChecks(
       'book_positions_are_readable',
       unreadableBook.length === 0,
       unreadableBook.length === 0
-        ? 'every journaled book is a readable collection of identified positions with finite quantities'
-        : `${unreadableBook.length} cycle(s) whose book could not be fully read (unreadable quantity, ` +
-          `unidentifiable entry, or a positions value that is not a collection): ${ids(unreadableBook)}`,
+        ? 'every journaled book is a readable collection of identified positions, each with a finite ' +
+          'quantity and a readable valuation'
+        : `${unreadableBook.length} cycle(s) whose book could not be fully read (unreadable quantity ` +
+          `or valuation, unidentifiable entry, or a positions value that is not a collection): ` +
+          `${ids(unreadableBook)}`,
     ),
   );
 

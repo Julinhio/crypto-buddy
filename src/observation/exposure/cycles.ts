@@ -84,7 +84,15 @@ export interface BookPosition {
   qty: number | null;
   price: number | null;
   weight_percent: number | null;
-  price_stale: boolean;
+  /**
+   * NULL when the journal's flag is not a boolean.
+   *
+   * `priceStale === true` reads every other value — a missing field, a string, a number — as
+   * `false`, i.e. as "this line is valued at a LIVE price". It is the flag that says the
+   * opposite: that the position is valued at its average cost because no price came back. A
+   * default of `false` on an unreadable flag presents a cost-basis valuation as a live one.
+   */
+  price_stale: boolean | null;
 }
 
 export interface BookView {
@@ -102,6 +110,14 @@ export interface BookView {
   price_stale_assets: string[];
   /** Positions whose journaled quantity is not a finite number. Fails an explicit check. */
   unreadable_qty_assets: string[];
+  /**
+   * Positions whose valuation metadata — `price`, `weightPercent`, `priceStale` — cannot be read.
+   *
+   * Kept apart from the quantity, which is the field a stop episode reasons on. These three
+   * describe how the line was VALUED, and a null published in place of an unreadable one would
+   * make a missing valuation indistinguishable from a measured absence.
+   */
+  unreadable_valuation_assets: string[];
   /**
    * The portfolio carried a `positions` value that is not an array — or none at all.
    *
@@ -325,6 +341,7 @@ export function bookView(marketContext: unknown): BookView {
     positions: [],
     price_stale_assets: [],
     unreadable_qty_assets: [],
+    unreadable_valuation_assets: [],
     // Nothing was CLAIMED here: no portfolio was journaled at all, which `exposure_percent: null`
     // already says. That is a different fact from a portfolio whose positions cannot be read.
     positions_unreadable: false,
@@ -341,6 +358,7 @@ export function bookView(marketContext: unknown): BookView {
   const rawPositions = Array.isArray(portfolio.positions) ? portfolio.positions : [];
   const positions: BookPosition[] = [];
   let unreadableEntries = 0;
+  const unreadableValuation: string[] = [];
   for (const entry of rawPositions) {
     // An entry with no usable asset name cannot be published and cannot be named. It is counted,
     // so that a line lost in parsing never passes for a line the book did not hold.
@@ -348,15 +366,21 @@ export function bookView(marketContext: unknown): BookView {
       unreadableEntries += 1;
       continue;
     }
-    const qty = numberOrNull(entry.qty as number | string | null);
+    const qty = numberOrNull(entry.qty);
+    const price = numberOrNull(entry.price);
+    const weight = numberOrNull(entry.weightPercent);
+    // The FLAG, read as a flag. `=== true` turns a missing or wrongly typed value into
+    // "valued at a live price", which is the opposite of what this field exists to say.
+    const stale = typeof entry.priceStale === 'boolean' ? entry.priceStale : null;
+    if (price == null || weight == null || stale == null) unreadableValuation.push(entry.asset);
     positions.push({
       asset: entry.asset,
       // NULL stays null. `fromNumeric` would map it to ZERO, publishing a real zero-sized
       // position where the book was simply unreadable.
       qty: qty == null ? null : round(new Decimal(qty), QTY_DP),
-      price: numberOrNull(entry.price as number | string | null),
-      weight_percent: numberOrNull(entry.weightPercent as number | string | null),
-      price_stale: entry.priceStale === true,
+      price,
+      weight_percent: weight,
+      price_stale: stale,
     });
   }
   positions.sort((a, b) => (a.asset < b.asset ? -1 : a.asset > b.asset ? 1 : 0));
@@ -380,8 +404,9 @@ export function bookView(marketContext: unknown): BookView {
     cash,
     reserve_asset: reserveAsset,
     positions,
-    price_stale_assets: positions.filter((p) => p.price_stale).map((p) => p.asset),
+    price_stale_assets: positions.filter((p) => p.price_stale === true).map((p) => p.asset),
     unreadable_qty_assets: positions.filter((p) => p.qty == null).map((p) => p.asset),
+    unreadable_valuation_assets: unreadableValuation.slice().sort(),
     positions_unreadable: positionsUnreadable,
     unreadable_position_entries: unreadableEntries,
     unreadable_summary_fields: unreadableSummary,

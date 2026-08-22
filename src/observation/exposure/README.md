@@ -258,6 +258,7 @@ et un livre réels, régénérables à tout instant depuis le même cutoff.
 | une date impossible est refusée, pas normalisée | `2026-02-30` ne devient pas le 2 mars : le calendrier est validé avant que `Date.parse` ne soit cru |
 | une borne n'est jamais tronquée | plus de trois décimales de seconde sont refusées : `timestamptz` porte des microsecondes et `Date.parse` les jette, ce qui sélectionnerait une autre fenêtre que celle demandée |
 | la réserve est celle que le livre du cycle a nommée | une clé de cash retirée n'est jamais comptée en exposition ; `reserves_observed` publie ce que les livres ont réellement nommé |
+| un drapeau de prix périmé illisible n'est pas un « prix vivant » | `priceStale` non booléen vaut `null` et fait échouer le contrôle, au lieu de présenter une valorisation au coût de revient comme une valorisation au prix du marché |
 | le notionnel réservé vient du livre, pas de la demande | `booked_notional_quote` dérive de `ledger_base_delta` ; `requested_notional_quote` reste publié à côté, et c'est le seul qui ait un sens sur un intent rejeté |
 | la stabilité du contexte porte sur le contexte entier | l'empreinte est l'objet publié, pas une poignée d'agrégats où deux dérives opposées s'annulent |
 | aucune bande dans le chemin d'extraction | `arms.ts` est inatteignable depuis `observe.ts` ; aucun appel de fonction de bande ; aucune clé « bande » dans les artefacts |
