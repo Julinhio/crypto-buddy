@@ -103,6 +103,16 @@ export interface BookView {
    * asset name. COUNTED rather than named, precisely because they cannot be named.
    */
   unreadable_position_entries: number;
+  /**
+   * Summary fields the portfolio carries that cannot be read: `deployedPercent`, `equity`,
+   * `cash`, `reserveAsset`.
+   *
+   * `exposure_percent` is the field every per-bar extremum rests on, and a corrupted one becomes
+   * a clean `null` — indistinguishable, to any later reader, from a cycle that journaled no book
+   * at all. That second case is real and legitimate; this one is a defect, and only naming the
+   * field keeps them apart.
+   */
+  unreadable_summary_fields: string[];
 }
 
 export interface StopView {
@@ -291,6 +301,7 @@ export function bookView(marketContext: unknown): BookView {
     // already says. That is a different fact from a portfolio whose positions cannot be read.
     positions_unreadable: false,
     unreadable_position_entries: 0,
+    unreadable_summary_fields: [],
   };
   if (!isRecord(marketContext)) return empty;
   const account = marketContext.account;
@@ -322,16 +333,30 @@ export function bookView(marketContext: unknown): BookView {
   }
   positions.sort((a, b) => (a.asset < b.asset ? -1 : a.asset > b.asset ? 1 : 0));
 
+  const exposure = numberOrNull(portfolio.deployedPercent as number | string | null);
+  const equity = numberOrNull(portfolio.equity as number | string | null);
+  const cash = numberOrNull(portfolio.cash as number | string | null);
+  const reserveAsset = typeof portfolio.reserveAsset === 'string' ? portfolio.reserveAsset : null;
+
+  // The portfolio EXISTS, so each of these was claimed. A null here is therefore a defect, not
+  // the "no book journaled" fact the empty view above carries.
+  const unreadableSummary: string[] = [];
+  if (exposure == null) unreadableSummary.push('deployedPercent');
+  if (equity == null) unreadableSummary.push('equity');
+  if (cash == null) unreadableSummary.push('cash');
+  if (reserveAsset == null) unreadableSummary.push('reserveAsset');
+
   return {
-    exposure_percent: numberOrNull(portfolio.deployedPercent as number | string | null),
-    equity: numberOrNull(portfolio.equity as number | string | null),
-    cash: numberOrNull(portfolio.cash as number | string | null),
-    reserve_asset: typeof portfolio.reserveAsset === 'string' ? portfolio.reserveAsset : null,
+    exposure_percent: exposure,
+    equity,
+    cash,
+    reserve_asset: reserveAsset,
     positions,
     price_stale_assets: positions.filter((p) => p.price_stale).map((p) => p.asset),
     unreadable_qty_assets: positions.filter((p) => p.qty == null).map((p) => p.asset),
     positions_unreadable: positionsUnreadable,
     unreadable_position_entries: unreadableEntries,
+    unreadable_summary_fields: unreadableSummary,
   };
 }
 

@@ -429,6 +429,58 @@ console.log('Proof 5 — a cycle without a valid model response stays in the pop
   ok('the identified one is still published', namelessEntries.cycles.cycles[0]!.book.positions.length === 1);
   ok('…and the check fails', !readable(namelessEntries));
   ok('while a well-formed book passes', readable(bookWith([{ asset: 'ETH', qty: 0.5, price: 100, weightPercent: 5, priceStale: false }])));
+
+  // THE SUMMARY, ON THE SAME RULE. `exposure_percent` is what every per-bar extremum rests on,
+  // and a corrupted `deployedPercent` reaches the artefact as a clean null — indistinguishable
+  // from the cycle above that journaled no book at all, which is legitimate and already visible.
+  const summaryWith = (patch: Record<string, unknown>): ReturnType<typeof buildSnapshot> => {
+    const row = decisionRow({ id: 7, at: '2026-08-12T06:10:00.000Z', barAt: '2026-08-12T04:00:00.000Z' });
+    const portfolio = (row.market_context as { account: { portfolio: Record<string, unknown> } }).account.portfolio;
+    Object.assign(portfolio, patch);
+    return buildSnapshot(
+      { decisions: [row], observations: [], executions: [] },
+      windowOf('2026-08-12T00:00:00.000Z', '2026-08-13T00:00:00.000Z'),
+      UNIVERSE,
+    );
+  };
+  const summaryOk = (snapshot: ReturnType<typeof buildSnapshot>): boolean =>
+    snapshot.summary.checks.find((c) => c.name === 'book_summary_is_readable')!.ok;
+
+  const brokenExposure = summaryWith({ deployedPercent: 'lots' });
+  ok(
+    'a corrupted exposure is named rather than published as a clean null',
+    brokenExposure.cycles.cycles[0]!.book.unreadable_summary_fields.join(',') === 'deployedPercent',
+  );
+  ok('…and it fails the summary check', !summaryOk(brokenExposure));
+  ok('a missing equity is caught too', !summaryOk(summaryWith({ equity: undefined })));
+  ok('and a missing reserve asset', !summaryOk(summaryWith({ reserveAsset: null })));
+  ok('a well-formed summary passes', summaryOk(summaryWith({})));
+
+  // The distinction the whole fix exists for: a cycle with NO portfolio at all claimed nothing,
+  // so it names no unreadable field and passes — its `exposure_percent: null` says it already.
+  const noBook = buildSnapshot(
+    {
+      decisions: [decisionRow({ id: 8, at: '2026-08-12T07:10:00.000Z', barAt: '2026-08-12T04:00:00.000Z', deployed: 15 })],
+      observations: [],
+      executions: [],
+    },
+    windowOf('2026-08-12T00:00:00.000Z', '2026-08-13T00:00:00.000Z'),
+    UNIVERSE,
+  );
+  const stripped = decisionRow({ id: 9, at: '2026-08-12T07:20:00.000Z', barAt: '2026-08-12T04:00:00.000Z' });
+  (stripped.market_context as { account: Record<string, unknown> }).account = {};
+  const noPortfolio = buildSnapshot(
+    { decisions: [stripped], observations: [], executions: [] },
+    windowOf('2026-08-12T00:00:00.000Z', '2026-08-13T00:00:00.000Z'),
+    UNIVERSE,
+  );
+  ok('a journaled book passes both checks', summaryOk(noBook) && readable(noBook));
+  ok(
+    'a cycle that journaled NO book claims nothing, so it names nothing and passes',
+    noPortfolio.cycles.cycles[0]!.book.exposure_percent === null &&
+      noPortfolio.cycles.cycles[0]!.book.unreadable_summary_fields.length === 0 &&
+      summaryOk(noPortfolio),
+  );
 }
 
 // ── PROOF 6 — exposure is the sum of the non-reserve weights ─────────────────────────

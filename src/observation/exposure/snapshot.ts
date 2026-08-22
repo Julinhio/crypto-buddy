@@ -390,6 +390,25 @@ function runChecks(
     ),
   );
 
+  /**
+   * The book's SUMMARY, on the same rule.
+   *
+   * `exposure_percent` is what every per-bar extremum rests on, and a corrupted `deployedPercent`
+   * reaches the artefact as a clean `null` — indistinguishable from a cycle that journaled no
+   * book at all. The second is legitimate and already visible; only naming the field keeps the
+   * first from hiding inside it.
+   */
+  const unreadableSummary = cycles.filter((c) => c.book.unreadable_summary_fields.length > 0);
+  checks.push(
+    check(
+      'book_summary_is_readable',
+      unreadableSummary.length === 0,
+      unreadableSummary.length === 0
+        ? 'every journaled book carries a readable exposure, equity, cash and reserve asset'
+        : `${unreadableSummary.length} cycle(s) whose book summary could not be read: ${ids(unreadableSummary)}`,
+    ),
+  );
+
   const inBars = bars.reduce((sum, bar) => sum + bar.cycles, 0);
   checks.push(
     check(

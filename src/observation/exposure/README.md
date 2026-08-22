@@ -252,6 +252,7 @@ et un livre réels, régénérables à tout instant depuis le même cutoff.
 | aucun poids d'allocation n'est écarté en silence | un poids illisible est nommé et fait échouer `allocations_are_fully_readable`, jamais réduit à une allocation plus petite |
 | aucune quantité de livre illisible ne devient un zéro | elle reste `null`, est nommée, et fait échouer `book_positions_are_readable` |
 | un livre illisible n'est pas un livre vide | une collection de positions absente ou non lisible, et toute entrée sans nom d'actif, sont signalées et comptées plutôt que remplacées par une liste vide |
+| un résumé de livre corrompu n'est pas une mesure absente | une exposition, une équité, un cash ou un actif de réserve illisibles sont nommés et font échouer `book_summary_is_readable` ; un cycle sans livre journalisé, lui, n'a rien affirmé |
 | le notionnel réservé vient du livre, pas de la demande | `booked_notional_quote` dérive de `ledger_base_delta` ; `requested_notional_quote` reste publié à côté, et c'est le seul qui ait un sens sur un intent rejeté |
 | la stabilité du contexte porte sur le contexte entier | l'empreinte est l'objet publié, pas une poignée d'agrégats où deux dérives opposées s'annulent |
 | aucune bande dans le chemin d'extraction | `arms.ts` est inatteignable depuis `observe.ts` ; aucun appel de fonction de bande ; aucune clé « bande » dans les artefacts |
