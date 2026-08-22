@@ -13,11 +13,38 @@
  */
 
 /** ISO-8601 with an EXPLICIT zone: a `Z`, or a `±HH:MM` / `±HHMM` offset. */
-export const ISO_WITH_ZONE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/;
+export const ISO_WITH_ZONE =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/;
 
-/** Milliseconds since the epoch, or null when the string carries no zone or will not parse. */
+/** Days in a month, leap years included. `day 0` of the next month is the last of this one. */
+function daysInMonth(year: number, month: number): number {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+/**
+ * Milliseconds since the epoch, or null when the string carries no zone, will not parse, or
+ * names a date that does not exist.
+ *
+ * THE CALENDAR IS VALIDATED, not normalised. `Date.parse('2026-02-30T00:00:00Z')` does not fail —
+ * it rolls the date forward to 2 March. A typo in a window bound would then select a different
+ * population than the operator typed, and the artefact would record only the normalised date, so
+ * the typo would be invisible in the very file it moved. The month, the day, the hour, the
+ * minute and the second are therefore checked against the real calendar before `Date.parse` is
+ * trusted for the arithmetic.
+ */
 export function parseZonedInstant(raw: string): number | null {
-  if (!ISO_WITH_ZONE.test(raw)) return null;
+  const match = ISO_WITH_ZONE.exec(raw);
+  if (!match) return null;
+  const [, year, month, day, hour, minute, second] = match;
+  const y = Number(year);
+  const mo = Number(month);
+  const d = Number(day);
+  if (mo < 1 || mo > 12) return null;
+  if (d < 1 || d > daysInMonth(y, mo)) return null;
+  if (Number(hour) > 23 || Number(minute) > 59) return null;
+  // 60 is a leap second the platform rolls over rather than represents; refused like any other
+  // instant nobody can point at.
+  if (second != null && Number(second) > 59) return null;
   const ms = Date.parse(raw);
   return Number.isFinite(ms) ? ms : null;
 }

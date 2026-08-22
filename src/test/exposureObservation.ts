@@ -455,6 +455,7 @@ console.log('Proof 5 — a cycle without a valid model response stays in the pop
   ok('a missing equity is caught too', !summaryOk(summaryWith({ equity: undefined })));
   ok('and a missing reserve asset', !summaryOk(summaryWith({ reserveAsset: null })));
   ok('a well-formed summary passes', summaryOk(summaryWith({})));
+  ok('a boolean exposure is unreadable, not a 1 %', !summaryOk(summaryWith({ deployedPercent: true })));
 
   // The distinction the whole fix exists for: a cycle with NO portfolio at all claimed nothing,
   // so it names no unreadable field and passes — its `exposure_percent: null` says it already.
@@ -506,6 +507,20 @@ console.log('Proof 6 — the exposure is Σ non-reserve, and a malformed total s
   const corrupt = allocationView({ BTC: 'twenty', ETH: 10, USDT: 70 }, UNIVERSE, OPTIONS.reserves)!;
   ok('an unreadable weight is named rather than dropped', corrupt.unreadable_assets.join(',') === 'BTC');
   ok('a readable allocation names none', foreign.unreadable_assets.length === 0);
+
+  // NOTHING IS COERCED INTO A NUMBER. `Number(true)` is 1, `Number('')` and `Number(false)` are
+  // 0, `Number([5])` is 5 — a hand-edited weight would otherwise be published as a plausible
+  // allocation with every check green.
+  const coerced = allocationView(
+    { BTC: true, ETH: false, BNB: '', XRP: [5], USDT: '70' },
+    UNIVERSE,
+    OPTIONS.reserves,
+  )!;
+  ok(
+    'booleans, empty strings and arrays are unreadable, never 1 or 0',
+    coerced.unreadable_assets.join(',') === 'BNB,BTC,ETH,XRP',
+  );
+  ok('a numeric string is still a number — PostgREST renders `numeric` as one', coerced.reserve_percent === 70);
 }
 
 // ── PROOF 7 — the bar synthesis does not over-weight multiple wake-ups ───────────────
@@ -623,6 +638,35 @@ console.log('Proof 8 — the model changing its mind at constant market informat
   const still = intrabar[1]!;
   ok('the bar where nothing moved is published too — the denominator', !still.changed_mind && still.changes.length === 1);
   ok('with a zero swing rather than an absence', still.raw_exposure_swing_points === 0);
+
+  // A `guard_failed` row CARRIES the refused proposal — `failCycle` stores it for the
+  // post-mortem, and says in its own comment that it is never an input to anything. Reading it
+  // in a derived view would invent a change of mind the model never got to have.
+  const refused = buildCycles(
+    {
+      decisions: [
+        decisionRow({ id: 320, at: '2026-08-12T08:10:00.000Z', barAt: '2026-08-12T08:00:00.000Z', target: { BTC: 15, ETH: 0, BNB: 0, XRP: 0, USDT: 85 } }),
+        decisionRow({
+          id: 321,
+          at: '2026-08-12T09:10:00.000Z',
+          barAt: '2026-08-12T08:00:00.000Z',
+          status: 'guard_failed',
+          target: { BTC: 60, ETH: 0, BNB: 0, XRP: 0, USDT: 40 },
+          applied: null,
+        }),
+      ],
+      observations: [],
+      executions: [],
+    },
+    OPTIONS,
+  );
+  const refusedBar = buildBars(refused)[0]!;
+  const refusedIntrabar = buildIntrabar(refused)[0]!;
+  ok('the refused proposal is kept in the per-cycle audit record', refused[1]!.model_decision.raw_target?.exposure_percent === 60);
+  ok('but it is not a decided cycle', refusedBar.decided_cycles === 1);
+  ok('it does not reach the per-bar extrema', refusedBar.raw_target_exposure_percent.max === 15);
+  ok('and it is not a change of mind', !refusedIntrabar.changed_mind && refusedIntrabar.changes.length === 0);
+  ok('the path shows it as absent, not as a 60 % ask', refusedIntrabar.raw_target_exposure_path[1] === null);
 }
 
 // ── PROOF 9 — stop episodes are counted as episodes, never as rows ───────────────────
@@ -1051,6 +1095,25 @@ console.log('Proof 14 — an absent regime is a fact, a malformed one is a defec
   ok('no instant in this module is ever read in the host timezone', parseZonedInstant('2026-08-12T00:00:00') === null);
   ok('an offset is honoured', canonicalInstant('2026-08-12T07:00:00+07:00') === '2026-08-12T00:00:00.000Z');
   ok('and the offset PostgREST renders is honoured', canonicalInstant('2026-08-12T00:00:00+00:00') === '2026-08-12T00:00:00.000Z');
+
+  // A DATE THAT DOES NOT EXIST IS NOT ROLLED FORWARD. `Date.parse` turns 30 February into
+  // 2 March without complaint, so a typo would select another population and leave no trace of
+  // itself in the artefact — which records only the normalised date.
+  for (const impossible of [
+    '2026-02-30T00:00:00Z',
+    '2026-13-01T00:00:00Z',
+    '2026-04-31T00:00:00Z',
+    '2026-01-00T00:00:00Z',
+    '2026-08-12T24:00:00Z',
+    '2026-08-12T00:60:00Z',
+    '2026-08-12T00:00:60Z',
+  ]) {
+    assert.equal(parseZonedInstant(impossible), null, `${impossible} must be refused`);
+  }
+  ok('an impossible calendar date is refused rather than rolled forward', true);
+  ok('a leap day that exists is accepted', parseZonedInstant('2028-02-29T00:00:00Z') != null);
+  ok('one that does not is refused', parseZonedInstant('2026-02-29T00:00:00Z') === null);
+  ok('and the last day of a 31-day month passes', parseZonedInstant('2026-08-31T23:59:59Z') != null);
 
   const partial = contextOf(journalOf('2026-08-12T00:00:00.000Z', { BTC: 'trend_up', ETH: 'trend_up' }), UNIVERSE);
   ok('a universe asset with no point is counted unavailable, never guessed', partial.ok && partial.context.unavailable === 2);

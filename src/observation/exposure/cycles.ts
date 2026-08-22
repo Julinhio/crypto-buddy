@@ -30,9 +30,21 @@ function round(value: Decimal, dp: number): number {
   return Number(value.toFixed(dp));
 }
 
-function numberOrNull(value: number | string | null | undefined): number | null {
-  if (value == null) return null;
-  const n = typeof value === 'number' ? value : Number(value);
+/**
+ * A finite number, or null — and NOTHING is coerced into one.
+ *
+ * `Number(x)` is generous in ways a journal reader must not be: `true` becomes 1, `false` and
+ * `''` become 0, `[5]` becomes 5. A legacy or hand-edited weight of `true` would then be
+ * published as a perfectly plausible 1 % allocation, and `allocations_are_fully_readable` would
+ * stay green over it — the exact failure those checks exist to make impossible. Only a real
+ * number, or a non-empty string that is one, is accepted; PostgREST renders `numeric` as either.
+ */
+function numberOrNull(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (trimmed === '') return null;
+  const n = Number(trimmed);
   return Number.isFinite(n) ? n : null;
 }
 
@@ -234,6 +246,22 @@ export interface CycleObservation {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A cycle whose decision the chain RETAINED — the only rows a DERIVED view may aggregate.
+ *
+ * `failCycle` stores the refused proposal in `target_allocation` on a `guard_failed` row, and
+ * says why in its own comment: it is "evidence, never an input to a later cycle", and
+ * production's own reader filters on the status for exactly that reason. A derived view keyed on
+ * "has a target" would therefore inflate the decided count, drag a proposal that never became a
+ * decision into the per-bar extrema, turn it into an intrabar change of mind, and stop an
+ * episode from ever reporting `all_cycles_failed`.
+ *
+ * The per-cycle audit record keeps the refused proposal, which is the whole point of storing it.
+ */
+export function isDecided(cycle: CycleObservation): boolean {
+  return cycle.status === 'decided' && cycle.model_decision.raw_target != null;
 }
 
 /**

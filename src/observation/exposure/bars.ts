@@ -1,6 +1,6 @@
 import { Decimal } from '../../money.js';
 import type { ControllerContext } from './context.js';
-import type { CycleObservation } from './cycles.js';
+import { isDecided, type CycleObservation } from './cycles.js';
 
 /**
  * THE 4H BAR IS THE UNIT OF EVERY MARKET STATISTIC, and the cycle is the unit of everything
@@ -136,7 +136,7 @@ export function buildBars(cycles: readonly CycleObservation[]): BarSynthesis[] {
 
     const contexts = inBar.map((c) => c.context).filter((c): c is ControllerContext => c != null);
     const variants = new Set(contexts.map(contextFingerprint));
-    const decided = inBar.filter((c) => c.model_decision.raw_target != null);
+    const decided = inBar.filter(isDecided);
 
     const gateLabels: Record<string, Set<string>> = {};
     const armed = new Set<string>();
@@ -221,8 +221,15 @@ export interface IntrabarBar {
   raw_exposure_swing_points: number | null;
 }
 
+/**
+ * The weights a change of mind may be measured between — DECIDED cycles only.
+ *
+ * A `guard_failed` row carries the refused proposal for the post-mortem (see `isDecided`).
+ * Reading it here would turn a response the chain threw away into a change of mind the model
+ * never got to have — and would put it in the paths and the swings besides.
+ */
 function weightsOf(cycle: CycleObservation): Record<string, number> | null {
-  return cycle.model_decision.raw_target?.allocation ?? null;
+  return isDecided(cycle) ? (cycle.model_decision.raw_target?.allocation ?? null) : null;
 }
 
 /**
@@ -277,7 +284,7 @@ export function buildIntrabar(cycles: readonly CycleObservation[]): IntrabarBar[
       pending = [];
     }
 
-    const rawPath = inBar.map((c) => c.model_decision.raw_target?.exposure_percent ?? null);
+    const rawPath = inBar.map((c) => (isDecided(c) ? (c.model_decision.raw_target?.exposure_percent ?? null) : null));
     const present = rawPath.filter((v): v is number => v != null);
     out.push({
       bar_key: key,
@@ -286,7 +293,9 @@ export function buildIntrabar(cycles: readonly CycleObservation[]): IntrabarBar[
       statuses: inBar.map((c) => c.status),
       book_exposure_path: inBar.map((c) => c.book.exposure_percent),
       raw_target_exposure_path: rawPath,
-      applied_target_exposure_path: inBar.map((c) => c.model_decision.applied_target?.exposure_percent ?? null),
+      applied_target_exposure_path: inBar.map((c) =>
+        isDecided(c) ? (c.model_decision.applied_target?.exposure_percent ?? null) : null,
+      ),
       changes,
       changed_mind: changes.some((change) => change.assets_changed.length > 0),
       raw_exposure_swing_points:

@@ -1,6 +1,6 @@
 import { Decimal } from '../../money.js';
 import { cycleOrder } from './bars.js';
-import type { CycleObservation, MovementFact } from './cycles.js';
+import { isDecided, type CycleObservation, type MovementFact } from './cycles.js';
 
 /**
  * THE STOP FACTS — preserved now, judged later.
@@ -282,7 +282,7 @@ function buildEpisode(
     break;
   }
 
-  const decided = run.filter((cycle) => cycle.model_decision.raw_target != null);
+  const decided = run.filter(isDecided);
   const drawdowns = run
     .map((cycle) => verdictFor(cycle, asset)?.stop.drawdown_from_peak_percent ?? null)
     .filter((value): value is number => value != null);

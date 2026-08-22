@@ -253,6 +253,9 @@ et un livre réels, régénérables à tout instant depuis le même cutoff.
 | aucune quantité de livre illisible ne devient un zéro | elle reste `null`, est nommée, et fait échouer `book_positions_are_readable` |
 | un livre illisible n'est pas un livre vide | une collection de positions absente ou non lisible, et toute entrée sans nom d'actif, sont signalées et comptées plutôt que remplacées par une liste vide |
 | un résumé de livre corrompu n'est pas une mesure absente | une exposition, une équité, un cash ou un actif de réserve illisibles sont nommés et font échouer `book_summary_is_readable` ; un cycle sans livre journalisé, lui, n'a rien affirmé |
+| seule une décision retenue nourrit une vue dérivée | un `guard_failed` porte la proposition refusée pour le post-mortem ; elle reste dans la ligne du cycle et n'entre ni dans les extrema, ni dans les changements d'avis, ni dans les épisodes |
+| rien n'est converti en nombre | `true`, `false`, `''` et `[5]` sont illisibles, jamais 1, 0 ou 5 |
+| une date impossible est refusée, pas normalisée | `2026-02-30` ne devient pas le 2 mars : le calendrier est validé avant que `Date.parse` ne soit cru |
 | le notionnel réservé vient du livre, pas de la demande | `booked_notional_quote` dérive de `ledger_base_delta` ; `requested_notional_quote` reste publié à côté, et c'est le seul qui ait un sens sur un intent rejeté |
 | la stabilité du contexte porte sur le contexte entier | l'empreinte est l'objet publié, pas une poignée d'agrégats où deux dérives opposées s'annulent |
 | aucune bande dans le chemin d'extraction | `arms.ts` est inatteignable depuis `observe.ts` ; aucun appel de fonction de bande ; aucune clé « bande » dans les artefacts |
