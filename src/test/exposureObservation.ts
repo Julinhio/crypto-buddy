@@ -12,7 +12,10 @@ import { buildBars, buildIntrabar } from '../observation/exposure/bars.js';
 import { buildStopFacts } from '../observation/exposure/stops.js';
 import { buildSnapshot, instantsAtOrAfter } from '../observation/exposure/snapshot.js';
 import { parseWindow, WindowError, type ObservationWindow } from '../observation/exposure/window.js';
+import { readWindow, ReadError } from '../observation/exposure/read.js';
 import type { DecisionRowRead, ExecutionRowRead, ObservationRowRead, RawWindow } from '../observation/exposure/read.js';
+import { canonicalInstant, parseZonedInstant } from '../observation/exposure/instants.js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 /**
  * THE PROOFS OF THE EXPOSURE OBSERVER.
@@ -640,6 +643,18 @@ console.log('Proof 14 — an absent regime is a fact, a malformed one is a defec
   );
   ok('an unparsable barAt is a malformed journal, not a crash', !badBar.ok && badBar.reason === 'malformed_regime_journal');
 
+  // Worse than unparsable: PARSABLE, and read in the host timezone. Nothing would fail — the
+  // same window would simply acquire different bar keys, groupings and artefact bytes under a
+  // different TZ, with every check still green.
+  const zoneless = contextOf(
+    { version: 'r1', barAt: '2026-08-12T00:00:00', global: { riskOff: false }, assets: {} },
+    UNIVERSE,
+  );
+  ok('a barAt with no timezone is refused too', !zoneless.ok && zoneless.reason === 'malformed_regime_journal');
+  ok('no instant in this module is ever read in the host timezone', parseZonedInstant('2026-08-12T00:00:00') === null);
+  ok('an offset is honoured', canonicalInstant('2026-08-12T07:00:00+07:00') === '2026-08-12T00:00:00.000Z');
+  ok('and the offset PostgREST renders is honoured', canonicalInstant('2026-08-12T00:00:00+00:00') === '2026-08-12T00:00:00.000Z');
+
   const partial = contextOf(journalOf('2026-08-12T00:00:00.000Z', { BTC: 'trend_up', ETH: 'trend_up' }), UNIVERSE);
   ok('a universe asset with no point is counted unavailable, never guessed', partial.ok && partial.context.unavailable === 2);
   ok('and the breadth denominator stays the configured universe', partial.ok && partial.context.net_breadth === 0.5);
@@ -746,7 +761,53 @@ console.log('Proof 15 — the integrity checks are falsifiable:');
   );
 }
 
+// ── PROOF 16 — a journal that moves under the read is refused ────────────────────────
+console.log('Proof 16 — a reset landing mid-extraction cannot seal a torn snapshot:');
+{
+  const window = windowOf('2026-08-12T00:00:00.000Z', '2026-08-13T00:00:00.000Z');
+  const decisions = [decisionRow({ id: 900, at: '2026-08-12T00:10:00.000Z', barAt: '2026-08-12T00:00:00.000Z' })];
+
+  const intact = await readWindow(fakeClient([decisions, [], [], [{ id: 900 }]]), window);
+  ok('an intact read returns its window', intact.decisions.length === 1);
+
+  // `reset_bot` truncates decisions, verdicts and executions in ONE transaction. Landing
+  // between the reads, it leaves decisions in hand whose children are already gone — and the
+  // integrity checks would pass, because zero verdicts and zero movements are both legal.
+  await assert.rejects(() => readWindow(fakeClient([decisions, [], [], []]), window), ReadError);
+  ok('a window emptied under the read is refused, not sealed', true);
+
+  await assert.rejects(
+    () => readWindow(fakeClient([decisions, [], [], [{ id: 901 }]]), window),
+    ReadError,
+  );
+  ok('and so is one whose identities changed — a truncate never reproduces an id', true);
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * A PostgREST stub: one queued response per query, in call order.
+ *
+ * The builder is a thenable that ignores every filter, which is exactly right here — this
+ * proof is about what `readWindow` does with the ROWS it gets back across three separate
+ * requests, not about the filters it sends.
+ */
+function fakeClient(responses: readonly unknown[][]): SupabaseClient {
+  let call = 0;
+  const query = (): unknown => {
+    const payload = responses[call] ?? [];
+    call += 1;
+    const builder: Record<string, unknown> = {
+      then: (onOk: (value: { data: unknown; error: null }) => unknown, onErr?: (reason: unknown) => unknown) =>
+        Promise.resolve({ data: payload, error: null }).then(onOk, onErr),
+    };
+    for (const method of ['select', 'gte', 'lt', 'lte', 'order', 'range']) {
+      builder[method] = () => builder;
+    }
+    return builder;
+  };
+  return { from: () => query() } as unknown as SupabaseClient;
+}
 
 /** Every `.ts` file under a directory, resolved and sorted. */
 function sourceFiles(dir: string): string[] {

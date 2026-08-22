@@ -196,6 +196,14 @@ npm run observe:exposure -- --from 2026-08-12T00:00:00Z --cutoff 2026-08-22T03:1
 diff -r out/exposure-observation/run-a out/exposure-observation/run-b
 ```
 
+Les décisions et leurs deux tables filles sont **trois requêtes distinctes**, et `reset_bot`
+tronque les trois dans **une seule** transaction. Un reset tombant entre deux lectures
+laisserait des décisions dont les verdicts et les mouvements ont déjà été effacés — et rien ne
+le verrait, puisque zéro verdict et zéro mouvement sont deux états parfaitement légaux. La
+liste d'identités est donc **relue après** les tables filles : la fenêtre étant close sur un
+cutoff stabilisé, aucune ligne légitime ne peut y entrer ni en sortir, et la moindre
+différence fait échouer le run plutôt que de sceller un snapshot déchiré.
+
 Les artefacts ne portent **aucune horloge murale** : ni date de run, ni durée. Une durée ne se
 reproduit jamais, et un manifeste qui en contiendrait ne pourrait jamais être byte-identique
 entre deux runs — ce qui rendrait la preuve de déterminisme invérifiable sur l'artefact même
@@ -215,6 +223,8 @@ et un livre réels, régénérables à tout instant depuis le même cutoff.
 | Invariant | Preuve |
 |---|---|
 | lecture seule sur la base vivante | un seul fichier (`read.ts`) peut construire une requête, dans tout le graphe transitif ; aucun fichier de l'observateur ne nomme une méthode d'écriture |
+| aucune lecture déchirée | la liste d'identités est relue après les tables filles ; toute différence fait échouer le run |
+| aucun instant lu dans le fuseau de la machine | `instants.ts` refuse toute chaîne sans fuseau explicite, pour les bornes du CLI comme pour le `barAt` journalisé |
 | aucune bande dans le chemin d'extraction | `arms.ts` est inatteignable depuis `observe.ts` ; aucun appel de fonction de bande ; aucune clé « bande » dans les artefacts |
 | aucun chemin de production ne lit l'observateur | aucun fichier hors `src/observation` n'importe `observation/exposure` ni ne lit `out/exposure-observation` |
 | chaque cycle apparaît exactement une fois | `every_cycle_exactly_once` |

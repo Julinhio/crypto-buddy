@@ -1,6 +1,7 @@
 import { config } from '../../config/index.js';
 import { Decimal, ZERO, fromNumeric } from '../../money.js';
 import { reserveStables } from '../../decision/schema.js';
+import { canonicalInstant } from './instants.js';
 import { contextOf, type ContextResult, type ControllerContext } from './context.js';
 import type { DecisionRowRead, ExecutionRowRead, ObservationRowRead, RawWindow } from './read.js';
 
@@ -259,13 +260,6 @@ export function bookView(marketContext: unknown): BookView {
     positions,
     price_stale_assets: positions.filter((p) => p.price_stale).map((p) => p.asset),
   };
-}
-
-/** Normalises a stored instant so two spellings of the same bar compare equal. */
-export function canonicalInstant(raw: string | null): string | null {
-  if (raw == null) return null;
-  const ms = Date.parse(raw);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
 }
 
 function verdictView(row: ObservationRowRead): TransitionVerdictView {

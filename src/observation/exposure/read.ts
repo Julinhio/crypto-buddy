@@ -224,6 +224,40 @@ export async function readWindow(
       .range(from, to),
   );
 
+  // ── THE TORN READ ────────────────────────────────────────────────────────────────────
+  //
+  // The decisions and their two child tables are THREE separate requests. `reset_bot`
+  // TRUNCATEs all three in ONE transaction, so a reset landing between them leaves this
+  // process holding decisions whose verdicts and movements have already been erased — and
+  // nothing downstream would notice: `transition_verdicts_are_complete_or_absent` accepts
+  // zero verdicts by design (rows predating migration 0022 have none), and most cycles book
+  // nothing anyway. The result would be a torn snapshot with a clean digest, which is worse
+  // than no snapshot at all.
+  //
+  // The window is closed at a SETTLED cutoff, so no legitimate row can enter or leave it
+  // while this runs. Re-reading the identity list is therefore a complete check rather than a
+  // heuristic: any difference at all means the journal moved under the read, and the only
+  // honest answer is to refuse. Identity sequences deliberately survive a truncate, so a
+  // reset followed by fresh cycles cannot reproduce the same ids either.
+  const after = await selectAll<{ id: number }>('decisions (re-read)', (from, to) =>
+    client
+      .from('decisions')
+      .select('id')
+      .gte('created_at', window.from)
+      .lt('created_at', window.toExclusive)
+      .order('id', { ascending: true })
+      .range(from, to),
+  );
+  const before = decisions.map((row) => row.id).join(',');
+  if (after.map((row) => row.id).join(',') !== before) {
+    throw new ReadError(
+      `the journal changed while it was being read: the window held ${decisions.length} decision(s) ` +
+        `at the first pass and ${after.length} at the re-read. A reset_bot (or a manual write) landed ` +
+        'mid-extraction, so the child tables may no longer describe the decisions in hand. Refusing ' +
+        'to seal a torn snapshot — re-run once the journal is quiet.',
+    );
+  }
+
   return {
     decisions,
     observations: observations.filter((row) => ids.has(row.decision_id)),

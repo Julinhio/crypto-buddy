@@ -2,6 +2,7 @@ import { config, tradableBaseAssets } from '../../config/index.js';
 import type { AssetRegime, AssetSignals, RegimeJournal, RegimePoint } from '../../market/regime.js';
 import { buildExperimentConfig } from '../../calibration/exposure/config.js';
 import { readContext, type ControllerReading } from '../../calibration/exposure/controller.js';
+import { parseZonedInstant } from './instants.js';
 
 /**
  * THE DETERMINISTIC CONTEXT THE CONTROLLER CONSUMES — rebuilt from what the bot ALREADY
@@ -138,9 +139,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * dropped them would be a different object than the one production hands its own functions.
  */
 export function regimePointFromJournal(journal: RegimeJournal): RegimePoint {
-  const timestamp = Date.parse(journal.barAt);
-  if (!Number.isFinite(timestamp)) {
-    throw new Error(`exposure observation: regime journal carries an unparsable barAt "${journal.barAt}"`);
+  const timestamp = parseZonedInstant(journal.barAt);
+  if (timestamp == null) {
+    throw new Error(
+      `exposure observation: regime journal carries a barAt without an explicit timezone ` +
+        `("${journal.barAt}") — refusing to read it in the host timezone`,
+    );
   }
   const assets: RegimePoint['assets'] = {};
   for (const [asset, entry] of Object.entries(journal.assets)) {
@@ -170,13 +174,22 @@ export function parseRegimeJournal(raw: unknown): RegimeJournal | null {
   if (!isRecord(raw)) throw new Error('regime is not an object');
   const { version, barAt, global, assets } = raw;
   if (typeof version !== 'string') throw new Error('regime.version is not a string');
-  // PARSABILITY, not just type. A string `barAt` nobody can parse is exactly as unusable as a
-  // missing one, and the difference matters here: validated below, it is caught by the caller
-  // and classified as a malformed journal; validated only in `regimePointFromJournal`, it would
-  // throw OUTSIDE that guard and abort the whole run without producing the snapshot — or the
-  // failed check that exists to report it.
+  // PARSABILITY AND AN EXPLICIT ZONE, not just a type. Two distinct traps:
+  //
+  //   - a string `barAt` nobody can parse is as unusable as a missing one, and where it is
+  //     rejected decides what happens: validated HERE it is caught by the caller and reported
+  //     as a malformed journal; validated only in `regimePointFromJournal` it would throw
+  //     OUTSIDE that guard and abort the run — taking with it the failed check meant to report
+  //     it, and the whole snapshot;
+  //   - a parsable but zone-free `barAt` is worse than either, because nothing fails: it is
+  //     read in the host timezone, so the same window acquires different bar keys, different
+  //     groupings and different artefact bytes under a different `TZ`. Production writes
+  //     `toISOString()`, so this cannot happen today — which is exactly why it must be refused
+  //     rather than trusted.
   if (typeof barAt !== 'string') throw new Error('regime.barAt is not a string');
-  if (!Number.isFinite(Date.parse(barAt))) throw new Error(`regime.barAt is not a parsable instant ("${barAt}")`);
+  if (parseZonedInstant(barAt) == null) {
+    throw new Error(`regime.barAt is not an instant with an explicit timezone ("${barAt}")`);
+  }
   if (!isRecord(global)) throw new Error('regime.global is not an object');
   if (typeof global.riskOff !== 'boolean') throw new Error('regime.global.riskOff is not a boolean');
   if (!isRecord(assets)) throw new Error('regime.assets is not an object');
