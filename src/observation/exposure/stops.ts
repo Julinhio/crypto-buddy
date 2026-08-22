@@ -45,7 +45,19 @@ const QTY_DP = 12;
 
 export interface StopEpisodeMovement {
   decision_id: number;
-  at: string;
+  /**
+   * WHEN THE MOVEMENT WAS BOOKED — the sovereign intent's own instant, never the cycle's.
+   *
+   * A wake-up is not atomic: the decision row is inserted, THEN the orders are placed, THEN the
+   * executions are journaled. Timestamping a booking with its cycle's `created_at` would hand
+   * the next chantier — whose whole subject is the delay between a stop and its re-entry — an
+   * instant that can sit materially earlier than the order it claims to date.
+   *
+   * NULL when the journal carries no booking instant. The cycle's own time is one `decision_id`
+   * away in `cycles.json`, so nothing is lost by refusing to substitute it here — and a
+   * substituted instant would be indistinguishable from a measured one.
+   */
+  booked_at: string | null;
   side: string;
   /** The line's quantity BEFORE the decision, as the cycle's own book recorded it. */
   pre_trade_qty: number | null;
@@ -61,8 +73,13 @@ export interface StopEpisode {
   asset: string;
   from_decision_id: number;
   to_decision_id: number;
-  from_at: string;
-  to_at: string;
+  /**
+   * The WAKE-UP instants the episode spans — deliberately the cycles', because an episode is a
+   * run of wake-ups and not of orders. Named apart from `booked_at` so the two can never be
+   * read as the same kind of time.
+   */
+  from_cycle_at: string;
+  to_cycle_at: string;
   /** Consecutive cycles the stop stayed fired over. The episode, not the row count. */
   cycles: number;
   decision_ids: number[];
@@ -78,8 +95,11 @@ export interface StopEpisode {
   /**
    * The first BOOKED BUY on this asset in a cycle strictly after the episode. Null when none
    * was observed before the cutoff — which is a result, not a gap, and is never censored.
+   *
+   * `booked_at` is the ORDER's instant, for the same reason as on the exit above: this is the
+   * far end of the stop-to-re-entry delay the next chantier will measure.
    */
-  re_entry: { decision_id: number; at: string; gross_notional_quote: number | null } | null;
+  re_entry: { decision_id: number; booked_at: string | null; gross_notional_quote: number | null } | null;
   /**
    * Cycles observed after the episode ended, inside the window. The honest denominator for
    * "no re-entry": with no horizon and no censoring rule — both belong to the next chantier —
@@ -207,7 +227,8 @@ function buildEpisode(
     const verdict = verdictFor(cycle, asset);
     exit = {
       decision_id: cycle.decision_id,
-      at: cycle.created_at,
+      // The MOVEMENT's instant, never the cycle's — see `StopEpisodeMovement.booked_at`.
+      booked_at: movement.booked_at,
       side: movement.side,
       pre_trade_qty: qty,
       booked_base_delta: delta,
@@ -227,7 +248,7 @@ function buildEpisode(
     if (movement == null) continue;
     reEntry = {
       decision_id: cycle.decision_id,
-      at: cycle.created_at,
+      booked_at: movement.booked_at,
       gross_notional_quote: movement.gross_notional_quote,
     };
     break;
@@ -242,8 +263,8 @@ function buildEpisode(
     asset,
     from_decision_id: first.decision_id,
     to_decision_id: last.decision_id,
-    from_at: first.created_at,
-    to_at: last.created_at,
+    from_cycle_at: first.created_at,
+    to_cycle_at: last.created_at,
     cycles: run.length,
     decision_ids: run.map((cycle) => cycle.decision_id),
     statuses: run.map((cycle) => cycle.status),

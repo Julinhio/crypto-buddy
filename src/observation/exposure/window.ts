@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { config } from '../../config/index.js';
 import { parseZonedInstant } from './instants.js';
@@ -137,21 +138,73 @@ export const DEFAULT_OUT_DIR = 'out/exposure-observation';
  * `out/` has the milder version of the same problem: `.gitignore` covers this observer's folder
  * and nothing else, so an operational export written to `out/foo` sits there committable.
  *
- * Both are removed by construction rather than by computing around them.
+ * AND THE CONFINEMENT IS PHYSICAL, not lexical — see `namespaceAnchor` below. A prefix test on
+ * the string reads the path the operator typed; the filesystem writes to the path the links
+ * resolve to, and those are two different things.
  */
-export function parseOutDir(argv: readonly string[]): string {
+
+/**
+ * Resolves every EXISTING component of a path and leaves the rest lexical.
+ *
+ * The trailing part of the target usually does not exist yet — the whole point is to create it —
+ * so a plain `realpathSync` would simply throw. Walking up to the deepest existing ancestor,
+ * resolving THAT, and re-appending the rest gives the real destination of a directory that is
+ * about to be created, which is what has to be checked before anything is written.
+ */
+function realpathOfExisting(target: string): string {
+  const absolute = path.resolve(target);
+  const trailing: string[] = [];
+  let current = absolute;
+  for (;;) {
+    try {
+      const real = realpathSync(current);
+      return trailing.length === 0 ? real : path.join(real, ...trailing.slice().reverse());
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return absolute; // nothing on this path exists at all
+      trailing.push(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+/**
+ * THE ANCHOR IS THE NAMESPACE'S PARENT, RESOLVED — and the namespace's own name, NOT resolved.
+ *
+ * This asymmetry is the whole guarantee. Resolving `out/exposure-observation` itself would
+ * defeat the check in the one case it exists for: if that directory IS a link to
+ * `out/exposure-calibration`, then the anchor and the target resolve to the same real path and
+ * the escape passes. Resolving only its PARENT keeps a legitimately relocated `out/` working
+ * while making the namespace directory itself a name that must be real.
+ */
+function namespaceAnchor(baseDir: string): string {
+  const namespace = path.resolve(baseDir, DEFAULT_OUT_DIR);
+  return path.join(realpathOfExisting(path.dirname(namespace)), path.basename(namespace));
+}
+
+/**
+ * Accepts the namespace or a descendant, and returns the REAL absolute directory to write to.
+ *
+ * The value returned is the resolved one, so the write lands exactly where the check looked
+ * rather than where the string pointed.
+ */
+export function parseOutDir(argv: readonly string[], baseDir: string = process.cwd()): string {
   const raw = flag(argv, 'out') ?? DEFAULT_OUT_DIR;
   const normalised = raw.split('\\').join('/').replace(/\/+$/, '');
-  const inNamespace = normalised === DEFAULT_OUT_DIR || normalised.startsWith(`${DEFAULT_OUT_DIR}/`);
-  const escapes = normalised.split('/').includes('..');
-  if (path.isAbsolute(raw) || !inNamespace || escapes) {
+  const anchor = namespaceAnchor(baseDir);
+  const resolved = realpathOfExisting(path.resolve(baseDir, normalised));
+  const relative = path.relative(anchor, resolved);
+  const contained = relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  if (!contained) {
     throw new WindowError(
-      `--out="${raw}" must be "${DEFAULT_OUT_DIR}" or a descendant of it. Elsewhere under "out/" it ` +
-        'would land in another brick\'s namespace — `out/exposure-calibration` holds two COMMITTED ' +
-        'files with these very names — and outside "out/" the artefacts written before the manifest ' +
-        'would make the tree dirty, so the manifest would stamp crypto_buddy_tree_dirty on a clean ' +
-        'source. This namespace is also the only one .gitignore covers.',
+      `--out="${raw}" resolves to "${resolved}", outside "${anchor}". It must be ` +
+        `"${DEFAULT_OUT_DIR}" or a descendant of it, and it must still be one after every link is ` +
+        'followed. Elsewhere under "out/" it would land in another brick\'s namespace — ' +
+        '`out/exposure-calibration` holds two COMMITTED files with these very names — and outside ' +
+        '"out/" the artefacts written before the manifest would make the tree dirty, so the ' +
+        'manifest would stamp crypto_buddy_tree_dirty on a clean source. This namespace is also ' +
+        'the only one .gitignore covers.',
     );
   }
-  return normalised;
+  return resolved;
 }

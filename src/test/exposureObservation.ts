@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { toRegimeJournal, type AssetRegime, type RegimeJournal } from '../market/regime.js';
 import { prepareTape } from '../calibration/exposure/tape.js';
@@ -504,16 +505,45 @@ console.log('Proof 10 — a booked exit, a real re-entry, and no proxy anywhere:
     observationRow({ decisionId: 601, asset, barAt: '2026-08-12T04:00:00.000Z' }),
     observationRow({ decisionId: 602, asset, barAt: '2026-08-12T08:00:00.000Z' }),
   ]);
+  // The bookings land AFTER their decision rows, because a wake-up is not atomic. The gap is
+  // exaggerated here so an episode timestamped on the cycle instead of the order is impossible
+  // to mistake for a correct one — the next chantier measures exactly this delay.
   const executions = [
-    intentRow(600, 'BTC/USDT', 'sell', 0.01),
-    intentRow(602, 'BTC/USDT', 'buy', 0.004),
+    intentRow(600, 'BTC/USDT', 'sell', 0.01, 100, '2026-08-12T00:10:20.000Z'),
+    intentRow(602, 'BTC/USDT', 'buy', 0.004, 100, '2026-08-12T08:10:25.000Z'),
   ];
   const facts = buildStopFacts(buildCycles({ decisions, observations, executions }, OPTIONS));
   const episode = facts.episodes[0]!;
   ok('the episode reports the booked exit', episode.outcome === 'exit_booked' && episode.exit?.decision_id === 600);
   ok('with the quantities that let a reader judge the exit', episode.exit?.pre_trade_qty === 0.01 && episode.exit?.residual_qty === 0);
+  ok('the exit carries the ORDER instant, not the cycle instant', episode.exit?.booked_at === '2026-08-12T00:10:20.000Z');
   ok('the re-entry is the first booked BUY after the episode', episode.re_entry?.decision_id === 602);
+  ok('and it too carries the ORDER instant', episode.re_entry?.booked_at === '2026-08-12T08:10:25.000Z');
   ok('and it is a real order, not a mechanical one', episode.re_entry?.gross_notional_quote === 0.4);
+  ok(
+    'the episode boundaries stay the WAKE-UP instants, and are named apart',
+    episode.from_cycle_at === '2026-08-12T00:10:00.000Z' && episode.to_cycle_at === '2026-08-12T00:10:00.000Z',
+  );
+
+  // NO SUBSTITUTION. A journal without a usable booking instant publishes null: the cycle's own
+  // time is one decision_id away, and an invented instant is indistinguishable from a measured
+  // one to every later reader.
+  const unstamped = buildStopFacts(
+    buildCycles(
+      {
+        decisions,
+        observations,
+        executions: [
+          intentRow(600, 'BTC/USDT', 'sell', 0.01, 100, 'not-an-instant'),
+          intentRow(602, 'BTC/USDT', 'buy', 0.004, 100, '2026-08-12T08:10:25'),
+        ],
+      },
+      OPTIONS,
+    ),
+  ).episodes[0]!;
+  ok('a booking with no usable instant publishes null rather than the cycle time', unstamped.exit?.booked_at === null);
+  ok('and so does a re-entry whose instant carries no timezone', unstamped.re_entry?.booked_at === null);
+  ok('while the movement itself is still reported', unstamped.exit?.decision_id === 600 && unstamped.re_entry?.decision_id === 602);
 }
 
 // ── PROOF 11 — the window refuses everything ambiguous ───────────────────────────────
@@ -554,12 +584,20 @@ console.log('Proof 11 — the cutoff is explicit, settled, and never defaulted:'
   // `gitIsDirty()` is blind to `out/` on purpose — a run writes its artefacts before stamping
   // the manifest. Outside it, those same writes would make the tree dirty and the manifest
   // would accuse a clean source.
-  ok('the output directory defaults to the observer namespace', parseOutDir([]) === DEFAULT_OUT_DIR);
   ok(
-    'a descendant is accepted',
-    parseOutDir(['--out', 'out/exposure-observation/run-a']) === 'out/exposure-observation/run-a',
+    'the output directory defaults to the observer namespace',
+    parseOutDir([], ROOT) === path.join(realpathSync(ROOT), 'out', 'exposure-observation'),
   );
-  ok('a trailing slash is normalised', parseOutDir(['--out', 'out/exposure-observation/x/']) === 'out/exposure-observation/x');
+  ok(
+    'a descendant is accepted, and returned resolved so the write lands where the check looked',
+    parseOutDir(['--out', 'out/exposure-observation/run-a'], ROOT) ===
+      path.join(realpathSync(ROOT), 'out', 'exposure-observation', 'run-a'),
+  );
+  ok(
+    'a trailing slash is normalised',
+    parseOutDir(['--out', 'out/exposure-observation/x/'], ROOT) ===
+      path.join(realpathSync(ROOT), 'out', 'exposure-observation', 'x'),
+  );
 
   // `out/exposure-calibration` is the one that would really hurt: it holds two COMMITTED files
   // named `summary.json` and `manifest.json`, which is exactly what this command writes.
@@ -572,9 +610,71 @@ console.log('Proof 11 — the cutoff is explicit, settled, and never defaulted:'
     'out/exposure-observation/../exposure-calibration',
     'C:\\tmp\\run-a',
   ]) {
-    assert.throws(() => parseOutDir(['--out', bad]), WindowError, `--out=${bad} must be refused`);
+    assert.throws(() => parseOutDir(['--out', bad], ROOT), WindowError, `--out=${bad} must be refused`);
   }
   ok('every other destination is refused — another brick\u2019s namespace, the rest of out/, absolutes, escapes', true);
+}
+
+// ── PROOF 11b — the confinement is PHYSICAL, not a prefix test on a string ───────────
+console.log('Proof 11b — a link cannot carry the artefacts out of the namespace:');
+{
+  // A lexical prefix check reads the path the operator typed; the filesystem writes to the path
+  // the links resolve to. On a repository where `out/exposure-observation` is a link to
+  // `out/exposure-calibration`, the DEFAULT invocation would overwrite two committed files —
+  // and `gitIsDirty()`, blind to everything under `out/`, would let the replacing manifest
+  // report a clean tree while doing it.
+  const sandbox = realpathSync(mkdtempSync(path.join(tmpdir(), 'observation-out-')));
+  try {
+    mkdirSync(path.join(sandbox, 'out', 'exposure-calibration'), { recursive: true });
+
+    // 1. The namespace directory does not exist yet — the ordinary first run.
+    ok(
+      'a namespace that does not exist yet is accepted',
+      parseOutDir([], sandbox) === path.join(sandbox, 'out', 'exposure-observation'),
+    );
+    ok(
+      '…and so is a descendant of it',
+      parseOutDir(['--out', 'out/exposure-observation/run-a'], sandbox) ===
+        path.join(sandbox, 'out', 'exposure-observation', 'run-a'),
+    );
+
+    // 2. The namespace ROOT is a link out of the namespace.
+    linkDir(path.join(sandbox, 'out', 'exposure-calibration'), path.join(sandbox, 'out', 'exposure-observation'));
+    assert.throws(() => parseOutDir([], sandbox), WindowError);
+    ok('a namespace ROOT that is a link out of the namespace is refused', true);
+    assert.throws(() => parseOutDir(['--out', 'out/exposure-observation/run-a'], sandbox), WindowError);
+    ok('…and so is every descendant reached through it', true);
+
+    // 3. The root is real again, and a DESCENDANT is the link.
+    rmSync(path.join(sandbox, 'out', 'exposure-observation'), { recursive: true, force: true });
+    mkdirSync(path.join(sandbox, 'out', 'exposure-observation'), { recursive: true });
+    ok('with a real namespace, the default is accepted again', parseOutDir([], sandbox).startsWith(sandbox));
+    linkDir(
+      path.join(sandbox, 'out', 'exposure-calibration'),
+      path.join(sandbox, 'out', 'exposure-observation', 'run-b'),
+    );
+    assert.throws(() => parseOutDir(['--out', 'out/exposure-observation/run-b'], sandbox), WindowError);
+    ok('a DESCENDANT that is a link out of the namespace is refused', true);
+    assert.throws(
+      () => parseOutDir(['--out', 'out/exposure-observation/run-b/deeper'], sandbox),
+      WindowError,
+    );
+    ok('…including a path that only crosses it on the way down', true);
+
+    // 4. A link that stays INSIDE the namespace is not an escape and must keep working.
+    mkdirSync(path.join(sandbox, 'out', 'exposure-observation', 'real'), { recursive: true });
+    linkDir(
+      path.join(sandbox, 'out', 'exposure-observation', 'real'),
+      path.join(sandbox, 'out', 'exposure-observation', 'inside'),
+    );
+    ok(
+      'a link that stays inside the namespace is not an escape',
+      parseOutDir(['--out', 'out/exposure-observation/inside'], sandbox) ===
+        path.join(sandbox, 'out', 'exposure-observation', 'real'),
+    );
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
 }
 
 // ── PROOF 12 — nothing in the payload reaches past the cutoff ────────────────────────
@@ -872,6 +972,17 @@ function fakeClient(responses: readonly unknown[][]): SupabaseClient {
     return builder;
   };
   return { from: () => query() } as unknown as SupabaseClient;
+}
+
+/**
+ * A directory link, portably.
+ *
+ * Windows refuses a plain directory symlink without elevation but accepts a JUNCTION, which
+ * resolves identically under `realpathSync`. The distinction is the platform's, not the
+ * observer's: the check it exercises never learns which of the two it followed.
+ */
+function linkDir(target: string, linkPath: string): void {
+  symlinkSync(target, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
 }
 
 /** Every `.ts` file under a directory, resolved and sorted. */

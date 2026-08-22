@@ -152,6 +152,18 @@ n'est pas censurée : elle est `null`, accompagnée de `cycles_after_episode_in_
 dénominateur honnête. Aucun horizon et aucune règle de censure ne sont appliqués ici ; ils
 appartiennent au chantier suivant, pré-enregistrés.
 
+**La sortie et la réentrée portent `booked_at`, l'instant du MOUVEMENT, jamais celui du cycle.**
+Un réveil n'est pas atomique : la décision est insérée, puis les ordres sont passés, puis les
+exécutions sont journalisées. Dater une réservation avec le `created_at` de son cycle
+donnerait au chantier suivant — dont le sujet est précisément le délai entre un stop et sa
+réentrée — un instant qui peut être matériellement antérieur à l'ordre qu'il prétend dater. Et
+quand cet instant manque, le champ vaut `null` : le temps du cycle est à un `decision_id` de
+là dans `cycles.json`, donc rien n'est perdu à refuser de le substituer, alors qu'un instant
+substitué serait indiscernable d'un instant mesuré. Les bornes de l'épisode, elles, restent les
+instants des RÉVEILS — un épisode est une suite de réveils, pas d'ordres — et s'appellent
+`from_cycle_at` / `to_cycle_at` pour que les deux natures de temps ne puissent pas se
+confondre.
+
 **L'attribution n'est pas affirmée.** Savoir si une vente réservée vient de la sortie du code
 ou du modèle vendant la même ligne au même réveil ne se lit pas dans le journal : le mode de la
 couche est une variable d'environnement qu'aucune colonne n'enregistre. Le snapshot publie le
@@ -225,7 +237,8 @@ et un livre réels, régénérables à tout instant depuis le même cutoff.
 | lecture seule sur la base vivante | un seul fichier (`read.ts`) peut construire une requête, dans tout le graphe transitif ; aucun fichier de l'observateur ne nomme une méthode d'écriture |
 | aucune lecture déchirée | la liste d'identités est relue après les tables filles ; toute différence fait échouer le run |
 | aucun instant lu dans le fuseau de la machine | `instants.ts` refuse toute chaîne sans fuseau explicite, pour les bornes du CLI comme pour le `barAt` journalisé |
-| les artefacts ne peuvent atterrir ailleurs | `--out` est confiné à `out/exposure-observation` et ses descendants — le seul chemin que `.gitignore` couvre, et le seul qui n'écrase pas les artefacts commités d'une autre brique |
+| les artefacts ne peuvent atterrir ailleurs | `--out` est confiné **physiquement** à `out/exposure-observation` et ses descendants : chaque composant existant est résolu avant écriture, donc aucun lien ni aucune jonction n'en fait sortir, ni sur la racine ni sur un descendant |
+| aucun instant de mouvement n'est inventé | la sortie de stop et la réentrée portent l'instant de réservation du mouvement, `null` s'il manque, jamais l'instant du cycle |
 | aucune bande dans le chemin d'extraction | `arms.ts` est inatteignable depuis `observe.ts` ; aucun appel de fonction de bande ; aucune clé « bande » dans les artefacts |
 | aucun chemin de production ne lit l'observateur | aucun fichier hors `src/observation` n'importe `observation/exposure` ni ne lit `out/exposure-observation` |
 | chaque cycle apparaît exactement une fois | `every_cycle_exactly_once` |
