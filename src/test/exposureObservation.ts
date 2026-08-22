@@ -396,6 +396,35 @@ console.log('Proof 5 — a cycle without a valid model response stays in the pop
     'and the snapshot fails its book-readability check',
     !withBrokenBook.summary.checks.find((c) => c.name === 'book_positions_are_readable')!.ok,
   );
+
+  // A COLLECTION NOBODY CAN READ IS NOT AN EMPTY BOOK. Replacing it with `[]` would publish a
+  // flat portfolio, leave every "unreadable" list empty, pass the check — and let a stop episode
+  // report a null pre-trade quantity for a line that was there and was lost in parsing.
+  const bookWith = (positions: unknown): ReturnType<typeof buildSnapshot> => {
+    const row = decisionRow({ id: 6, at: '2026-08-12T05:10:00.000Z', barAt: '2026-08-12T04:00:00.000Z' });
+    (row.market_context as { account: { portfolio: Record<string, unknown> } }).account.portfolio.positions = positions;
+    return buildSnapshot(
+      { decisions: [row], observations: [], executions: [] },
+      windowOf('2026-08-12T00:00:00.000Z', '2026-08-13T00:00:00.000Z'),
+      UNIVERSE,
+    );
+  };
+  const readable = (snapshot: ReturnType<typeof buildSnapshot>): boolean =>
+    snapshot.summary.checks.find((c) => c.name === 'book_positions_are_readable')!.ok;
+
+  const notACollection = bookWith({ BTC: 0.01 });
+  ok('a positions value that is not a collection is flagged', notACollection.cycles.cycles[0]!.book.positions_unreadable);
+  ok('…and fails the check rather than reading as a flat book', !readable(notACollection));
+  ok('a missing positions value is flagged the same way', bookWith(undefined).cycles.cycles[0]!.book.positions_unreadable);
+
+  const namelessEntries = bookWith(['BTC', { qty: 0.5 }, { asset: '', qty: 1 }, { asset: 'ETH', qty: 0.5 }]);
+  ok(
+    'entries with no usable asset name are counted, not discarded',
+    namelessEntries.cycles.cycles[0]!.book.unreadable_position_entries === 3,
+  );
+  ok('the identified one is still published', namelessEntries.cycles.cycles[0]!.book.positions.length === 1);
+  ok('…and the check fails', !readable(namelessEntries));
+  ok('while a well-formed book passes', readable(bookWith([{ asset: 'ETH', qty: 0.5, price: 100, weightPercent: 5, priceStale: false }])));
 }
 
 // ── PROOF 6 — exposure is the sum of the non-reserve weights ─────────────────────────

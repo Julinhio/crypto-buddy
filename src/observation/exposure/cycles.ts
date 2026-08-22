@@ -90,6 +90,19 @@ export interface BookView {
   price_stale_assets: string[];
   /** Positions whose journaled quantity is not a finite number. Fails an explicit check. */
   unreadable_qty_assets: string[];
+  /**
+   * The portfolio carried a `positions` value that is not an array — or none at all.
+   *
+   * A book nobody can read is not an empty book. Replacing it with `[]` would publish a flat
+   * portfolio, leave `unreadable_qty_assets` empty, pass every check, and let a stop episode
+   * report a null `pre_trade_qty` for a line that was there and was lost in parsing.
+   */
+  positions_unreadable: boolean;
+  /**
+   * Entries the collection carries that could not be identified at all — not an object, or no
+   * asset name. COUNTED rather than named, precisely because they cannot be named.
+   */
+  unreadable_position_entries: number;
 }
 
 export interface StopView {
@@ -274,6 +287,10 @@ export function bookView(marketContext: unknown): BookView {
     positions: [],
     price_stale_assets: [],
     unreadable_qty_assets: [],
+    // Nothing was CLAIMED here: no portfolio was journaled at all, which `exposure_percent: null`
+    // already says. That is a different fact from a portfolio whose positions cannot be read.
+    positions_unreadable: false,
+    unreadable_position_entries: 0,
   };
   if (!isRecord(marketContext)) return empty;
   const account = marketContext.account;
@@ -281,10 +298,17 @@ export function bookView(marketContext: unknown): BookView {
   const portfolio = account.portfolio;
   if (!isRecord(portfolio)) return empty;
 
+  const positionsUnreadable = !Array.isArray(portfolio.positions);
   const rawPositions = Array.isArray(portfolio.positions) ? portfolio.positions : [];
   const positions: BookPosition[] = [];
+  let unreadableEntries = 0;
   for (const entry of rawPositions) {
-    if (!isRecord(entry) || typeof entry.asset !== 'string') continue;
+    // An entry with no usable asset name cannot be published and cannot be named. It is counted,
+    // so that a line lost in parsing never passes for a line the book did not hold.
+    if (!isRecord(entry) || typeof entry.asset !== 'string' || entry.asset === '') {
+      unreadableEntries += 1;
+      continue;
+    }
     const qty = numberOrNull(entry.qty as number | string | null);
     positions.push({
       asset: entry.asset,
@@ -306,6 +330,8 @@ export function bookView(marketContext: unknown): BookView {
     positions,
     price_stale_assets: positions.filter((p) => p.price_stale).map((p) => p.asset),
     unreadable_qty_assets: positions.filter((p) => p.qty == null).map((p) => p.asset),
+    positions_unreadable: positionsUnreadable,
+    unreadable_position_entries: unreadableEntries,
   };
 }
 

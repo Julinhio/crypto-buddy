@@ -373,14 +373,20 @@ function runChecks(
    * zero-sized position to every later reader — and a stop episode would compute its
    * `pre_trade_qty` and its residual from a number nobody wrote.
    */
-  const unreadableBook = cycles.filter((c) => c.book.unreadable_qty_assets.length > 0);
+  const unreadableBook = cycles.filter(
+    (c) =>
+      c.book.unreadable_qty_assets.length > 0 ||
+      c.book.positions_unreadable ||
+      c.book.unreadable_position_entries > 0,
+  );
   checks.push(
     check(
       'book_positions_are_readable',
       unreadableBook.length === 0,
       unreadableBook.length === 0
-        ? 'every journaled position quantity is a finite number'
-        : `${unreadableBook.length} cycle(s) carry an unreadable held quantity: ${ids(unreadableBook)}`,
+        ? 'every journaled book is a readable collection of identified positions with finite quantities'
+        : `${unreadableBook.length} cycle(s) whose book could not be fully read (unreadable quantity, ` +
+          `unidentifiable entry, or a positions value that is not a collection): ${ids(unreadableBook)}`,
     ),
   );
 
