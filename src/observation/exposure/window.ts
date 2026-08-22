@@ -120,29 +120,37 @@ export function parseWindow(argv: readonly string[], nowMs: number): Observation
 export const DEFAULT_OUT_DIR = 'out/exposure-observation';
 
 /**
- * THE OUTPUT DIRECTORY IS CONFINED TO `out/`, and that is a provenance rule.
+ * THE OUTPUT DIRECTORY IS CONFINED TO THE OBSERVER'S OWN NAMESPACE, and each half of that
+ * sentence closes a different failure.
  *
- * The manifest stamps `crypto_buddy_tree_dirty` — "was the source really the commit I claim" —
- * and `gitIsDirty()` answers it while deliberately ignoring `out/`, because a run WRITES its
- * artefacts before stamping the manifest and a whole-tree check would report "dirty" on every
- * single run, for a reason having nothing to do with the code.
+ * UNDER `out/`, because of the manifest. It stamps `crypto_buddy_tree_dirty` — "was the source
+ * really the commit I claim" — and `gitIsDirty()` answers it while deliberately ignoring
+ * `out/`, since a run WRITES its artefacts before stamping and a whole-tree check would report
+ * "dirty" on every single run for a reason having nothing to do with the code. Anywhere else in
+ * the repository, those same writes make the tree dirty and the manifest accuses a clean source.
  *
- * Point `--out` at a repository path OUTSIDE `out/` and that blindness stops applying: the two
- * artefacts written a moment earlier make the tree dirty, and the manifest records a false
- * accusation against a source that was clean. Confining the directory removes the failure by
- * construction rather than by computing around it — and `out/` is where every artefact in this
- * repository already lives.
+ * UNDER `out/exposure-observation`, because `out/` is not empty. `out/exposure-calibration`
+ * holds two TRACKED files — the calibration's own `summary.json` and `manifest.json` — and this
+ * command writes files by those exact names: a plausible `--out out/exposure-calibration` would
+ * overwrite the published calibration result with an observation, and `gitIsDirty()`'s blindness
+ * to `out/` would let the replacement manifest report a clean tree while doing it. The rest of
+ * `out/` has the milder version of the same problem: `.gitignore` covers this observer's folder
+ * and nothing else, so an operational export written to `out/foo` sits there committable.
+ *
+ * Both are removed by construction rather than by computing around them.
  */
 export function parseOutDir(argv: readonly string[]): string {
   const raw = flag(argv, 'out') ?? DEFAULT_OUT_DIR;
   const normalised = raw.split('\\').join('/').replace(/\/+$/, '');
-  const inOut = normalised === 'out' || normalised.startsWith('out/');
+  const inNamespace = normalised === DEFAULT_OUT_DIR || normalised.startsWith(`${DEFAULT_OUT_DIR}/`);
   const escapes = normalised.split('/').includes('..');
-  if (path.isAbsolute(raw) || !inOut || escapes) {
+  if (path.isAbsolute(raw) || !inNamespace || escapes) {
     throw new WindowError(
-      `--out="${raw}" must be a repository-relative path under "out/" (default: ${DEFAULT_OUT_DIR}). ` +
-        'Anywhere else, the artefacts written before the manifest would make the working tree ' +
-        'dirty and the manifest would stamp crypto_buddy_tree_dirty on a source that was clean.',
+      `--out="${raw}" must be "${DEFAULT_OUT_DIR}" or a descendant of it. Elsewhere under "out/" it ` +
+        'would land in another brick\'s namespace — `out/exposure-calibration` holds two COMMITTED ' +
+        'files with these very names — and outside "out/" the artefacts written before the manifest ' +
+        'would make the tree dirty, so the manifest would stamp crypto_buddy_tree_dirty on a clean ' +
+        'source. This namespace is also the only one .gitignore covers.',
     );
   }
   return normalised;

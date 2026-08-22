@@ -554,13 +554,27 @@ console.log('Proof 11 — the cutoff is explicit, settled, and never defaulted:'
   // `gitIsDirty()` is blind to `out/` on purpose — a run writes its artefacts before stamping
   // the manifest. Outside it, those same writes would make the tree dirty and the manifest
   // would accuse a clean source.
-  ok('the output directory defaults under out/', parseOutDir([]) === DEFAULT_OUT_DIR);
-  ok('a nested one is accepted', parseOutDir(['--out', 'out/exposure-observation/run-a']) === 'out/exposure-observation/run-a');
-  ok('a trailing slash is normalised', parseOutDir(['--out', 'out/x/']) === 'out/x');
-  for (const bad of ['snapshots/run-a', '/tmp/run-a', 'out/../snapshots', 'C:\\tmp\\run-a']) {
+  ok('the output directory defaults to the observer namespace', parseOutDir([]) === DEFAULT_OUT_DIR);
+  ok(
+    'a descendant is accepted',
+    parseOutDir(['--out', 'out/exposure-observation/run-a']) === 'out/exposure-observation/run-a',
+  );
+  ok('a trailing slash is normalised', parseOutDir(['--out', 'out/exposure-observation/x/']) === 'out/exposure-observation/x');
+
+  // `out/exposure-calibration` is the one that would really hurt: it holds two COMMITTED files
+  // named `summary.json` and `manifest.json`, which is exactly what this command writes.
+  for (const bad of [
+    'out/exposure-calibration',
+    'out/foo',
+    'out',
+    'snapshots/run-a',
+    '/tmp/run-a',
+    'out/exposure-observation/../exposure-calibration',
+    'C:\\tmp\\run-a',
+  ]) {
     assert.throws(() => parseOutDir(['--out', bad]), WindowError, `--out=${bad} must be refused`);
   }
-  ok('anywhere outside out/ is refused, absolute paths and escapes included', true);
+  ok('every other destination is refused — another brick\u2019s namespace, the rest of out/, absolutes, escapes', true);
 }
 
 // ── PROOF 12 — nothing in the payload reaches past the cutoff ────────────────────────

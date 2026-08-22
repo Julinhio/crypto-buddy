@@ -225,6 +225,7 @@ et un livre réels, régénérables à tout instant depuis le même cutoff.
 | lecture seule sur la base vivante | un seul fichier (`read.ts`) peut construire une requête, dans tout le graphe transitif ; aucun fichier de l'observateur ne nomme une méthode d'écriture |
 | aucune lecture déchirée | la liste d'identités est relue après les tables filles ; toute différence fait échouer le run |
 | aucun instant lu dans le fuseau de la machine | `instants.ts` refuse toute chaîne sans fuseau explicite, pour les bornes du CLI comme pour le `barAt` journalisé |
+| les artefacts ne peuvent atterrir ailleurs | `--out` est confiné à `out/exposure-observation` et ses descendants — le seul chemin que `.gitignore` couvre, et le seul qui n'écrase pas les artefacts commités d'une autre brique |
 | aucune bande dans le chemin d'extraction | `arms.ts` est inatteignable depuis `observe.ts` ; aucun appel de fonction de bande ; aucune clé « bande » dans les artefacts |
 | aucun chemin de production ne lit l'observateur | aucun fichier hors `src/observation` n'importe `observation/exposure` ni ne lit `out/exposure-observation` |
 | chaque cycle apparaît exactement une fois | `every_cycle_exactly_once` |
