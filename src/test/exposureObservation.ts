@@ -387,6 +387,12 @@ console.log('Proof 6 — the exposure is Σ non-reserve, and a malformed total s
   ok('an asset outside the universe still counts as exposure', foreign.exposure_percent === 25);
   ok('and is named', foreign.unknown_assets.join(',') === 'DOGE');
   ok('a missing allocation is null, never an empty one', allocationView(null, UNIVERSE, OPTIONS.reserves) === null);
+
+  // An unreadable weight dropped in silence would leave the exposure and the sum computed from
+  // the survivors — a corrupted row reading as a valid, smaller allocation.
+  const corrupt = allocationView({ BTC: 'twenty', ETH: 10, USDT: 70 }, UNIVERSE, OPTIONS.reserves)!;
+  ok('an unreadable weight is named rather than dropped', corrupt.unreadable_assets.join(',') === 'BTC');
+  ok('a readable allocation names none', foreign.unreadable_assets.length === 0);
 }
 
 // ── PROOF 7 — the bar synthesis does not over-weight multiple wake-ups ───────────────
@@ -872,6 +878,48 @@ console.log('Proof 15 — the integrity checks are falsifiable:');
     UNIVERSE,
   );
   ok('a partial verdict set fails its check', !named(partialVerdicts, 'transition_verdicts_are_complete_or_absent').ok);
+
+  // THE COUNT IS NOT THE SET. A cycle from a previous universe of the same cardinality — one
+  // retired asset in, one current asset missing — passes a cardinality test while every gate and
+  // stop summary downstream covers the wrong lines.
+  const retiredAsset = buildSnapshot(
+    {
+      decisions: [decisionRow({ id: 806, at: '2026-08-12T00:10:00.000Z', barAt: '2026-08-12T00:00:00.000Z' })],
+      observations: [...UNIVERSE.slice(1), 'LTC'].map((asset) =>
+        observationRow({ decisionId: 806, asset, barAt: '2026-08-12T00:00:00.000Z' }),
+      ),
+      executions: [],
+    },
+    window,
+    UNIVERSE,
+  );
+  ok(
+    'a verdict set of the right SIZE but the wrong assets fails too',
+    retiredAsset.summary.population.transition_verdicts === UNIVERSE.length &&
+      !named(retiredAsset, 'transition_verdicts_are_complete_or_absent').ok,
+  );
+
+  const corrupted = buildSnapshot(
+    {
+      decisions: [
+        decisionRow({
+          id: 807,
+          at: '2026-08-12T00:10:00.000Z',
+          barAt: '2026-08-12T00:00:00.000Z',
+          target: { BTC: 'twenty', ETH: 10, BNB: 0, XRP: 0, USDT: 70 } as unknown as Record<string, number>,
+        }),
+      ],
+      observations: [],
+      executions: [],
+    },
+    window,
+    UNIVERSE,
+  );
+  ok('an unreadable allocation weight fails its own check', !named(corrupted, 'allocations_are_fully_readable').ok);
+  ok(
+    '…and it would have passed the exposure check on the survivors alone',
+    named(corrupted, 'decided_cycles_carry_both_exposures').ok,
+  );
 
   const disagreeing = buildSnapshot(
     {

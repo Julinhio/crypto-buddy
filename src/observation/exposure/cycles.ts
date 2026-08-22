@@ -50,6 +50,14 @@ export interface AllocationView {
   sum_percent: number;
   /** Allocation keys that are neither the reserve nor part of the controller universe. */
   unknown_assets: string[];
+  /**
+   * Keys the journal carries whose weight is not a finite number.
+   *
+   * Named rather than dropped: an unreadable weight removed in silence would leave the exposure
+   * and the sum computed from the survivors alone, and a corrupted row would read as a valid,
+   * smaller allocation. Any entry here fails `allocations_are_fully_readable`.
+   */
+  unreadable_assets: string[];
 }
 
 export interface BookPosition {
@@ -202,9 +210,19 @@ export function allocationView(
   let exposure = ZERO;
   let reserve = ZERO;
   const unknown: string[] = [];
+  const unreadable: string[] = [];
   for (const asset of Object.keys(raw).sort()) {
     const weight = numberOrNull(raw[asset] as number | string | null);
-    if (weight == null) continue;
+    // A KEY THE JOURNAL CARRIES AND NOBODY CAN READ IS NAMED, NEVER DROPPED.
+    //
+    // Skipping it silently would compute the exposure and the sum from the survivors alone, so a
+    // corrupted row would read as a valid, smaller allocation — and it would still satisfy
+    // `decided_cycles_carry_both_exposures`, since the view exists. Naming the key is what turns
+    // it into the integrity failure it is (`allocations_are_fully_readable`).
+    if (weight == null) {
+      unreadable.push(asset);
+      continue;
+    }
     allocation[asset] = weight;
     if (reserveSet.has(asset)) {
       reserve = reserve.plus(weight);
@@ -219,6 +237,7 @@ export function allocationView(
     reserve_percent: round(reserve, PERCENT_DP),
     sum_percent: round(exposure.plus(reserve), PERCENT_DP),
     unknown_assets: unknown,
+    unreadable_assets: unreadable,
   };
 }
 

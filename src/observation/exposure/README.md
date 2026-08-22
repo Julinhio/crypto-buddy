@@ -239,6 +239,8 @@ et un livre réels, régénérables à tout instant depuis le même cutoff.
 | aucun instant lu dans le fuseau de la machine | `instants.ts` refuse toute chaîne sans fuseau explicite, pour les bornes du CLI comme pour le `barAt` journalisé |
 | les artefacts ne peuvent atterrir ailleurs | `--out` est confiné **physiquement** à `out/exposure-observation` et ses descendants : chaque composant existant est résolu avant écriture, donc aucun lien ni aucune jonction n'en fait sortir, ni sur la racine ni sur un descendant |
 | aucun instant de mouvement n'est inventé | la sortie de stop et la réentrée portent l'instant de réservation du mouvement, `null` s'il manque, jamais l'instant du cycle |
+| les verdicts couvrent le bon univers | le contrôle compare le JEU d'actifs, pas son cardinal — un cycle d'un univers précédent de même taille échoue |
+| aucun poids d'allocation n'est écarté en silence | un poids illisible est nommé et fait échouer `allocations_are_fully_readable`, jamais réduit à une allocation plus petite |
 | aucune bande dans le chemin d'extraction | `arms.ts` est inatteignable depuis `observe.ts` ; aucun appel de fonction de bande ; aucune clé « bande » dans les artefacts |
 | aucun chemin de production ne lit l'observateur | aucun fichier hors `src/observation` n'importe `observation/exposure` ni ne lit `out/exposure-observation` |
 | chaque cycle apparaît exactement une fois | `every_cycle_exactly_once` |

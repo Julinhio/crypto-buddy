@@ -320,16 +320,51 @@ function runChecks(
     ),
   );
 
-  const badVerdictCount = cycles.filter(
-    (c) => c.transition.verdicts.length !== 0 && c.transition.verdicts.length !== universe.length,
-  );
+  /**
+   * THE ASSET SET, NOT ITS SIZE.
+   *
+   * Counting alone passes on a cycle from a previous universe of the same cardinality — one
+   * retired asset in, one current asset missing — and the snapshot would then certify a complete
+   * verdict set while every gate and stop summary downstream covered the wrong lines. The
+   * universe has changed before (BNB was promoted from the watchlist), and this tool takes an
+   * arbitrary window, so the two eras can genuinely meet inside one population.
+   *
+   * Absent stays legal: rows predating migration 0022 carry no verdict at all.
+   */
+  const expectedAssets = [...universe].sort().join(',');
+  const badVerdictSet = cycles.filter((c) => {
+    if (c.transition.verdicts.length === 0) return false;
+    return c.transition.verdicts.map((v) => v.asset).sort().join(',') !== expectedAssets;
+  });
   checks.push(
     check(
       'transition_verdicts_are_complete_or_absent',
-      badVerdictCount.length === 0,
-      badVerdictCount.length === 0
-        ? `every cycle carries 0 or ${universe.length} verdicts`
-        : `${badVerdictCount.length} cycle(s) with a partial verdict set: ${ids(badVerdictCount)}`,
+      badVerdictSet.length === 0,
+      badVerdictSet.length === 0
+        ? `every cycle carries no verdict, or exactly one per universe asset (${expectedAssets})`
+        : `${badVerdictSet.length} cycle(s) whose verdict set is not the universe: ${ids(badVerdictSet)}`,
+    ),
+  );
+
+  /**
+   * A weight the journal carries and nobody can read is a defect, not a smaller allocation.
+   *
+   * Without this, a corrupted row keeps a non-null view — so it satisfies
+   * `decided_cycles_carry_both_exposures` — while its exposure and its sum are computed from the
+   * surviving keys alone.
+   */
+  const unreadable = cycles.filter((c) =>
+    [c.model_decision.raw_target, c.model_decision.applied_target, c.model_decision.intent_target].some(
+      (view) => (view?.unreadable_assets.length ?? 0) > 0,
+    ),
+  );
+  checks.push(
+    check(
+      'allocations_are_fully_readable',
+      unreadable.length === 0,
+      unreadable.length === 0
+        ? 'every journaled allocation weight is a finite number'
+        : `${unreadable.length} cycle(s) carry an unreadable weight: ${ids(unreadable)}`,
     ),
   );
 
