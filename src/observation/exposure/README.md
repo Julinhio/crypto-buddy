@@ -134,14 +134,20 @@ rien ne sort, le pic n'est jamais réinitialisé et la ligne reste sous son seui
 peut donc être vrai sur des dizaines de réveils consécutifs pour ce que le contrat compte comme
 **une seule** sortie. Un épisode est une suite maximale de cycles consécutifs, par actif.
 
-**Un épisode qui touche une borne de fenêtre le dit.** `truncated_at_window_start` signale
-qu'aucun cycle de la fenêtre n'a jamais vu le stop NE PAS tirer sur cet actif avant la suite :
-il tirait peut-être déjà avant `--from`, donc c'est une continuation et non un début. Sans ce
+**Un épisode qui touche une borne de fenêtre le dit, et un début non observé pour une autre
+raison le dit autrement.** `truncated_at_window_start` signale
+que la suite commence au TOUT PREMIER cycle de la fenêtre : rien ne la précède ici, donc le
+stop tirait peut-être déjà avant `--from` et c'est une continuation, pas un début. Sans ce
 drapeau, deux snapshots voisins compteraient deux fois un seul épisode physique, chacun
 convaincu de l'avoir vu commencer. `truncated_at_window_end` signale une suite encore ouverte
 au cutoff : sa durée est une borne inférieure et sa réentrée est nécessairement nulle. La
 borne est **publiée**, jamais devinée — lire le verdict antérieur à `--from` ferait entrer
 dans le snapshot un fait extérieur à la fenêtre dont il tire tout son contrat.
+
+`preceded_by_missing_verdict` est l'AUTRE façon de ne pas voir un début : le cycle juste avant
+la suite n'a produit aucun verdict sur cet actif. La suite commence alors bien à l'intérieur de
+la fenêtre, et le dire avec le drapeau de bord enverrait un lecteur chercher un snapshot voisin
+qui n’a rien à voir. Deux censures, deux champs.
 
 Un cycle qui n'a produit **aucun verdict** sur cet actif ne prolonge pas la suite : il la
 coupe, et l'épisode le dit (`broken_by_missing_verdict`). Ponter le trou affirmerait une
@@ -259,6 +265,7 @@ et un livre réels, régénérables à tout instant depuis le même cutoff.
 | une borne n'est jamais tronquée | plus de trois décimales de seconde sont refusées : `timestamptz` porte des microsecondes et `Date.parse` les jette, ce qui sélectionnerait une autre fenêtre que celle demandée |
 | la réserve est celle que le livre du cycle a nommée | une clé de cash retirée n'est jamais comptée en exposition ; `reserves_observed` publie ce que les livres ont réellement nommé |
 | un drapeau de prix périmé illisible n'est pas un « prix vivant » | `priceStale` non booléen vaut `null` et fait échouer le contrôle, au lieu de présenter une valorisation au coût de revient comme une valorisation au prix du marché |
+| un actif nommé deux fois rend le livre illisible | les deux entrées sont publiées, jamais fusionnées en silence, et le contrôle échoue — tout consommateur qui résout une ligne par son nom prend la première |
 | le notionnel réservé vient du livre, pas de la demande | `booked_notional_quote` dérive de `ledger_base_delta` ; `requested_notional_quote` reste publié à côté, et c'est le seul qui ait un sens sur un intent rejeté |
 | la stabilité du contexte porte sur le contexte entier | l'empreinte est l'objet publié, pas une poignée d'agrégats où deux dérives opposées s'annulent |
 | aucune bande dans le chemin d'extraction | `arms.ts` est inatteignable depuis `observe.ts` ; aucun appel de fonction de bande ; aucune clé « bande » dans les artefacts |

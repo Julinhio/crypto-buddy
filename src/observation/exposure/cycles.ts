@@ -111,6 +111,16 @@ export interface BookView {
   /** Positions whose journaled quantity is not a finite number. Fails an explicit check. */
   unreadable_qty_assets: string[];
   /**
+   * Assets the collection names MORE THAN ONCE.
+   *
+   * `derivePortfolio` aggregates by asset and cannot produce one, so a duplicate means the
+   * journal is not what it claims. Both entries are published — dropping one would be exactly
+   * the silent normalisation this reader refuses — but every consumer that resolves a line by
+   * name takes the FIRST match, so a stop residual would be computed from an arbitrary one of
+   * the two.
+   */
+  duplicate_position_assets: string[];
+  /**
    * Positions whose valuation metadata — `price`, `weightPercent`, `priceStale` — cannot be read.
    *
    * Kept apart from the quantity, which is the field a stop episode reasons on. These three
@@ -342,6 +352,7 @@ export function bookView(marketContext: unknown): BookView {
     price_stale_assets: [],
     unreadable_qty_assets: [],
     unreadable_valuation_assets: [],
+    duplicate_position_assets: [],
     // Nothing was CLAIMED here: no portfolio was journaled at all, which `exposure_percent: null`
     // already says. That is a different fact from a portfolio whose positions cannot be read.
     positions_unreadable: false,
@@ -407,6 +418,9 @@ export function bookView(marketContext: unknown): BookView {
     price_stale_assets: positions.filter((p) => p.price_stale === true).map((p) => p.asset),
     unreadable_qty_assets: positions.filter((p) => p.qty == null).map((p) => p.asset),
     unreadable_valuation_assets: unreadableValuation.slice().sort(),
+    duplicate_position_assets: [
+      ...new Set(positions.map((p) => p.asset).filter((asset, i, all) => all.indexOf(asset) !== i)),
+    ].sort(),
     positions_unreadable: positionsUnreadable,
     unreadable_position_entries: unreadableEntries,
     unreadable_summary_fields: unreadableSummary,

@@ -95,10 +95,15 @@ export interface StopEpisode {
   /**
    * THE EPISODE TOUCHES A WINDOW EDGE, so its boundary is censored rather than observed.
    *
-   * `truncated_at_window_start` means no in-window cycle was ever seen NOT firing on this asset
-   * before the run — the stop may well have been firing before `--from`, and this is a
+   * `truncated_at_window_start` means the run begins at the window’s FIRST cycle: nothing
+   * precedes it here, so the stop may well have been firing before `--from` and this is a
    * CONTINUATION rather than a beginning. Two adjacent snapshots would otherwise count one
    * physical episode twice, each convinced it had watched it start.
+   *
+   * `preceded_by_missing_verdict` is the OTHER way a beginning goes unobserved: the cycle just
+   * before the run produced no verdict on this asset. The run then starts well inside the
+   * window, and saying so with the window flag would send a consumer looking for a neighbouring
+   * snapshot that has nothing to do with it. Two censoring causes, two fields.
    *
    * `truncated_at_window_end` means the run was still open at the cutoff: the episode has not
    * been seen to end, so its duration is a lower bound and its `re_entry` is necessarily null.
@@ -107,6 +112,7 @@ export interface StopEpisode {
    * a fact from outside the declared window into a snapshot whose whole contract is that window.
    */
   truncated_at_window_start: boolean;
+  preceded_by_missing_verdict: boolean;
   truncated_at_window_end: boolean;
   /**
    * The first BOOKED BUY on this asset in a cycle strictly after the episode. Null when none
@@ -181,19 +187,25 @@ export function buildStopFacts(cycles: readonly CycleObservation[]): StopFacts {
   const episodes: StopEpisode[] = [];
   for (const asset of observedAssets(ordered)) {
     let run: CycleObservation[] = [];
-    // Has this asset already been SEEN not firing inside the window? Until it has, a run that is
-    // open cannot be known to have begun here — it may have been running before `--from`.
-    let seenNotFiring = false;
+    // Where the run STARTS, so the two ways of not seeing a beginning stay apart: the window
+    // edge, and an unobserved stretch. Conflating them would make a run that begins well inside
+    // the window read as a continuation from before `--from`.
+    let startIndex = -1;
 
     const close = (endIndex: number, gap: boolean, atWindowEnd: boolean): void => {
       if (run.length === 0) return;
       episodes.push(
         buildEpisode(asset, run, ordered, endIndex, gap, {
-          atWindowStart: !seenNotFiring,
+          // Nothing precedes it in the window at all.
+          atWindowStart: startIndex === 0,
+          // The cycle immediately before it produced no verdict on this asset, so whether the
+          // stop was already firing then is simply not known.
+          afterGap: startIndex > 0 && verdictFor(ordered[startIndex - 1]!, asset) == null,
           atWindowEnd,
         }),
       );
       run = [];
+      startIndex = -1;
     };
 
     for (let i = 0; i < ordered.length; i += 1) {
@@ -206,13 +218,11 @@ export function buildStopFacts(cycles: readonly CycleObservation[]): StopFacts {
         continue;
       }
       if (verdict.stop.would_fire) {
+        if (run.length === 0) startIndex = i;
         run.push(cycle);
         continue;
       }
       close(i, false, false);
-      // The stop is observed NOT firing on this asset. Every later run provably begins inside
-      // the window.
-      seenNotFiring = true;
     }
     close(ordered.length, false, true);
   }
@@ -241,7 +251,7 @@ function buildEpisode(
   ordered: readonly CycleObservation[],
   endIndex: number,
   brokenByGap: boolean,
-  boundary: { atWindowStart: boolean; atWindowEnd: boolean },
+  boundary: { atWindowStart: boolean; afterGap: boolean; atWindowEnd: boolean },
 ): StopEpisode {
   const first = run[0]!;
   const last = run[run.length - 1]!;
@@ -308,6 +318,7 @@ function buildEpisode(
     exit,
     broken_by_missing_verdict: brokenByGap,
     truncated_at_window_start: boundary.atWindowStart,
+    preceded_by_missing_verdict: boundary.afterGap,
     truncated_at_window_end: boundary.atWindowEnd,
     re_entry: reEntry,
     cycles_after_episode_in_window: after.length,

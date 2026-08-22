@@ -451,6 +451,17 @@ console.log('Proof 5 — a cycle without a valid model response stays in the pop
       .price_stale_assets.join(',') === 'ETH',
   );
 
+  // TWO ENTRIES FOR ONE ASSET. `derivePortfolio` aggregates by asset and cannot produce one, so
+  // a duplicate means the journal is not what it claims — and every consumer that resolves a
+  // line by name takes the FIRST match, so a stop residual would come from an arbitrary one.
+  const twice = bookWith([
+    { asset: 'ETH', qty: 0.5, price: 100, weightPercent: 5, priceStale: false },
+    { asset: 'ETH', qty: 9.9, price: 100, weightPercent: 5, priceStale: false },
+  ]);
+  ok('a duplicated asset is named', twice.cycles.cycles[0]!.book.duplicate_position_assets.join(',') === 'ETH');
+  ok('both entries are still published, never silently merged', twice.cycles.cycles[0]!.book.positions.length === 2);
+  ok('…and the book is unreadable', !readable(twice));
+
   // THE SUMMARY, ON THE SAME RULE. `exposure_percent` is what every per-bar extremum rests on,
   // and a corrupted `deployedPercent` reaches the artefact as a clean null — indistinguishable
   // from the cycle above that journaled no book at all, which is legitimate and already visible.
@@ -759,8 +770,45 @@ console.log('Proof 9 — a stop that stays fired for twenty wake-ups is ONE epis
     facts.episodes[0]!.truncated_at_window_start && !facts.episodes[0]!.truncated_at_window_end,
   );
   ok(
-    'the second provably began inside the window — the stop was seen not firing before it',
-    !facts.episodes[1]!.truncated_at_window_start,
+    'the second began inside the window, after an unobserved stretch — a different censoring',
+    !facts.episodes[1]!.truncated_at_window_start && facts.episodes[1]!.preceded_by_missing_verdict,
+  );
+
+  // THE TWO CENSORINGS ARE NOT THE SAME. A run that starts after a gap does not touch the
+  // window edge, and labelling it as if it did would send a reader to a neighbouring snapshot
+  // that has nothing to do with it.
+  const afterAGap = buildStopFacts(
+    buildCycles(
+      {
+        decisions: [
+          decisionRow({ id: 560, at: '2026-08-12T00:10:00.000Z', barAt: '2026-08-12T00:00:00.000Z' }),
+          decisionRow({ id: 561, at: '2026-08-12T04:10:00.000Z', barAt: '2026-08-12T04:00:00.000Z' }),
+          decisionRow({ id: 562, at: '2026-08-12T08:10:00.000Z', barAt: '2026-08-12T08:00:00.000Z' }),
+        ],
+        // The FIRST cycle produces no verdict on BTC at all; the stop then fires on the second.
+        observations: [
+          ...UNIVERSE.filter((a) => a !== 'BTC').map((asset) =>
+            observationRow({ decisionId: 560, asset, barAt: '2026-08-12T00:00:00.000Z' }),
+          ),
+          ...UNIVERSE.map((asset) =>
+            observationRow({ decisionId: 561, asset, barAt: '2026-08-12T04:00:00.000Z', wouldFire: asset === 'BTC' }),
+          ),
+          ...UNIVERSE.map((asset) =>
+            observationRow({ decisionId: 562, asset, barAt: '2026-08-12T08:00:00.000Z' }),
+          ),
+        ],
+        executions: [],
+      },
+      OPTIONS,
+    ),
+  );
+  ok(
+    'a run beginning after a gap is NOT flagged at the window start',
+    !afterAGap.episodes[0]!.truncated_at_window_start,
+  );
+  ok(
+    'it is flagged as preceded by an unobserved cycle instead',
+    afterAGap.episodes[0]!.preceded_by_missing_verdict,
   );
 
   // THE OTHER EDGE. A run still open at the cutoff has not been seen to end: its duration is a
