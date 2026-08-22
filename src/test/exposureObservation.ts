@@ -11,7 +11,7 @@ import { allocationView, buildCycles, defaultBuildOptions } from '../observation
 import { buildBars, buildIntrabar } from '../observation/exposure/bars.js';
 import { buildStopFacts } from '../observation/exposure/stops.js';
 import { buildSnapshot, instantsAtOrAfter } from '../observation/exposure/snapshot.js';
-import { parseWindow, WindowError, type ObservationWindow } from '../observation/exposure/window.js';
+import { DEFAULT_OUT_DIR, parseOutDir, parseWindow, WindowError, type ObservationWindow } from '../observation/exposure/window.js';
 import { readWindow, ReadError } from '../observation/exposure/read.js';
 import type { DecisionRowRead, ExecutionRowRead, ObservationRowRead, RawWindow } from '../observation/exposure/read.js';
 import { canonicalInstant, parseZonedInstant } from '../observation/exposure/instants.js';
@@ -550,6 +550,17 @@ console.log('Proof 11 — the cutoff is explicit, settled, and never defaulted:'
 
   const offset = parseWindow(['--from', '2026-08-12T07:00:00+07:00', '--cutoff', '2026-08-20T00:00:00Z'], now);
   ok('an explicit offset is accepted, and normalised to UTC', offset.from === '2026-08-12T00:00:00.000Z');
+
+  // `gitIsDirty()` is blind to `out/` on purpose — a run writes its artefacts before stamping
+  // the manifest. Outside it, those same writes would make the tree dirty and the manifest
+  // would accuse a clean source.
+  ok('the output directory defaults under out/', parseOutDir([]) === DEFAULT_OUT_DIR);
+  ok('a nested one is accepted', parseOutDir(['--out', 'out/exposure-observation/run-a']) === 'out/exposure-observation/run-a');
+  ok('a trailing slash is normalised', parseOutDir(['--out', 'out/x/']) === 'out/x');
+  for (const bad of ['snapshots/run-a', '/tmp/run-a', 'out/../snapshots', 'C:\\tmp\\run-a']) {
+    assert.throws(() => parseOutDir(['--out', bad]), WindowError, `--out=${bad} must be refused`);
+  }
+  ok('anywhere outside out/ is refused, absolute paths and escapes included', true);
 }
 
 // ── PROOF 12 — nothing in the payload reaches past the cutoff ────────────────────────
@@ -668,6 +679,25 @@ console.log('Proof 14 — an absent regime is a fact, a malformed one is a defec
   wrongType.assets.BTC!.bearish = 'no';
   const typed = contextOf(wrongType, UNIVERSE);
   ok('and so is one whose types drifted', !typed.ok && typed.reason === 'malformed_regime_journal');
+
+  // The GLOBAL block, same rule. Its numbers reach the artefact through `numberOrNull`, so a
+  // corrupted breadth would be published as a clean `null` — indistinguishable from a bar where
+  // it genuinely was not measured.
+  for (const field of ['riskOff', 'raw', 'breadthPercent', 'assetsPresent', 'assetsExpected', 'pendingBars']) {
+    const holed = JSON.parse(JSON.stringify(complete)) as { global: Record<string, unknown> };
+    delete holed.global[field];
+    const result = contextOf(holed, UNIVERSE);
+    assert.ok(!result.ok && result.reason === 'malformed_regime_journal', `a journal missing global.${field} must be refused`);
+  }
+  ok('a journal missing any global field is refused, field by field', true);
+
+  const nullRsi = JSON.parse(JSON.stringify(complete)) as { global: Record<string, unknown> };
+  nullRsi.global.medianH4Rsi = null;
+  ok('but a null median RSI is a fact, not a hole — no asset produced one on that bar', contextOf(nullRsi, UNIVERSE).ok);
+
+  const textRsi = JSON.parse(JSON.stringify(complete)) as { global: Record<string, unknown> };
+  textRsi.global.medianH4Rsi = '46.8';
+  ok('while any other non-number is still a defect', !contextOf(textRsi, UNIVERSE).ok);
 
   // The live corpus is the counter-check: on 22/08 the tightening rejected none of the 592
   // journals (2 960 asset entries) the bot has written.

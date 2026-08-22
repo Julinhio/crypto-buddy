@@ -196,6 +196,22 @@ export function parseRegimeJournal(raw: unknown): RegimeJournal | null {
   if (!isRecord(global)) throw new Error('regime.global is not an object');
   if (typeof global.riskOff !== 'boolean') throw new Error('regime.global.riskOff is not a boolean');
   if (typeof global.raw !== 'boolean') throw new Error('regime.global.raw is not a boolean');
+  // The GLOBAL block gets the same treatment as the per-asset ones, and for the same reason:
+  // it is cast wholesale into a `GlobalPosture`, and every numeric field below is published
+  // through `numberOrNull`, which turns a missing or wrongly typed value into a clean `null`.
+  // A corrupted breadth would therefore reach the artefact as "not measured" with every check
+  // green — indistinguishable, to any later reader, from a bar where it genuinely was not.
+  for (const field of ['breadthPercent', 'assetsPresent', 'assetsExpected', 'pendingBars'] as const) {
+    const value = global[field];
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new Error(`regime.global.${field} is not a finite number (got ${String(value)})`);
+    }
+  }
+  // Nullable BY CONTRACT — no asset produced a 4h RSI on that bar — so null is a fact here,
+  // not a hole. Any other non-number is still a defect.
+  if (!(global.medianH4Rsi === null || (typeof global.medianH4Rsi === 'number' && Number.isFinite(global.medianH4Rsi)))) {
+    throw new Error(`regime.global.medianH4Rsi is neither null nor a finite number (got ${String(global.medianH4Rsi)})`);
+  }
   if (!isRecord(assets)) throw new Error('regime.assets is not an object');
   // EVERY field the cast below promises, not only the ones this module reads.
   //

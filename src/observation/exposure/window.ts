@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { config } from '../../config/index.js';
 import { parseZonedInstant } from './instants.js';
 
@@ -115,7 +116,34 @@ export function parseWindow(argv: readonly string[], nowMs: number): Observation
   };
 }
 
-/** The output directory, defaulted — it names nothing about the population. */
+/** Where the artefacts land. Defaulted, because it names nothing about the population. */
+export const DEFAULT_OUT_DIR = 'out/exposure-observation';
+
+/**
+ * THE OUTPUT DIRECTORY IS CONFINED TO `out/`, and that is a provenance rule.
+ *
+ * The manifest stamps `crypto_buddy_tree_dirty` — "was the source really the commit I claim" —
+ * and `gitIsDirty()` answers it while deliberately ignoring `out/`, because a run WRITES its
+ * artefacts before stamping the manifest and a whole-tree check would report "dirty" on every
+ * single run, for a reason having nothing to do with the code.
+ *
+ * Point `--out` at a repository path OUTSIDE `out/` and that blindness stops applying: the two
+ * artefacts written a moment earlier make the tree dirty, and the manifest records a false
+ * accusation against a source that was clean. Confining the directory removes the failure by
+ * construction rather than by computing around it — and `out/` is where every artefact in this
+ * repository already lives.
+ */
 export function parseOutDir(argv: readonly string[]): string {
-  return flag(argv, 'out') ?? 'out/exposure-observation';
+  const raw = flag(argv, 'out') ?? DEFAULT_OUT_DIR;
+  const normalised = raw.split('\\').join('/').replace(/\/+$/, '');
+  const inOut = normalised === 'out' || normalised.startsWith('out/');
+  const escapes = normalised.split('/').includes('..');
+  if (path.isAbsolute(raw) || !inOut || escapes) {
+    throw new WindowError(
+      `--out="${raw}" must be a repository-relative path under "out/" (default: ${DEFAULT_OUT_DIR}). ` +
+        'Anywhere else, the artefacts written before the manifest would make the working tree ' +
+        'dirty and the manifest would stamp crypto_buddy_tree_dirty on a source that was clean.',
+    );
+  }
+  return normalised;
 }
