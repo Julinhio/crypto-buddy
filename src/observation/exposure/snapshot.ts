@@ -368,6 +368,22 @@ function runChecks(
     ),
   );
 
+  /**
+   * The same rule on the BOOK. An unreadable held quantity published as zero would be a real,
+   * zero-sized position to every later reader — and a stop episode would compute its
+   * `pre_trade_qty` and its residual from a number nobody wrote.
+   */
+  const unreadableBook = cycles.filter((c) => c.book.unreadable_qty_assets.length > 0);
+  checks.push(
+    check(
+      'book_positions_are_readable',
+      unreadableBook.length === 0,
+      unreadableBook.length === 0
+        ? 'every journaled position quantity is a finite number'
+        : `${unreadableBook.length} cycle(s) carry an unreadable held quantity: ${ids(unreadableBook)}`,
+    ),
+  );
+
   const inBars = bars.reduce((sum, bar) => sum + bar.cycles, 0);
   checks.push(
     check(

@@ -62,7 +62,14 @@ export interface AllocationView {
 
 export interface BookPosition {
   asset: string;
-  qty: number;
+  /**
+   * NULL when the journaled quantity is not a finite number.
+   *
+   * `fromNumeric` maps a null to ZERO, which is right for money arithmetic and wrong here: it
+   * would publish a real, zero-sized position where the book was simply unreadable, and a stop
+   * episode would then compute a `pre_trade_qty` and a residual from a quantity nobody wrote.
+   */
+  qty: number | null;
   price: number | null;
   weight_percent: number | null;
   price_stale: boolean;
@@ -81,6 +88,8 @@ export interface BookView {
   positions: BookPosition[];
   /** Positions valued at their average cost because no live price came back. */
   price_stale_assets: string[];
+  /** Positions whose journaled quantity is not a finite number. Fails an explicit check. */
+  unreadable_qty_assets: string[];
 }
 
 export interface StopView {
@@ -136,8 +145,22 @@ export interface MovementFact {
   ledger_quote_delta: number | null;
   valuation_price: number | null;
   fee: number | null;
-  /** |requested_qty x valuation_price| — the movement as it was sized, before the venue. */
-  gross_notional_quote: number | null;
+  /**
+   * |requested_qty x valuation_price| — the movement AS ASKED, before the exchange's step
+   * rounding. The meaningful figure on a REJECTED intent, which moved nothing.
+   */
+  requested_notional_quote: number | null;
+  /**
+   * |ledger_base_delta x valuation_price| — what actually MOVED THE BOOK, gross of fee. Null
+   * when nothing booked.
+   *
+   * Kept apart from the requested notional because `bookedIntent` stores the UNSNAPPED request
+   * in `requested_qty` and moves the ledger by the SNAPPED quantity: on 12/08 a BTC sell asked
+   * 0.00079926 and booked 0.00079, so a notional derived from the request overstates the
+   * booking by the whole rounding crumb — and that figure is summed per bar and attached to
+   * every stop exit and re-entry.
+   */
+  booked_notional_quote: number | null;
   /** The venue trace: what the exchange did with it. Null when no trace was journaled. */
   venue: {
     traced_at: string | null;
@@ -250,6 +273,7 @@ export function bookView(marketContext: unknown): BookView {
     reserve_asset: null,
     positions: [],
     price_stale_assets: [],
+    unreadable_qty_assets: [],
   };
   if (!isRecord(marketContext)) return empty;
   const account = marketContext.account;
@@ -261,9 +285,12 @@ export function bookView(marketContext: unknown): BookView {
   const positions: BookPosition[] = [];
   for (const entry of rawPositions) {
     if (!isRecord(entry) || typeof entry.asset !== 'string') continue;
+    const qty = numberOrNull(entry.qty as number | string | null);
     positions.push({
       asset: entry.asset,
-      qty: round(fromNumeric(numberOrNull(entry.qty as number | string | null)), QTY_DP),
+      // NULL stays null. `fromNumeric` would map it to ZERO, publishing a real zero-sized
+      // position where the book was simply unreadable.
+      qty: qty == null ? null : round(new Decimal(qty), QTY_DP),
       price: numberOrNull(entry.price as number | string | null),
       weight_percent: numberOrNull(entry.weightPercent as number | string | null),
       price_stale: entry.priceStale === true,
@@ -278,6 +305,7 @@ export function bookView(marketContext: unknown): BookView {
     reserve_asset: typeof portfolio.reserveAsset === 'string' ? portfolio.reserveAsset : null,
     positions,
     price_stale_assets: positions.filter((p) => p.price_stale).map((p) => p.asset),
+    unreadable_qty_assets: positions.filter((p) => p.qty == null).map((p) => p.asset),
   };
 }
 
@@ -352,21 +380,29 @@ export function movementsOf(rows: readonly ExecutionRowRead[]): MovementFact[] {
       const trace = tracesByIntent.get(intent.id) ?? null;
       const qty = numberOrNull(intent.requested_qty);
       const price = numberOrNull(intent.valuation_price);
+      const delta = numberOrNull(intent.ledger_base_delta);
+      const booked = intent.validation_status === 'executed';
       return {
         asset: baseAssetOf(intent.symbol),
         symbol: intent.symbol,
         side: intent.side,
         booked_at: canonicalInstant(intent.created_at),
-        booked: intent.validation_status === 'executed',
+        booked,
         validation_status: intent.validation_status,
         validation_reason: intent.validation_reason,
         requested_qty: qty,
-        ledger_base_delta: numberOrNull(intent.ledger_base_delta),
+        ledger_base_delta: delta,
         ledger_quote_delta: numberOrNull(intent.ledger_quote_delta),
         valuation_price: price,
         fee: numberOrNull(intent.fee),
-        gross_notional_quote:
+        requested_notional_quote:
           qty == null || price == null ? null : round(new Decimal(qty).times(price).abs(), PERCENT_DP),
+        // From the LEDGER delta, never the request — the two differ by the exchange's step
+        // rounding on every movement that books.
+        booked_notional_quote:
+          !booked || delta == null || price == null
+            ? null
+            : round(new Decimal(delta).times(price).abs(), PERCENT_DP),
         venue: trace
           ? {
               traced_at: canonicalInstant(trace.created_at),

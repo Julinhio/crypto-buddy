@@ -94,6 +94,7 @@ interface DecisionFixture {
   regimes?: Record<string, AssetRegime>;
   deployed?: number | null;
   positions?: Array<{ asset: string; qty: number }>;
+  medianH4Rsi?: number | null;
   target?: Record<string, number> | null;
   applied?: Record<string, number> | null;
 }
@@ -116,7 +117,7 @@ function decisionRow(f: DecisionFixture): DecisionRowRead {
     target_allocation: f.target === undefined ? { BTC: 10, ETH: 5, BNB: 0, XRP: 0, USDT: 85 } : f.target,
     applied_allocation: f.applied === undefined ? (f.target === undefined ? { BTC: 10, ETH: 5, BNB: 0, XRP: 0, USDT: 85 } : f.target) : f.applied,
     intent_allocation: null,
-    regime: f.barAt == null ? null : journalOf(f.barAt, f.regimes ?? ALL_RANGE),
+    regime: f.barAt == null ? null : journalOf(f.barAt, f.regimes ?? ALL_RANGE, { medianH4Rsi: f.medianH4Rsi }),
     market_context: {
       generatedAt: f.at,
       account: {
@@ -196,8 +197,13 @@ function intentRow(
   qty: number,
   price = 100,
   createdAt = '2026-08-12T00:00:30.000Z',
+  // `bookedIntent` stores the UNSNAPPED request and moves the ledger by the SNAPPED quantity,
+  // so the two are only equal when the request already sat on the exchange's step.
+  opts: { bookedQty?: number; rejected?: boolean } = {},
 ): ExecutionRowRead {
   executionId += 1;
+  const rejected = opts.rejected === true;
+  const booked = rejected ? 0 : (opts.bookedQty ?? qty);
   return {
     id: executionId,
     decision_id: decisionId,
@@ -205,14 +211,14 @@ function intentRow(
     symbol,
     side,
     event_type: 'intent',
-    validation_status: 'executed',
+    validation_status: rejected ? 'rejected' : 'executed',
     validation_reason: 'fixture',
     requested_qty: qty,
     executed_qty: null,
     valuation_price: price,
     fee: 0,
-    ledger_base_delta: side === 'buy' ? qty : -qty,
-    ledger_quote_delta: side === 'buy' ? -qty * price : qty * price,
+    ledger_base_delta: side === 'buy' ? booked : -booked,
+    ledger_quote_delta: side === 'buy' ? -booked * price : booked * price,
     execution_outcome: null,
     exchange_avg_price: null,
     intent_execution_id: null,
@@ -368,6 +374,28 @@ console.log('Proof 5 — a cycle without a valid model response stays in the pop
     'a cycle whose book was not journaled reports a null exposure, not a zero',
     cycles[3]!.book.exposure_percent === null,
   );
+
+  // AN UNREADABLE HELD QUANTITY IS NOT A FLAT LINE. `fromNumeric` maps a null to ZERO, which is
+  // right for money arithmetic and wrong here: it would publish a real, zero-sized position, and
+  // a stop episode would compute its `pre_trade_qty` and its residual from a number nobody wrote.
+  const brokenBook = decisionRow({ id: 5, at: '2026-08-12T04:10:00.000Z', barAt: '2026-08-12T04:00:00.000Z' });
+  (brokenBook.market_context as { account: { portfolio: { positions: unknown[] } } }).account.portfolio.positions = [
+    { asset: 'BTC', qty: 'lots', price: 100, weightPercent: 10, priceStale: false },
+    { asset: 'ETH', qty: 0.5, price: 100, weightPercent: 10, priceStale: false },
+  ];
+  const withBrokenBook = buildSnapshot(
+    { decisions: [brokenBook], observations: [], executions: [] },
+    windowOf('2026-08-12T00:00:00.000Z', '2026-08-13T00:00:00.000Z'),
+    UNIVERSE,
+  );
+  const book = withBrokenBook.cycles.cycles[0]!.book;
+  ok('an unreadable quantity stays null rather than becoming a zero position', book.positions[0]!.qty === null);
+  ok('it is named', book.unreadable_qty_assets.join(',') === 'BTC');
+  ok('the readable one is untouched', book.positions[1]!.qty === 0.5);
+  ok(
+    'and the snapshot fails its book-readability check',
+    !withBrokenBook.summary.checks.find((c) => c.name === 'book_positions_are_readable')!.ok,
+  );
 }
 
 // ── PROOF 6 — exposure is the sum of the non-reserve weights ─────────────────────────
@@ -426,6 +454,60 @@ console.log('Proof 7 — a bar counts once, however many times the bot woke up i
   ok('counting cycles would have said 5 neutral — which is why bars are the unit', perCycle === 5);
   ok('every cycle is accounted for in exactly one bar', bars.reduce((sum, b) => sum + b.cycles, 0) === cycles.length);
   ok('and the context is stable inside each bar', bars.every((bar) => bar.context_stable));
+
+  // THE AGGREGATES ARE NOT THE CONTEXT. These two wake-ups share a bar, a state, a net breadth
+  // and every count — one asset's rise cancels another's fall — while describing two different
+  // markets. A fingerprint over the tallies alone would publish the first and call the bar
+  // stable, hiding the drift the field exists to expose.
+  const mirrored = buildBars(
+    buildCycles(
+      {
+        decisions: [
+          decisionRow({
+            id: 110,
+            at: '2026-08-12T08:10:00.000Z',
+            barAt: '2026-08-12T08:00:00.000Z',
+            regimes: { BTC: 'trend_up', ETH: 'trend_down', BNB: 'range', XRP: 'range' },
+          }),
+          decisionRow({
+            id: 111,
+            at: '2026-08-12T09:10:00.000Z',
+            barAt: '2026-08-12T08:00:00.000Z',
+            regimes: { BTC: 'trend_down', ETH: 'trend_up', BNB: 'range', XRP: 'range' },
+          }),
+        ],
+        observations: [],
+        executions: [],
+      },
+      OPTIONS,
+    ),
+  )[0]!;
+  ok(
+    'the aggregates really are identical across the two wake-ups',
+    mirrored.context!.state === 'neutral' && mirrored.context!.net_breadth === 0 && mirrored.context!.bullish === 1,
+  );
+  ok('yet the bar is reported UNSTABLE', !mirrored.context_stable && mirrored.context_variants === 2);
+  ok('and the per-asset field is named', mirrored.context_unstable_fields.includes('assets'));
+
+  // The same for the inputs a later variant is judged on: a partial outage moves `medianH4Rsi`
+  // and `assetsPresent` inside a bar without touching a single count.
+  const rsiDrift = buildBars(
+    buildCycles(
+      {
+        decisions: [
+          decisionRow({ id: 120, at: '2026-08-12T12:10:00.000Z', barAt: '2026-08-12T12:00:00.000Z', medianH4Rsi: 46 }),
+          decisionRow({ id: 121, at: '2026-08-12T13:10:00.000Z', barAt: '2026-08-12T12:00:00.000Z', medianH4Rsi: 71 }),
+        ],
+        observations: [],
+        executions: [],
+      },
+      OPTIONS,
+    ),
+  )[0]!;
+  ok(
+    'a median RSI moving inside a bar is caught, and the global block is named',
+    !rsiDrift.context_stable && rsiDrift.context_unstable_fields.includes('journal_global'),
+  );
 }
 
 // ── PROOF 8 — intrabar changes of mind are visible, and so are their absences ────────
@@ -525,7 +607,7 @@ console.log('Proof 10 — a booked exit, a real re-entry, and no proxy anywhere:
   ok('the exit carries the ORDER instant, not the cycle instant', episode.exit?.booked_at === '2026-08-12T00:10:20.000Z');
   ok('the re-entry is the first booked BUY after the episode', episode.re_entry?.decision_id === 602);
   ok('and it too carries the ORDER instant', episode.re_entry?.booked_at === '2026-08-12T08:10:25.000Z');
-  ok('and it is a real order, not a mechanical one', episode.re_entry?.gross_notional_quote === 0.4);
+  ok('and it is a real order, not a mechanical one', episode.re_entry?.booked_notional_quote === 0.4);
   ok(
     'the episode boundaries stay the WAKE-UP instants, and are named apart',
     episode.from_cycle_at === '2026-08-12T00:10:00.000Z' && episode.to_cycle_at === '2026-08-12T00:10:00.000Z',
@@ -550,6 +632,29 @@ console.log('Proof 10 — a booked exit, a real re-entry, and no proxy anywhere:
   ok('a booking with no usable instant publishes null rather than the cycle time', unstamped.exit?.booked_at === null);
   ok('and so does a re-entry whose instant carries no timezone', unstamped.re_entry?.booked_at === null);
   ok('while the movement itself is still reported', unstamped.exit?.decision_id === 600 && unstamped.re_entry?.decision_id === 602);
+
+  // THE NOTIONAL COMES FROM THE LEDGER, NOT FROM THE REQUEST. The exchange's step rounding puts
+  // the two apart on every booking, and the requested figure overstates what moved the book.
+  const rounded = buildCycles(
+    {
+      decisions: [decisionRow({ id: 600, at: '2026-08-12T00:10:00.000Z', barAt: '2026-08-12T00:00:00.000Z' })],
+      observations: [],
+      executions: [
+        intentRow(600, 'BTC/USDT', 'sell', 0.0007992624952012143, 64019.32, '2026-08-12T00:10:20.000Z', {
+          bookedQty: 0.00079,
+        }),
+        intentRow(600, 'ETH/USDT', 'buy', 0.05, 2000, '2026-08-12T00:10:21.000Z', { rejected: true }),
+      ],
+    },
+    OPTIONS,
+  )[0]!;
+  const [sell, crumb] = rounded.movements;
+  ok('the requested notional is what was asked', sell!.requested_notional_quote === 51.168241);
+  ok('the booked notional is what moved the book — 0.6 quote lower here', sell!.booked_notional_quote === 50.575263);
+  ok(
+    'a rejected intent has a requested notional and NO booked one',
+    crumb!.booked === false && crumb!.requested_notional_quote === 100 && crumb!.booked_notional_quote === null,
+  );
 }
 
 // ── PROOF 11 — the window refuses everything ambiguous ───────────────────────────────

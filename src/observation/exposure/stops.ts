@@ -64,7 +64,7 @@ export interface StopEpisodeMovement {
   booked_base_delta: number | null;
   /** `pre_trade_qty − |booked_base_delta|`. Published so "was it a full exit" is arithmetic. */
   residual_qty: number | null;
-  gross_notional_quote: number | null;
+  booked_notional_quote: number | null;
   gate: string | null;
   order_verdict: string | null;
 }
@@ -99,7 +99,7 @@ export interface StopEpisode {
    * `booked_at` is the ORDER's instant, for the same reason as on the exit above: this is the
    * far end of the stop-to-re-entry delay the next chantier will measure.
    */
-  re_entry: { decision_id: number; booked_at: string | null; gross_notional_quote: number | null } | null;
+  re_entry: { decision_id: number; booked_at: string | null; booked_notional_quote: number | null } | null;
   /**
    * Cycles observed after the episode ended, inside the window. The honest denominator for
    * "no re-entry": with no horizon and no censoring rule — both belong to the next chantier —
@@ -234,7 +234,7 @@ function buildEpisode(
       booked_base_delta: delta,
       residual_qty:
         qty == null || delta == null ? null : round(new Decimal(qty).minus(new Decimal(delta).abs()), QTY_DP),
-      gross_notional_quote: movement.gross_notional_quote,
+      booked_notional_quote: movement.booked_notional_quote,
       gate: verdict?.gate ?? null,
       order_verdict: verdict?.order?.verdict ?? null,
     };
@@ -249,7 +249,7 @@ function buildEpisode(
     reEntry = {
       decision_id: cycle.decision_id,
       booked_at: movement.booked_at,
-      gross_notional_quote: movement.gross_notional_quote,
+      booked_notional_quote: movement.booked_notional_quote,
     };
     break;
   }

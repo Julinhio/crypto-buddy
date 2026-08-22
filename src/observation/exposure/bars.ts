@@ -74,18 +74,31 @@ export interface BarSynthesis {
   atomic_refusal_cycles: number;
 }
 
-/** The context fields whose stability inside a bar is worth asserting rather than assuming. */
-const CONTEXT_FIELDS = ['state', 'risk_off', 'net_breadth', 'bullish', 'bearish', 'neutral', 'unavailable', 'bar_at'] as const;
-
+/**
+ * THE WHOLE PUBLISHED CONTEXT, not a chosen handful of its fields.
+ *
+ * A fingerprint over the aggregates alone — state, counts, net breadth — treats two wake-ups as
+ * identical whenever their differences cancel: BTC up with ETH down, then the reverse, produce
+ * the same tallies and the same state. It would also miss `medianH4Rsi` and `assetsPresent`
+ * moving inside a bar, which is exactly what a partial market-data outage does — and those two
+ * are the inputs a later variant is judged on. A field that hides the drift it exists to expose
+ * is worse than no field.
+ *
+ * So the fingerprint is the published object itself, and the instability report names its
+ * top-level fields. Every context comes from the same construction site in `contextOf`, so the
+ * key order is fixed and `JSON.stringify` is a stable comparison rather than a lucky one.
+ */
 function contextFingerprint(context: ControllerContext): string {
-  return JSON.stringify(CONTEXT_FIELDS.map((field) => context[field]));
+  return JSON.stringify(context);
 }
 
 function unstableFields(contexts: readonly ControllerContext[]): string[] {
+  const keys = new Set<string>();
+  for (const context of contexts) for (const key of Object.keys(context)) keys.add(key);
   const moved: string[] = [];
-  for (const field of CONTEXT_FIELDS) {
-    const distinct = new Set(contexts.map((c) => JSON.stringify(c[field])));
-    if (distinct.size > 1) moved.push(field);
+  for (const key of [...keys].sort()) {
+    const distinct = new Set(contexts.map((c) => JSON.stringify((c as unknown as Record<string, unknown>)[key])));
+    if (distinct.size > 1) moved.push(key);
   }
   return moved;
 }
@@ -144,8 +157,8 @@ export function buildBars(cycles: readonly CycleObservation[]): BarSynthesis[] {
       for (const movement of cycle.movements) {
         if (!movement.booked) continue;
         bookedCount += 1;
-        if (movement.gross_notional_quote != null) {
-          bookedNotional = bookedNotional.plus(movement.gross_notional_quote);
+        if (movement.booked_notional_quote != null) {
+          bookedNotional = bookedNotional.plus(movement.booked_notional_quote);
         }
       }
     }
