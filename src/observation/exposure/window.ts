@@ -1,0 +1,107 @@
+import { config } from '../../config/index.js';
+
+/**
+ * THE WINDOW — half-open `[from, cutoff)`, both bounds EXPLICIT, neither defaulted.
+ *
+ * Two bounds a caller has to type, on purpose. A default would be a hidden parameter of every
+ * number the snapshot publishes: re-run the tool a week later with the same command line and
+ * a defaulted cutoff would silently extract a different population, while the output folder
+ * looked exactly the same. The cutoff is the one thing this brick promises to make explicit,
+ * so it is not something the tool may invent.
+ *
+ * Half-open, so two adjacent windows can never both claim the same cycle.
+ */
+export interface ObservationWindow {
+  fromMs: number;
+  /** EXCLUSIVE. A cycle at exactly this instant belongs to the next window. */
+  toMs: number;
+  from: string;
+  toExclusive: string;
+}
+
+export class WindowError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WindowError';
+  }
+}
+
+/**
+ * A CYCLE IS NOT ATOMIC, AND THE CUTOFF HAS TO RESPECT THAT.
+ *
+ * `decide()` inserts the decision row FIRST, then places the orders, then journals the
+ * executions and the transition observations. A cutoff landing inside that sequence would
+ * capture a decision whose movements and verdicts had not been written yet — and the
+ * snapshot would record, permanently and with a clean digest, a cycle that traded nothing
+ * and saw nothing. Worse: re-running the same cutoff an hour later would produce a DIFFERENT
+ * snapshot from the same command line, which is precisely the property this brick sells.
+ *
+ * So the cutoff must be old enough that any cycle before it has necessarily finished. The
+ * bound used is the run-lock TTL rather than the cycle budget: the lock is what production
+ * guarantees no cycle outlives (`lockTtlSeconds > maxCycleSeconds + grace`, enforced at
+ * boot), so it is the honest upper bound on "a wake-up that started before T is over".
+ */
+export function settleMarginSeconds(): number {
+  return config.scheduler.lockTtlSeconds;
+}
+
+/** Parses one `--flag value` pair out of argv. Returns null when the flag is absent. */
+function flag(argv: readonly string[], name: string): string | null {
+  const i = argv.indexOf(`--${name}`);
+  if (i < 0) return null;
+  const value = argv[i + 1];
+  if (value == null || value.startsWith('--')) {
+    throw new WindowError(`--${name} needs a value (ISO-8601 UTC, e.g. 2026-08-12T00:00:00Z)`);
+  }
+  return value;
+}
+
+function parseInstant(label: string, raw: string): number {
+  const ms = Date.parse(raw);
+  if (!Number.isFinite(ms)) {
+    throw new WindowError(`${label}="${raw}" is not a parsable instant — expected ISO-8601 UTC`);
+  }
+  return ms;
+}
+
+export const USAGE =
+  'usage: npm run observe:exposure -- --from <ISO-8601 UTC> --cutoff <ISO-8601 UTC> [--out <dir>]';
+
+/**
+ * Builds the window from argv, refusing everything ambiguous.
+ *
+ * `nowMs` is injected so the settle rule is testable without waiting for a clock. The CLI
+ * passes the wall clock; nothing that clock touches reaches the artefacts.
+ */
+export function parseWindow(argv: readonly string[], nowMs: number): ObservationWindow {
+  const rawFrom = flag(argv, 'from');
+  const rawCutoff = flag(argv, 'cutoff');
+  if (rawFrom == null || rawCutoff == null) {
+    throw new WindowError(`--from and --cutoff are both required and never defaulted. ${USAGE}`);
+  }
+  const fromMs = parseInstant('--from', rawFrom);
+  const toMs = parseInstant('--cutoff', rawCutoff);
+  if (!(fromMs < toMs)) {
+    throw new WindowError(`--from (${rawFrom}) must be strictly before --cutoff (${rawCutoff})`);
+  }
+  const marginMs = settleMarginSeconds() * 1000;
+  if (toMs > nowMs - marginMs) {
+    throw new WindowError(
+      `--cutoff (${new Date(toMs).toISOString()}) is too recent: a cycle that started just before it ` +
+        `may still be writing its executions and its transition verdicts. The cutoff must be at least ` +
+        `${settleMarginSeconds()}s (the run-lock TTL) in the past — i.e. at or before ` +
+        `${new Date(nowMs - marginMs).toISOString()}.`,
+    );
+  }
+  return {
+    fromMs,
+    toMs,
+    from: new Date(fromMs).toISOString(),
+    toExclusive: new Date(toMs).toISOString(),
+  };
+}
+
+/** The output directory, defaulted — it names nothing about the population. */
+export function parseOutDir(argv: readonly string[]): string {
+  return flag(argv, 'out') ?? 'out/exposure-observation';
+}

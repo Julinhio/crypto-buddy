@@ -34,3 +34,11 @@ Thumbs.db
 # manifest still records its SHA-256, so a regenerated trajectory can be checked against the
 # one that produced these numbers. That makes the hash a verification rather than a duplicate.
 out/**/trajectory.json
+
+# Exposure OBSERVATION artefacts — never committed.
+#
+# They are a read-only extract of the live journal: real allocations, real movements, real
+# book. Regenerable at any time from the same cutoff (that is the point of the manifest), so
+# committing them would buy nothing and would put an operational export in the history of a
+# public repository.
+out/exposure-observation/
