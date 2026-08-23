@@ -323,9 +323,15 @@ async function main(): Promise<number> {
   // hashes — mixed corpora wearing one manifest. So the identity of the experiment
   // (mandate hashes, reconstructed user-prompt hashes, model, plan shape) is frozen
   // in a manifest next to the corpus: a mismatch refuses the stale artefacts rather
-  // than absorbing them. A pre-manifest corpus is admitted once — its provenance is
-  // still checked record-by-record on `requestedModel` below, and the manifest
-  // written now freezes it for every later run.
+  // than absorbing them.
+  //
+  // AND A MISSING MANIFEST IS A REFUSAL, NEVER A RETROACTIVE BLESSING. Writing the
+  // current manifest beside a journal that predates it would assert an identity nobody
+  // recorded. Neither guard downstream can stand in for it: the per-record model check
+  // and the re-judgment both look at the RESPONSE, and a response generated under a
+  // different system prompt re-judges identically — the judgment never reads the
+  // prompt. A corpus without its own manifest is precisely the corpus whose provenance
+  // cannot be established, so it is refused rather than adopted.
   const manifest = {
     schemaVersion: 1,
     requestedModel,
@@ -348,6 +354,14 @@ async function main(): Promise<number> {
       );
       return 1;
     }
+  } else if (existsSync(CALLS_FILE) && loadExistingCalls().length > 0) {
+    console.error(
+      `[STOP] ${CALLS_FILE} contient des appels mais aucun manifeste ne les accompagne — ` +
+        'leur provenance (prompts système et utilisateur sous lesquels ils ont été produits) ' +
+        'ne peut pas être établie, et le re-jugement ne peut pas y suppléer : un jugement ne ' +
+        `lit pas le prompt. Déplacer ou supprimer ${OUT_DIR} et relancer l'expérience entière.`,
+    );
+    return 1;
   } else {
     writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
   }
@@ -406,6 +420,12 @@ async function main(): Promise<number> {
       JSON.stringify(rejudged.guard?.violations.map((v) => v.rule) ?? []) === JSON.stringify(record.guardRules) &&
       JSON.stringify(rejudged.openedZeroLines) === JSON.stringify(record.openedZeroLines);
     if (!same) misjudged.push(record.key);
+    // The VERDICT-bearing fields above must be identical, and are what §6 reads. The
+    // movement DETAIL is descriptive, and its notionals are sized against the book —
+    // so it is refreshed from this judgment rather than left describing an older
+    // reconstruction. Nothing in the analysis or the committed report reads it; it
+    // exists for local inspection, and it should describe the current pipeline.
+    record.movements = rejudged.movements;
   }
   if (misjudged.length > 0) {
     console.error(

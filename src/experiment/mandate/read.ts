@@ -1,4 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { fromNumeric } from '../../money.js';
+import type { LedgerEntry } from '../../persistence/executions.js';
 import type { DecisionSummary } from '../../persistence/decisions.js';
 import {
   resolveEffectiveTarget,
@@ -80,6 +82,44 @@ export async function loadLastSignificantBefore(
   if (!row) return null;
   const { executions: _joined, ...summary } = row;
   return summary as DecisionSummary & { id: number };
+}
+
+/**
+ * The SOVEREIGN LEDGER as it stood strictly BEFORE a cycle — production's
+ * `loadLedger` (persistence/executions.ts) with a decision bound added.
+ *
+ * `decision_id <` rather than a timestamp: decision ids come from a bigserial and
+ * are handed out in cycle order, so the bound is exact, and it excludes the target
+ * cycle's OWN bookings — which is precisely the book production derived before
+ * calling the model. Replay order is the monotonic id, exactly as production does
+ * it: two intents from one cycle can share a timestamp, and the replay must be
+ * deterministic.
+ *
+ * This is what lets the harness rebuild the book at FULL PRECISION rather than
+ * rehydrating the rounded `PortfolioView` the context persisted (n2 on money, n8 on
+ * quantities). See the `book_from_ledger` gate in reconstruct.ts.
+ */
+export async function loadLedgerBefore(
+  supabase: SupabaseClient,
+  beforeDecisionId: number,
+): Promise<LedgerEntry[]> {
+  const { data, error } = await supabase
+    .from('executions')
+    .select('symbol, side, valuation_price, ledger_base_delta, ledger_quote_delta')
+    .eq('event_type', 'intent')
+    .eq('validation_status', 'executed')
+    .lt('decision_id', beforeDecisionId)
+    .order('id', { ascending: true });
+  if (error) {
+    throw new Error(`could not load the ledger before decision ${beforeDecisionId}: ${error.message}`);
+  }
+  return (data ?? []).map((row: Record<string, unknown>) => ({
+    symbol: String(row.symbol),
+    side: row.side as LedgerEntry['side'],
+    valuationPrice: fromNumeric(row.valuation_price as string),
+    baseDelta: fromNumeric(row.ledger_base_delta as string),
+    quoteDelta: fromNumeric(row.ledger_quote_delta as string),
+  }));
 }
 
 export interface GuardReferenceBefore {

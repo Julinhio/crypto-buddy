@@ -1,6 +1,6 @@
 # Expérience — le cadrage du mandat v5 influence-t-il l'exposition totale demandée ?
 
-Généré le 2026-08-23T06:10:37.821Z par `npm run experiment:mandate`. Rapport entièrement
+Généré le 2026-08-23T06:35:42.378Z par `npm run experiment:mandate`. Rapport entièrement
 produit par le harnais à partir des artefacts de run — aucune valeur saisie à la main.
 
 ## Question et cadre
@@ -44,9 +44,9 @@ Modèle demandé pour chaque appel : `claude-sonnet-4-6`.
 - ✓ `row_identity` — status=decided, prompt_version=v5, model=claude-sonnet-4-6 (expected decided / v5 / claude-sonnet-4-6)
 - ✓ `context_shape` — all required keys present (generatedAt, source, market, account, regime, positions)
 - ✓ `enforce_mode_detected` — all 5 regime entries carry `actionable` and no candidate fields — the cycle ran under TRANSITION_MODE=enforce
-- ✓ `portfolio_roundtrip` — toPortfolioView(rebuilt book) equals the persisted view field-for-field (key-order independent)
-- ✓ `portfolio_consistency` — cash (922.96) + positions (101.99) vs equity (1024.95): gap 0.0000
 - ✓ `universe_match` — derived universe [BTC, ETH, BNB, XRP, USDT] vs stored target keys [BNB, BTC, ETH, XRP, USDT]
+- ✓ `book_from_ledger` — replayed 58 booked intent(s) from starting capital 1000: the full-precision book projects onto the persisted view field-for-field
+- ✓ `portfolio_consistency` — cash (922.96) + positions (101.99) vs equity (1024.95): gap 0.0000
 - ✓ `historical_exposure` — stored requested exposure 20 vs brief 20
 - ✓ `memory_row` — production memory query found 1283 (expected 1283)
 - ✓ `guard_reference_row` — guard reference query found 1296 (expected 1296)
@@ -63,9 +63,9 @@ Modèle demandé pour chaque appel : `claude-sonnet-4-6`.
 - ✓ `row_identity` — status=decided, prompt_version=v5, model=claude-sonnet-4-6 (expected decided / v5 / claude-sonnet-4-6)
 - ✓ `context_shape` — all required keys present (generatedAt, source, market, account, regime, positions)
 - ✓ `enforce_mode_detected` — all 5 regime entries carry `actionable` and no candidate fields — the cycle ran under TRANSITION_MODE=enforce
-- ✓ `portfolio_roundtrip` — toPortfolioView(rebuilt book) equals the persisted view field-for-field (key-order independent)
-- ✓ `portfolio_consistency` — cash (854.76) + positions (177.17) vs equity (1031.93): gap 0.0000
 - ✓ `universe_match` — derived universe [BTC, ETH, BNB, XRP, USDT] vs stored target keys [BNB, BTC, ETH, XRP, USDT]
+- ✓ `book_from_ledger` — replayed 72 booked intent(s) from starting capital 1000: the full-precision book projects onto the persisted view field-for-field
+- ✓ `portfolio_consistency` — cash (854.76) + positions (177.17) vs equity (1031.93): gap 0.0000
 - ✓ `historical_exposure` — stored requested exposure 22 vs brief 22
 - ✓ `memory_row` — production memory query found 1399 (expected 1399)
 - ✓ `guard_reference_row` — guard reference query found 1432 (expected 1432)
@@ -82,9 +82,9 @@ Modèle demandé pour chaque appel : `claude-sonnet-4-6`.
 - ✓ `row_identity` — status=decided, prompt_version=v5, model=claude-sonnet-4-6 (expected decided / v5 / claude-sonnet-4-6)
 - ✓ `context_shape` — all required keys present (generatedAt, source, market, account, regime, positions)
 - ✓ `enforce_mode_detected` — all 5 regime entries carry `actionable` and no candidate fields — the cycle ran under TRANSITION_MODE=enforce
-- ✓ `portfolio_roundtrip` — toPortfolioView(rebuilt book) equals the persisted view field-for-field (key-order independent)
-- ✓ `portfolio_consistency` — cash (531.9) + positions (490.49) vs equity (1022.39): gap 0.0000
 - ✓ `universe_match` — derived universe [BTC, ETH, BNB, XRP, USDT] vs stored target keys [BNB, BTC, ETH, XRP, USDT]
+- ✓ `book_from_ledger` — replayed 66 booked intent(s) from starting capital 1000: the full-precision book projects onto the persisted view field-for-field
+- ✓ `portfolio_consistency` — cash (531.9) + positions (490.49) vs equity (1022.39): gap 0.0000
 - ✓ `historical_exposure` — stored requested exposure 48 vs brief 48
 - ✓ `memory_row` — production memory query found 1367 (expected 1367)
 - ✓ `guard_reference_row` — guard reference query found 1367 (expected 1367)
@@ -101,9 +101,9 @@ Modèle demandé pour chaque appel : `claude-sonnet-4-6`.
 - ✓ `row_identity` — status=decided, prompt_version=v5, model=claude-sonnet-4-6 (expected decided / v5 / claude-sonnet-4-6)
 - ✓ `context_shape` — all required keys present (generatedAt, source, market, account, regime, positions)
 - ✓ `enforce_mode_detected` — all 5 regime entries carry `actionable` and no candidate fields — the cycle ran under TRANSITION_MODE=enforce
-- ✓ `portfolio_roundtrip` — toPortfolioView(rebuilt book) equals the persisted view field-for-field (key-order independent)
-- ✓ `portfolio_consistency` — cash (834.31) + positions (242.57) vs equity (1076.88): gap 0.0000
 - ✓ `universe_match` — derived universe [BTC, ETH, BNB, XRP, USDT] vs stored target keys [BNB, BTC, ETH, XRP, USDT]
+- ✓ `book_from_ledger` — replayed 74 booked intent(s) from starting capital 1000: the full-precision book projects onto the persisted view field-for-field
+- ✓ `portfolio_consistency` — cash (834.31) + positions (242.57) vs equity (1076.88): gap 0.0000
 - ✓ `historical_exposure` — stored requested exposure 10 vs brief 10
 - ✓ `memory_row` — production memory query found 1443 (expected 1443)
 - ✓ `guard_reference_row` — guard reference query found 1493 (expected 1493)

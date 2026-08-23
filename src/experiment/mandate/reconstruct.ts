@@ -1,12 +1,13 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { config } from '../../config/index.js';
-import { dec } from '../../money.js';
-import type { PriceLookup, VirtualPortfolio } from '../../portfolio/derive.js';
+import { dec, type Decimal } from '../../money.js';
+import { derivePortfolio, type PriceLookup, type VirtualPortfolio } from '../../portfolio/derive.js';
+import type { LedgerEntry } from '../../persistence/executions.js';
+import { loadStartingCapital } from '../../persistence/startingCapital.js';
 import {
   buildPriceLookup,
   toPortfolioView,
   type DecisionContext,
-  type PortfolioView,
 } from '../../decision/context.js';
 import type { MarketContext } from '../../context/build.js';
 import { allocatableUniverse, reserveStables } from '../../decision/schema.js';
@@ -19,6 +20,7 @@ import {
   loadDecisionRow,
   loadGuardReferenceBefore,
   loadLastSignificantBefore,
+  loadLedgerBefore,
   type StoredDecisionRow,
 } from './read.js';
 import { judgeResponse, type PipelineInputs } from './pipeline.js';
@@ -89,7 +91,7 @@ export interface ReconstructedCycle {
 const EPS = 1e-9;
 
 /**
- * Key-order-independent serialization, for the round-trip comparison ONLY. jsonb
+ * Key-order-independent serialization, for the projection comparison ONLY. jsonb
  * reorders object keys, so a byte comparison of two stringifications would fail on
  * order while every value matches — the one difference the store is allowed to have.
  */
@@ -104,27 +106,40 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function rebuildPortfolio(view: PortfolioView): VirtualPortfolio {
-  return {
-    reserveAsset: view.reserveAsset,
-    startingCapital: dec(view.startingCapital),
-    cash: dec(view.cash),
-    positions: view.positions.map((p) => ({
-      asset: p.asset,
-      qty: dec(p.qty),
-      avgCost: dec(p.avgCost),
-      price: dec(p.price),
-      priceStale: p.priceStale,
-      value: dec(p.value),
-      unrealizedPnl: dec(p.unrealizedPnl),
-      weightPercent: dec(p.weightPercent),
-    })),
-    equity: dec(view.equity),
-    deployedPercent: dec(view.deployedPercent),
-    realizedPnl: dec(view.realizedPnl),
-    unrealizedPnl: dec(view.unrealizedPnl),
-    totalPnl: dec(view.totalPnl),
-  };
+/**
+ * THE BOOK, REBUILT AT FULL PRECISION — from the ledger, exactly as production does.
+ *
+ * The obvious shortcut is to rehydrate `market_context.account.portfolio`, and it is
+ * subtly wrong: that view is `toPortfolioView`'s projection, with money rounded to two
+ * decimals and quantities to eight, whereas production handed `computeMovements` the
+ * raw `derivePortfolio` output. Rehydrating it cannot recover what the projection
+ * dropped, so a leg sitting within a rounding error of the 2% plumbing floor could
+ * exist for production and not for the harness — and the floor decides whether a
+ * movement exists at all, which the coherence guard's rules 2 and 4 then read.
+ *
+ * A round-trip check on the rounded values does NOT close that: it proves rounding is
+ * idempotent, not that the precision came back. So the book is replayed from the same
+ * source production replays it from — the booked sovereign intents — and the check
+ * becomes a PROJECTION check: the full-precision book must project onto the persisted
+ * view exactly. That is a statement about the reconstruction, not about rounding.
+ *
+ * Measured on this corpus before the change: the closest any leg came to the floor was
+ * $2.08 against a maximum rounding error of $0.005 (416×), and re-judging all 80 stored
+ * responses against both books produced identical outcomes, guard verdicts, legs and
+ * zero-line openings — only notionals moved, in the third decimal. The defect was
+ * therefore latent here; it is closed structurally rather than argued about.
+ */
+function rebuildPortfolioFromLedger(params: {
+  ledger: LedgerEntry[];
+  startingCapital: Decimal;
+  reserveAsset: string;
+  priceOf: PriceLookup;
+}): VirtualPortfolio {
+  return derivePortfolio(params.ledger, {
+    startingCapital: params.startingCapital,
+    reserveAsset: params.reserveAsset,
+    priceOf: params.priceOf,
+  });
 }
 
 function sameAllocation(
@@ -191,27 +206,8 @@ export async function reconstructCycle(
       : 'the persisted regime payload does not match the enforce shape — the mode cannot be established',
   );
 
-  // ── The book, rebuilt losslessly ──────────────────────────────────────────────
-  const view = context.account.portfolio;
-  const portfolio = rebuildPortfolio(view);
-  const roundtrip = canonical(toPortfolioView(portfolio)) === canonical(view);
-  push(
-    'portfolio_roundtrip',
-    roundtrip,
-    roundtrip
-      ? 'toPortfolioView(rebuilt book) equals the persisted view field-for-field (key-order independent)'
-      : 'the rebuilt book does not round-trip to the persisted view — the reconstruction is lossy',
-  );
-
-  const positionsValue = view.positions.reduce((n, p) => n + p.value, 0);
-  const equityGap = Math.abs(view.cash + positionsValue - view.equity);
-  push(
-    'portfolio_consistency',
-    equityGap <= 0.05,
-    `cash (${view.cash}) + positions (${positionsValue.toFixed(2)}) vs equity (${view.equity}): gap ${equityGap.toFixed(4)}`,
-  );
-
   // ── The universe, derived exactly as decide() derives it ──────────────────────
+  // Ahead of the book, because the book needs the reserve and the price lookup.
   const reserveStable = reserveStables(config)[0] ?? 'USDT';
   const presentSymbols = context.market.tradable.map((pair) => pair.symbol);
   const assets = allocatableUniverse(presentSymbols, config);
@@ -224,7 +220,43 @@ export async function reconstructCycle(
     `derived universe [${assets.join(', ')}] vs stored target keys [${Object.keys(storedTarget).join(', ')}]`,
   );
 
+  // The prices are the context's OWN, at full precision: `market.tradable[].price` is
+  // the raw exchange read, never passed through the view's rounding.
   const priceOf: PriceLookup = buildPriceLookup(context as unknown as MarketContext, reserveStable);
+
+  // ── The book, replayed from the ledger at full precision ──────────────────────
+  const view = context.account.portfolio;
+  const ledger = await loadLedgerBefore(supabase, spec.decisionId);
+  const startingCapital =
+    (await loadStartingCapital(supabase)) ?? dec(config.execution.startingCapitalUsd);
+  const portfolio = rebuildPortfolioFromLedger({
+    ledger,
+    startingCapital,
+    reserveAsset: reserveStable,
+    priceOf,
+  });
+  // THE PROJECTION CHECK — strictly stronger than the round-trip it replaces. It does
+  // not ask "do these rounded numbers round the same way again" (which rounding
+  // guarantees); it asks whether a book replayed from the booked intents, at full
+  // precision, projects onto the view production persisted. Only one book does that.
+  const projects = canonical(toPortfolioView(portfolio)) === canonical(view);
+  push(
+    'book_from_ledger',
+    projects,
+    projects
+      ? `replayed ${ledger.length} booked intent(s) from starting capital ${startingCapital.toString()}: ` +
+        'the full-precision book projects onto the persisted view field-for-field'
+      : `replaying ${ledger.length} booked intent(s) does NOT reproduce the persisted view — ` +
+        `got ${JSON.stringify(toPortfolioView(portfolio))}, stored ${JSON.stringify(view)}`,
+  );
+
+  const positionsValue = view.positions.reduce((n, p) => n + p.value, 0);
+  const equityGap = Math.abs(view.cash + positionsValue - view.equity);
+  push(
+    'portfolio_consistency',
+    equityGap <= 0.05,
+    `cash (${view.cash}) + positions (${positionsValue.toFixed(2)}) vs equity (${view.equity}): gap ${equityGap.toFixed(4)}`,
+  );
 
   // ── The historical answer, re-pinned against the brief ────────────────────────
   const historicalExposure = 100 - (storedTarget[reserveStable] ?? 0);
