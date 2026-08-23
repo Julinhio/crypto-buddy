@@ -1,0 +1,400 @@
+import 'dotenv/config';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { getSupabaseClient } from '../../persistence/supabase.js';
+import { assertAnthropicConfigured, resolveModel, runDecision } from '../../decision/llm.js';
+import { classifyLlmFailure } from '../../decision/llmFailure.js';
+import { buildMandates, proveVariantProperty, MANDATE_IDS, type MandateId } from './variants.js';
+import {
+  EXPERIMENT_CONTEXTS,
+  reconstructCycle,
+  type ReconstructedCycle,
+} from './reconstruct.js';
+import { judgeResponse } from './pipeline.js';
+import { analyze, evaluateGate2 } from './analyze.js';
+import { buildReport } from './report.js';
+import {
+  EXPERIMENT_REPS,
+  localThreshold,
+  median,
+  planMainCalls,
+  type CallRecord,
+  type PlannedCall,
+  type Phase,
+  type TransportReplay,
+} from './records.js';
+
+/**
+ * THE EXPERIMENT RUNNER — brief « Harnais d'expérience sur le cadrage du mandat v5 ».
+ *
+ * SAFETY BY CONSTRUCTION, the probe's posture (src/probes/v5Behaviour.ts): this file
+ * imports the prompt builders, the LLM client, the judgement pipeline and the
+ * READ-ONLY loaders — and nothing else. No executor, no Telegram, no Healthchecks,
+ * no insert of any kind. It cannot write a row or place an order because it has no
+ * way to reach either.
+ *
+ * PHASES (the protocol's order, closed and arbitrated):
+ *   0. variants built and PROVED, four contexts reconstructed — gate 1. Any failure
+ *      stops before a single call.
+ *   A. the control C, 4 contexts × 5 reps, context-interleaved — then gate 2.
+ *   B. P/F/O, latin-square rotated per (round, context) — never a variant block.
+ *   E. the negative control's extensions: an anomalous cell on 1494 gets +3 reps.
+ *
+ * Every call is appended to `out/mandate-experiment/calls.jsonl` the moment it
+ * lands, so a crashed or interrupted run RESUMES: already-recorded (mandate,
+ * context, rep) triples are never re-called, and their timestamps are preserved.
+ *
+ * Run: `npm run experiment:mandate` (flags: --reconstruct-only, --analyze-only).
+ */
+
+const OUT_DIR = path.join('out', 'mandate-experiment');
+const RAW_DIR = path.join(OUT_DIR, 'raw');
+const CALLS_FILE = path.join(OUT_DIR, 'calls.jsonl');
+const REPORT_FILE = path.join('docs', 'RAPPORT-EXPERIENCE-MANDAT-V5.md');
+
+/** Production's decision model — verified against `decisions.model` on all four rows. */
+const PRODUCTION_MODEL = 'claude-sonnet-4-6';
+const REPS = EXPERIMENT_REPS;
+const EXTENSION_REPS = 3;
+/** Transport-family failures are replayed (brief §3.4); anything else aborts the run. */
+const MAX_TRANSPORT_REPLAYS = 4;
+
+const NEGATIVE_CONTROL = 1494;
+const VARIANTS: readonly MandateId[] = ['P', 'F', 'O'];
+
+const nowIso = (): string => new Date().toISOString();
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+function loadExistingCalls(): CallRecord[] {
+  if (!existsSync(CALLS_FILE)) return [];
+  return readFileSync(CALLS_FILE, 'utf8')
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => JSON.parse(line) as CallRecord);
+}
+
+async function executeCall(
+  planned: PlannedCall,
+  cycle: ReconstructedCycle,
+  systemPrompt: string,
+  requestedModel: string,
+): Promise<CallRecord> {
+  const key = `${planned.mandate}_${planned.contextId}_r${planned.rep}`;
+  const transportReplays: TransportReplay[] = [];
+  const startedAt = nowIso();
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const llm = await runDecision({
+        systemPrompt,
+        userPrompt: cycle.userPrompt,
+        assets: cycle.inputs.assets,
+        strategy: 'v5',
+        // NO retry parameter, ever: the experiment judges the PRIMARY response.
+      });
+      const judgement = judgeResponse(llm.rawResponse, cycle.inputs);
+
+      const rawFile = `${key}.json`;
+      writeFileSync(
+        path.join(RAW_DIR, rawFile),
+        JSON.stringify(
+          {
+            key,
+            startedAt,
+            rawResponse: llm.rawResponse,
+            parseError: llm.parseError,
+            stopReason: llm.stopReason,
+            targetAllocation: judgement.decision?.targetAllocation ?? null,
+            appliedAllocation: judgement.clamp?.applied ?? null,
+            guardViolations: judgement.guard?.violations ?? [],
+            movements: judgement.movements,
+          },
+          null,
+          2,
+        ),
+      );
+
+      return {
+        key,
+        orderIndex: planned.orderIndex,
+        phase: planned.phase,
+        mandate: planned.mandate,
+        contextId: planned.contextId,
+        rep: planned.rep,
+        startedAt,
+        finishedAt: nowIso(),
+        requestedModel,
+        returnedModel: llm.model,
+        latencyMs: llm.latencyMs,
+        inputTokens: llm.inputTokens,
+        outputTokens: llm.outputTokens,
+        stopReason: llm.stopReason,
+        transportReplays,
+        outcome: judgement.outcome,
+        orderViolation: judgement.orderViolation,
+        invalidReason: judgement.invalidReason,
+        guardRules: judgement.guard?.violations.map((v) => v.rule) ?? [],
+        requestedExposure: judgement.requestedExposure,
+        appliedExposure: judgement.appliedExposure,
+        clamped: judgement.clamp?.clamped ?? null,
+        actionType: judgement.decision?.actionType ?? null,
+        confidence: judgement.decision?.confidence ?? null,
+        openedZeroLines: judgement.openedZeroLines,
+        movements: judgement.movements,
+        rawFile,
+      };
+    } catch (err) {
+      const failure = classifyLlmFailure(err, { logicalAttempt: attempt + 1, elapsedMs: null });
+      if (failure.failureClass === 'retryable_llm_transport' && attempt < MAX_TRANSPORT_REPLAYS) {
+        const delayMs = 10_000 * 2 ** attempt;
+        console.warn(
+          `[transport] ${key}: ${failure.errorType} (${failure.message}) — replayed in ${delayMs / 1000}s ` +
+            `(${attempt + 1}/${MAX_TRANSPORT_REPLAYS}); counted separately, never as an invalid response.`,
+        );
+        transportReplays.push({
+          at: nowIso(),
+          errorType: failure.errorType,
+          failureClass: failure.failureClass,
+          httpStatus: failure.httpStatus,
+          message: failure.message,
+        });
+        await sleep(delayMs);
+        continue;
+      }
+      // A non-transport failure (auth, bad request, unknown model…) is systemic: the
+      // run stops with its state on disk, and resumes exactly where it was.
+      throw new Error(
+        `call ${key} failed outside the transport family (${failure.errorType}: ${failure.message}) — ` +
+          'stopping the run; already-recorded calls are preserved and the run is resumable.',
+        { cause: err },
+      );
+    }
+  }
+}
+
+function appendCall(record: CallRecord): void {
+  appendFileSync(CALLS_FILE, `${JSON.stringify(record)}\n`);
+}
+
+/** Anomaly rule for the negative control (preregistered, brief §6.3). */
+function extensionTriggers(calls: CallRecord[]): Array<{ mandate: MandateId; reason: string }> {
+  const controlExposures = calls
+    .filter((c) => c.mandate === 'C' && c.contextId === NEGATIVE_CONTROL && c.outcome === 'accepted')
+    .map((c) => c.requestedExposure)
+    .filter((e): e is number => e != null);
+  if (controlExposures.length === 0) return [];
+  const controlMedian = median(controlExposures);
+  const threshold = localThreshold(controlExposures);
+
+  const triggers: Array<{ mandate: MandateId; reason: string }> = [];
+  for (const mandate of VARIANTS) {
+    const cell = calls.filter(
+      (c) => c.mandate === mandate && c.contextId === NEGATIVE_CONTROL && c.phase !== 'extension',
+    );
+    const anomalous = cell.filter(
+      (c) =>
+        c.outcome === 'accepted' &&
+        ((c.requestedExposure != null && c.requestedExposure >= controlMedian + threshold) ||
+          c.openedZeroLines.length > 0),
+    );
+    if (anomalous.length > 0) {
+      triggers.push({
+        mandate,
+        reason:
+          `${anomalous.length} réponse(s) anormale(s) sur 1494 ` +
+          `(exposition ≥ médiane C + seuil, ou ouverture d'une ligne à zéro) — +${EXTENSION_REPS} répétitions`,
+      });
+    }
+  }
+  return triggers;
+}
+
+async function main(): Promise<number> {
+  const reconstructOnly = process.argv.includes('--reconstruct-only');
+  const analyzeOnly = process.argv.includes('--analyze-only');
+
+  mkdirSync(RAW_DIR, { recursive: true });
+  mkdirSync(path.join(OUT_DIR, 'prompts'), { recursive: true });
+
+  // ── Phase 0a — the four mandates, and the proof of the hard constraint ─────────
+  const mandates = buildMandates();
+  const proofs = proveVariantProperty(mandates);
+  writeFileSync(
+    path.join(OUT_DIR, 'variants.json'),
+    JSON.stringify(
+      MANDATE_IDS.map((id) => ({
+        id,
+        sha256: mandates[id].sha256,
+        insertion: mandates[id].insertion,
+        insertedAfterLine: mandates[id].insertedAfterLine,
+        proof: proofs.find((p) => p.id === id),
+      })),
+      null,
+      2,
+    ),
+  );
+  for (const id of MANDATE_IDS) {
+    writeFileSync(path.join(OUT_DIR, 'prompts', `system_${id}.txt`), mandates[id].prompt);
+  }
+  if (!proofs.every((p) => p.ok)) {
+    console.error('[STOP] la preuve de la contrainte dure a échoué — voir variants.json.');
+    return 1;
+  }
+  console.log('[variants] 4 mandats construits, contrainte dure prouvée.');
+  for (const id of MANDATE_IDS) console.log(`  ${id}: ${mandates[id].sha256}`);
+
+  // ── Phase 0b — reconstruction and gate 1 ───────────────────────────────────────
+  const supabase = getSupabaseClient();
+  if (!supabase) {
+    console.error('[STOP] Supabase non configuré — la reconstruction est impossible.');
+    return 1;
+  }
+  const cycles: ReconstructedCycle[] = [];
+  for (const spec of EXPERIMENT_CONTEXTS) {
+    const cycle = await reconstructCycle(supabase, spec);
+    cycles.push(cycle);
+    writeFileSync(path.join(OUT_DIR, 'prompts', `user_${spec.decisionId}.txt`), cycle.userPrompt);
+    console.log(
+      `[porte 1] décision ${spec.decisionId} (${spec.role}) : ${cycle.gate1.ok ? 'OK' : 'ARRÊT'}`,
+    );
+    for (const check of cycle.gate1.checks) {
+      console.log(`   ${check.ok ? '✓' : '✗'} ${check.name} — ${check.detail}`);
+    }
+  }
+  writeFileSync(
+    path.join(OUT_DIR, 'reconstruction.json'),
+    JSON.stringify(
+      cycles.map((c) => ({
+        decisionId: c.spec.decisionId,
+        role: c.spec.role,
+        createdAt: c.row.created_at,
+        lastSignificantId: c.lastSignificant?.id ?? null,
+        guardReferenceId: c.guardReferenceId,
+        fingerprints: c.fingerprints,
+        gate1: c.gate1,
+      })),
+      null,
+      2,
+    ),
+  );
+
+  const requestedModel = ((): string => {
+    process.env.ANTHROPIC_MODEL = PRODUCTION_MODEL;
+    return resolveModel();
+  })();
+
+  const writeReportFile = (calls: CallRecord[], aborted: string | null): void => {
+    const gate2 = evaluateGate2(calls);
+    const report = buildReport({
+      generatedAt: nowIso(),
+      requestedModel,
+      mandates,
+      proofs,
+      cycles,
+      gate2,
+      plan: fullPlan,
+      calls,
+      analysis: aborted == null && calls.length > 0 ? analyze(calls) : null,
+      aborted,
+    });
+    mkdirSync('docs', { recursive: true });
+    writeFileSync(REPORT_FILE, report);
+    console.log(`[rapport] écrit dans ${REPORT_FILE}`);
+  };
+
+  const fullPlan = planMainCalls(EXPERIMENT_CONTEXTS.map((s) => s.decisionId));
+  writeFileSync(path.join(OUT_DIR, 'order.json'), JSON.stringify(fullPlan, null, 2));
+
+  if (!cycles.every((c) => c.gate1.ok)) {
+    writeReportFile([], 'La porte 1 a tiré : au moins un contexte ne se reconstruit pas fidèlement. Aucun appel effectué.');
+    console.error('[STOP] porte 1 — reconstruction divergente. Retour à Julien avec l\'état.');
+    return 1;
+  }
+  if (reconstructOnly) {
+    console.log('[ok] --reconstruct-only : porte 1 validée, aucun appel effectué.');
+    return 0;
+  }
+
+  const cycleOf = new Map(cycles.map((c) => [c.spec.decisionId, c]));
+  const done = new Map(loadExistingCalls().map((c) => [c.key, c]));
+  const calls: CallRecord[] = [...done.values()];
+
+  if (!analyzeOnly) {
+    assertAnthropicConfigured();
+
+    const run = async (planned: PlannedCall): Promise<void> => {
+      const key = `${planned.mandate}_${planned.contextId}_r${planned.rep}`;
+      if (done.has(key)) return;
+      const cycle = cycleOf.get(planned.contextId)!;
+      const record = await executeCall(planned, cycle, mandates[planned.mandate].prompt, requestedModel);
+      appendCall(record);
+      done.set(key, record);
+      calls.push(record);
+      console.log(
+        `[appel ${record.orderIndex}] ${key}: ${record.outcome}` +
+          (record.requestedExposure != null ? `, exposition demandée ${record.requestedExposure.toFixed(1)}%` : '') +
+          ` (${(record.latencyMs / 1000).toFixed(1)}s)`,
+      );
+    };
+
+    // Phase A — the control, then gate 2 before any variant call.
+    for (const planned of fullPlan.filter((p) => p.phase === 'control')) await run(planned);
+
+    const gate2 = evaluateGate2(calls);
+    writeFileSync(path.join(OUT_DIR, 'gate2.json'), JSON.stringify(gate2, null, 2));
+    for (const g of gate2) console.log(`[porte 2] ${g.contextId}: ${g.ok ? 'OK' : 'ARRÊT'} — ${g.detail}`);
+    if (!gate2.some((g) => !g.ok)) {
+      console.log('[porte 2] validée sur les quatre contextes — phase variantes.');
+    } else {
+      writeReportFile(
+        calls,
+        'La porte 2 a tiré : le contrôle C ne reproduit pas la réponse historique dans le seuil ' +
+          'local sur au moins un contexte. Les variantes n\'ont pas été exécutées.',
+      );
+      console.error('[STOP] porte 2 — arrêt complet. Retour à Julien avec l\'état.');
+      return 1;
+    }
+
+    // Phase B — the variants, interleaved.
+    for (const planned of fullPlan.filter((p) => p.phase === 'variants')) await run(planned);
+
+    // Phase E — the negative control's extensions.
+    const triggers = extensionTriggers(calls);
+    let orderIndex = fullPlan.length;
+    for (const trigger of triggers) {
+      console.log(`[extension] ${trigger.mandate}@${NEGATIVE_CONTROL} : ${trigger.reason}`);
+      for (let i = 1; i <= EXTENSION_REPS; i += 1) {
+        const planned: PlannedCall = {
+          orderIndex: orderIndex++,
+          phase: 'extension' as Phase,
+          mandate: trigger.mandate,
+          contextId: NEGATIVE_CONTROL,
+          rep: REPS + i,
+        };
+        await run(planned);
+      }
+    }
+    if (triggers.length > 0) {
+      writeFileSync(path.join(OUT_DIR, 'extensions.json'), JSON.stringify(triggers, null, 2));
+    }
+  }
+
+  // ── Analysis + committed report ────────────────────────────────────────────────
+  if (calls.length === 0) {
+    console.error('[STOP] aucun appel enregistré — rien à analyser.');
+    return 1;
+  }
+  const analysis = analyze(calls);
+  writeFileSync(path.join(OUT_DIR, 'analysis.json'), JSON.stringify(analysis, null, 2));
+  writeReportFile(calls, null);
+  console.log(`[ok] ${calls.length} appels analysés — expérience terminée.`);
+  return 0;
+}
+
+main()
+  .then((code) => process.exit(code))
+  .catch((err: unknown) => {
+    console.error('[STOP] le harnais s\'est arrêté sur une erreur :');
+    console.error(err instanceof Error ? (err.stack ?? err.message) : err);
+    process.exit(1);
+  });

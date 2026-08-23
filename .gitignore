@@ -35,6 +35,13 @@ Thumbs.db
 # one that produced these numbers. That makes the hash a verification rather than a duplicate.
 out/**/trajectory.json
 
+# Mandate-framing EXPERIMENT artefacts — never committed.
+#
+# They carry the model's full responses (reasoning, theses) and the per-asset
+# allocations of real production contexts. The committed report
+# (docs/RAPPORT-EXPERIENCE-MANDAT-V5.md) only ever holds aggregates and hashes.
+out/mandate-experiment/
+
 # Exposure OBSERVATION artefacts — never committed.
 #
 # They are a read-only extract of the live journal: real allocations, real movements, real
