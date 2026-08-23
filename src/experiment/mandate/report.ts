@@ -238,7 +238,7 @@ export function buildReport(params: {
         ? ' Réserve (placebo inerte) : P n\'ayant été montré ni sur l\'exposition ni sur la' +
           ' confiance, l\'expérience ne distingue pas « lu mais sans effet » de « ignoré » —' +
           ' la conclusion se limite au fait mesuré : cet ajout, tel que formulé, ne déplace' +
-          ' pas l\'exposition demandée sur ces contextes.'
+          ' pas l\'exposition demandée au-delà du seuil local sur ces contextes.'
         : '';
       if (dead.eliminated) {
         push(`- **${mandate} : éliminé** — augmente les réponses primaires invalides ou refusées.`);
@@ -260,10 +260,22 @@ export function buildReport(params: {
             `(contextes ${blocked.map((b) => b.contextId).join(', ')}) : une instruction saillante quelconque déplace l'exposition.`,
         );
       } else {
+        // The measured shifts are stated, zero or not — "no retained effect" and "the
+        // median equalled the control" are different claims, and O on 1433 (+7 under a
+        // threshold of 10 in the committed corpus) is exactly the case that separates
+        // them. A sub-threshold shift is reported as what it is, never rounded to zero.
+        const shifts = analysis.effects
+          .filter((e) => e.mandate === mandate)
+          .map((e) => {
+            const s = e.effectSize;
+            const signed = s == null ? '—' : `${s >= 0 ? '+' : ''}${fmt(s)} pts`;
+            return `${e.contextId} ${signed} (seuil ${fmt(e.threshold)})`;
+          })
+          .join(', ');
         push(
-          `- **${mandate} : aucun déplacement au sens préenregistré** — médiane égale au contrôle` +
-            ' sur les trois contextes favorables, au seuil local près. Une absence d\'effet est un' +
-            ' résultat valide.' +
+          `- **${mandate} : aucun déplacement ne franchit le seuil préenregistré.** Déplacements` +
+            ` médians mesurés sur les contextes favorables : ${shifts}. Une absence d'effet retenu` +
+            ' est un résultat valide.' +
             inertCaveat,
         );
       }

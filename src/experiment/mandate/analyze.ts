@@ -233,10 +233,13 @@ export function analyze(calls: CallRecord[], specs: ContextSpec[] = EXPERIMENT_C
       const effectSize = c.median != null && v.median != null ? v.median - c.median : null;
       const clearsThreshold = effectSize != null && effectSize >= threshold;
       const placeboShift = c.median != null && p.median != null ? p.median - c.median : null;
-      // A variant's own effect cannot be "reproduced by itself": for P this flag is
-      // read as its own shift clearing the bar, which the placebo gate reports anyway.
+      // ABSOLUTE, not signed — the brief's placebo gate (§6.2) fires on a placebo
+      // moving the exposure by the threshold in EITHER direction: a P that shifts the
+      // exposure downward proves a salient instruction moves it, and that disqualifies
+      // a causal reading of an upward F/O shift just as surely. A variant's own effect
+      // cannot be "reproduced by itself": P is excluded, its shift is the gate's.
       const reproducedByPlacebo =
-        mandate !== 'P' && placeboShift != null && placeboShift >= threshold;
+        mandate !== 'P' && placeboShift != null && Math.abs(placeboShift) >= threshold;
       // "La majorité des répétitions va dans le même sens" — judged over the ACCEPTED
       // responses, the only ones that carry a direction. A failed primary has no
       // exposure to point anywhere; it is counted by the validity condition below and

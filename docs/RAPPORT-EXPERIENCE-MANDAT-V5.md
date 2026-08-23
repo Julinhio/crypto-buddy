@@ -1,6 +1,6 @@
 # Expérience — le cadrage du mandat v5 influence-t-il l'exposition totale demandée ?
 
-Généré le 2026-08-23T06:03:25.735Z par `npm run experiment:mandate`. Rapport entièrement
+Généré le 2026-08-23T06:10:37.821Z par `npm run experiment:mandate`. Rapport entièrement
 produit par le harnais à partir des artefacts de run — aucune valeur saisie à la main.
 
 ## Question et cadre
@@ -305,8 +305,8 @@ Réponses primaires invalides ou refusées, total sur les quatre contextes — c
 
 ## Synthèse (mécanique, depuis les règles préenregistrées)
 
-- **F : aucun déplacement au sens préenregistré** — médiane égale au contrôle sur les trois contextes favorables, au seuil local près. Une absence d'effet est un résultat valide. Réserve (placebo inerte) : P n'ayant été montré ni sur l'exposition ni sur la confiance, l'expérience ne distingue pas « lu mais sans effet » de « ignoré » — la conclusion se limite au fait mesuré : cet ajout, tel que formulé, ne déplace pas l'exposition demandée sur ces contextes.
-- **O : aucun déplacement au sens préenregistré** — médiane égale au contrôle sur les trois contextes favorables, au seuil local près. Une absence d'effet est un résultat valide. Réserve (placebo inerte) : P n'ayant été montré ni sur l'exposition ni sur la confiance, l'expérience ne distingue pas « lu mais sans effet » de « ignoré » — la conclusion se limite au fait mesuré : cet ajout, tel que formulé, ne déplace pas l'exposition demandée sur ces contextes.
+- **F : aucun déplacement ne franchit le seuil préenregistré.** Déplacements médians mesurés sur les contextes favorables : 1297 +0.00 pts (seuil 10.00), 1433 +0.00 pts (seuil 10.00), 1368 +0.00 pts (seuil 5.00). Une absence d'effet retenu est un résultat valide. Réserve (placebo inerte) : P n'ayant été montré ni sur l'exposition ni sur la confiance, l'expérience ne distingue pas « lu mais sans effet » de « ignoré » — la conclusion se limite au fait mesuré : cet ajout, tel que formulé, ne déplace pas l'exposition demandée au-delà du seuil local sur ces contextes.
+- **O : aucun déplacement ne franchit le seuil préenregistré.** Déplacements médians mesurés sur les contextes favorables : 1297 +0.00 pts (seuil 10.00), 1433 +7.00 pts (seuil 10.00), 1368 +0.00 pts (seuil 5.00). Une absence d'effet retenu est un résultat valide. Réserve (placebo inerte) : P n'ayant été montré ni sur l'exposition ni sur la confiance, l'expérience ne distingue pas « lu mais sans effet » de « ignoré » — la conclusion se limite au fait mesuré : cet ajout, tel que formulé, ne déplace pas l'exposition demandée au-delà du seuil local sur ces contextes.
 
 ## Hors périmètre, rappel
 

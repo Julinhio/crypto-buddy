@@ -343,4 +343,27 @@ function fill(calls: CallRecord[], mandate: MandateId, ctx: number, exposures: n
   passed += 1;
 }
 
+{
+  // THE PLACEBO GATE IS ABSOLUTE: a P moving DOWN past the threshold disqualifies an
+  // upward F/O effect just as surely — a salient instruction demonstrably moves the
+  // exposure, whatever its direction.
+  const calls: CallRecord[] = [];
+  for (const [ctx, hist] of Object.entries(HISTORICAL)) {
+    fill(calls, 'C', Number(ctx), [hist, hist, hist, hist + 1, hist]);
+    const down = Number(ctx) === 1297 ? -10 : 0;
+    const up = Number(ctx) === 1297 ? 10 : 0;
+    fill(calls, 'P', Number(ctx), Array(5).fill(hist + down) as number[]);
+    fill(calls, 'O', Number(ctx), Array(5).fill(hist + up) as number[]);
+    fill(calls, 'F', Number(ctx), Array(5).fill(hist) as number[]);
+  }
+  const a = analyze(calls);
+  assert.ok(a.placeboMovedExposure[1297], 'a downward placebo shift past the threshold arms the placebo gate');
+  const o1297 = a.effects.find((e) => e.mandate === 'O' && e.contextId === 1297)!;
+  assert.ok(
+    o1297.clearsThreshold && o1297.reproducedByPlacebo && !o1297.isEffect,
+    'an upward effect is disqualified by a placebo moving in the OPPOSITE direction',
+  );
+  passed += 1;
+}
+
 console.log(`mandate experiment invariants: ${passed} block(s) passed`);

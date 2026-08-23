@@ -500,9 +500,32 @@ async function main(): Promise<number> {
       expectedKeys.add(`${trigger.mandate}_${NEGATIVE_CONTROL}_r${REPS + i}`);
     }
   }
-  // Duplicates are impossible past the load-time check on the raw journal; what can
-  // still be wrong here is coverage — a call the plan expects and the corpus lacks
-  // (interrupted run under --analyze-only), or one the plan does not know.
+  // THE JOURNAL IS RE-READ FROM DISK before anything is published. The load-time
+  // duplicate check ran on a snapshot: two fresh processes started together both see
+  // an empty journal, both pass it, and both append — each one's in-memory `calls`
+  // stays exactly-once while the shared file holds every key twice. Only the file
+  // knows, so the file is what gets checked.
+  const onDisk = loadExistingCalls();
+  const diskKeys = onDisk.map((c) => c.key);
+  const diskDups = [...new Set(diskKeys.filter((k, i, arr) => arr.indexOf(k) !== i))];
+  if (diskDups.length > 0) {
+    console.error(
+      `[STOP] ${diskDups.length} clé(s) en double dans le journal SUR DISQUE (${diskDups.join(', ')}) — ` +
+        'un autre processus a écrit calls.jsonl pendant ce run. Aucun rapport produit ; ' +
+        `déplacer ou supprimer ${OUT_DIR} et relancer une seule instance.`,
+    );
+    return 1;
+  }
+  if ([...diskKeys].sort().join('|') !== calls.map((c) => c.key).sort().join('|')) {
+    console.error(
+      '[STOP] le journal sur disque ne correspond plus au corpus de ce processus — écriture ' +
+        'concurrente probable. Aucun rapport produit ; relancer une seule instance.',
+    );
+    return 1;
+  }
+
+  // What can still be wrong is coverage — a call the plan expects and the corpus
+  // lacks (interrupted run under --analyze-only), or one the plan does not know.
   const presentKeys = calls.map((c) => c.key);
   const missing = [...expectedKeys].filter((k) => !presentKeys.includes(k));
   const unexpected = presentKeys.filter((k) => !expectedKeys.has(k));
