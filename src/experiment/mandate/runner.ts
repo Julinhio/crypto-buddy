@@ -315,8 +315,55 @@ async function main(): Promise<number> {
     return 0;
   }
 
+  // ── THE RUN MANIFEST — what makes a resumed corpus provably THIS experiment ───
+  //
+  // `calls.jsonl` survives code, prompt, config and model changes, and a resumed run
+  // skips every key it finds there. Without this check, responses produced under a
+  // DIFFERENT experiment would be silently republished under the freshly computed
+  // hashes — mixed corpora wearing one manifest. So the identity of the experiment
+  // (mandate hashes, reconstructed user-prompt hashes, model, plan shape) is frozen
+  // in a manifest next to the corpus: a mismatch refuses the stale artefacts rather
+  // than absorbing them. A pre-manifest corpus is admitted once — its provenance is
+  // still checked record-by-record on `requestedModel` below, and the manifest
+  // written now freezes it for every later run.
+  const manifest = {
+    schemaVersion: 1,
+    requestedModel,
+    mandateSha256: Object.fromEntries(MANDATE_IDS.map((id) => [id, mandates[id].sha256])),
+    userPromptSha256: Object.fromEntries(
+      cycles.map((c) => [String(c.spec.decisionId), c.fingerprints.userPromptSha256]),
+    ),
+    reps: REPS,
+    contexts: EXPERIMENT_CONTEXTS.map((s) => s.decisionId),
+  };
+  const manifestFile = path.join(OUT_DIR, 'manifest.json');
+  if (existsSync(manifestFile)) {
+    const stored = readFileSync(manifestFile, 'utf8');
+    if (stored !== JSON.stringify(manifest, null, 2)) {
+      console.error(
+        '[STOP] le manifeste du corpus existant ne correspond pas à l\'expérience courante ' +
+          '(prompts, contextes, modèle ou plan modifiés depuis les appels enregistrés). ' +
+          `Déplacer ou supprimer ${OUT_DIR} pour repartir d'un corpus propre — les appels ` +
+          'existants ne seront pas mélangés à une expérience différente.',
+      );
+      return 1;
+    }
+  } else {
+    writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
+  }
+
   const cycleOf = new Map(cycles.map((c) => [c.spec.decisionId, c]));
-  const done = new Map(loadExistingCalls().map((c) => [c.key, c]));
+  const existing = loadExistingCalls();
+  const wrongModel = existing.filter((c) => c.requestedModel !== requestedModel);
+  if (wrongModel.length > 0) {
+    console.error(
+      `[STOP] ${wrongModel.length} appel(s) enregistré(s) avec un autre modèle demandé ` +
+        `(${[...new Set(wrongModel.map((c) => c.requestedModel))].join(', ')} ≠ ${requestedModel}) — ` +
+        `corpus mélangé, déplacer ou supprimer ${OUT_DIR}.`,
+    );
+    return 1;
+  }
+  const done = new Map(existing.map((c) => [c.key, c]));
   const calls: CallRecord[] = [...done.values()];
 
   if (!analyzeOnly) {
@@ -384,6 +431,33 @@ async function main(): Promise<number> {
     console.error('[STOP] aucun appel enregistré — rien à analyser.');
     return 1;
   }
+
+  // THE COMPLETENESS GATE. `--analyze-only` (and any interrupted run) can hand this
+  // point a partial corpus, and a missing cell would read as a null median that the
+  // mechanical synthesis renders as "pas d'effet" — a conclusion manufactured by
+  // absence. So the final report is only ever produced from a corpus holding EVERY
+  // planned call exactly once, plus every extension the recorded data itself demands.
+  const expectedKeys = new Set(fullPlan.map((p) => `${p.mandate}_${p.contextId}_r${p.rep}`));
+  for (const trigger of extensionTriggers(calls)) {
+    for (let i = 1; i <= EXTENSION_REPS; i += 1) {
+      expectedKeys.add(`${trigger.mandate}_${NEGATIVE_CONTROL}_r${REPS + i}`);
+    }
+  }
+  const presentKeys = calls.map((c) => c.key);
+  const duplicates = presentKeys.filter((k, i) => presentKeys.indexOf(k) !== i);
+  const missing = [...expectedKeys].filter((k) => !presentKeys.includes(k));
+  const unexpected = presentKeys.filter((k) => !expectedKeys.has(k));
+  if (duplicates.length > 0 || missing.length > 0 || unexpected.length > 0) {
+    console.error(
+      '[STOP] corpus incomplet ou incohérent — aucun rapport final produit.\n' +
+        `  manquants (${missing.length}) : ${missing.join(', ') || '—'}\n` +
+        `  inattendus (${unexpected.length}) : ${unexpected.join(', ') || '—'}\n` +
+        `  doublons (${duplicates.length}) : ${duplicates.join(', ') || '—'}\n` +
+        'Relancer `npm run experiment:mandate` pour compléter les appels manquants.',
+    );
+    return 1;
+  }
+
   const analysis = analyze(calls);
   writeFileSync(path.join(OUT_DIR, 'analysis.json'), JSON.stringify(analysis, null, 2));
   writeReportFile(calls, null);

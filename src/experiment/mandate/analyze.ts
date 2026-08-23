@@ -168,11 +168,22 @@ export function evaluateGate2(calls: CallRecord[], specs: ContextSpec[] = EXPERI
   });
 }
 
-/** Confidence shift criterion, preregistered: some category differs by ≥ 2 responses. */
+/**
+ * Confidence shift criterion, preregistered as "some category differs by ≥ 2 responses
+ * out of 5" — compared as PROPORTIONS (2/5 = 0.4), not raw counts. The two cells can
+ * hold different numbers of accepted responses (a 1494 extension adds three calls to a
+ * variant while C keeps five; a failed primary shrinks a cell), and raw counts would
+ * then read a same-shaped distribution as a shift purely because the samples differ in
+ * size. With equal cells of five the two formulations are identical.
+ */
 function confidenceShifted(a: Record<string, number>, b: Record<string, number>): boolean {
+  const total = (c: Record<string, number>): number => Object.values(c).reduce((n, v) => n + v, 0);
+  const na = total(a);
+  const nb = total(b);
+  if (na === 0 || nb === 0) return false;
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
   for (const k of keys) {
-    if (Math.abs((a[k] ?? 0) - (b[k] ?? 0)) >= 2) return true;
+    if (Math.abs((a[k] ?? 0) / na - (b[k] ?? 0) / nb) >= 0.4) return true;
   }
   return false;
 }
@@ -226,8 +237,12 @@ export function analyze(calls: CallRecord[], specs: ContextSpec[] = EXPERIMENT_C
       // read as its own shift clearing the bar, which the placebo gate reports anyway.
       const reproducedByPlacebo =
         mandate !== 'P' && placeboShift != null && placeboShift >= threshold;
+      // "La majorité des répétitions va dans le même sens" — judged over the ACCEPTED
+      // responses, the only ones that carry a direction. A failed primary has no
+      // exposure to point anywhere; it is counted by the validity condition below and
+      // by the dead-cycle rule (§6.4), not silently against the majority.
       const above = c.median == null ? 0 : v.exposures.filter((e) => e > c.median!).length;
-      const majorityAbove = v.exposures.length > 0 && above * 2 > v.calls;
+      const majorityAbove = v.exposures.length > 0 && above * 2 > v.exposures.length;
       const failedV = v.invalid + v.guardRefused + v.orderViolations;
       const failedC = c.invalid + c.guardRefused + c.orderViolations;
       const validityHolds = failedV <= failedC;

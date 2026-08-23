@@ -296,4 +296,51 @@ function fill(calls: CallRecord[], mandate: MandateId, ctx: number, exposures: n
   passed += 1;
 }
 
+{
+  // THE MAJORITY IS TAKEN OVER THE ACCEPTED RESPONSES — a failed primary carries no
+  // direction, and it is already counted by the validity condition and the dead-cycle
+  // rule. 3 accepted (2 above the control median) + 2 failed must read as a majority.
+  const calls: CallRecord[] = [];
+  for (const [ctx, hist] of Object.entries(HISTORICAL)) {
+    fill(calls, 'C', Number(ctx), [hist, hist, hist, hist + 1, hist]);
+    fill(calls, 'P', Number(ctx), Array(5).fill(hist) as number[]);
+    fill(calls, 'F', Number(ctx), Array(5).fill(hist) as number[]);
+    if (Number(ctx) !== 1297) fill(calls, 'O', Number(ctx), Array(5).fill(hist) as number[]);
+  }
+  fill(calls, 'O', 1297, [32, 31, 20]);
+  calls.push(mkCall('O', 1297, 4, null), mkCall('O', 1297, 5, null));
+  // The control fails twice too, so the validity condition is not what decides.
+  for (const rep of [4, 5]) {
+    const c = calls.find((x) => x.mandate === 'C' && x.contextId === 1297 && x.rep === rep)!;
+    c.outcome = 'invalid';
+    c.requestedExposure = null;
+    c.invalidReason = 'synthetic invalid';
+  }
+  const a = analyze(calls);
+  const o1297 = a.effects.find((e) => e.mandate === 'O' && e.contextId === 1297)!;
+  assert.ok(o1297.majorityAbove, '2 of 3 ACCEPTED responses above the control median is a majority — failed primaries are not counted against it');
+  assert.ok(o1297.validityHolds, 'equal failure counts keep the validity condition true');
+  passed += 1;
+}
+
+{
+  // CONFIDENCE IS COMPARED AS PROPORTIONS: an extended P cell (8 responses) with the
+  // SAME distribution shape as C (5 responses) is not a shift, even though every raw
+  // count differs by 3.
+  const calls: CallRecord[] = [];
+  for (const [ctx, hist] of Object.entries(HISTORICAL)) {
+    fill(calls, 'C', Number(ctx), [hist, hist, hist, hist + 1, hist]);
+    fill(calls, 'F', Number(ctx), Array(5).fill(hist) as number[]);
+    fill(calls, 'O', Number(ctx), Array(5).fill(hist) as number[]);
+    const pCount = Number(ctx) === 1494 ? 8 : 5;
+    fill(calls, 'P', Number(ctx), Array(pCount).fill(hist) as number[]);
+  }
+  const a = analyze(calls);
+  assert.ok(
+    !a.placeboMovedConfidence[1494],
+    'a larger cell with the same all-medium distribution is not read as a confidence shift',
+  );
+  passed += 1;
+}
+
 console.log(`mandate experiment invariants: ${passed} block(s) passed`);
