@@ -228,6 +228,18 @@ export function buildReport(params: {
       const blocked = analysis.effects.filter(
         (e) => e.mandate === mandate && e.clearsThreshold && e.reproducedByPlacebo,
       );
+      // AN INERT PLACEBO QUALIFIES EVERY CAUSAL SENTENCE BELOW, in both directions.
+      // P not shown to be read means the experiment cannot distinguish "read but
+      // ineffective" from "ignored" for ANY of the additions — so a null result stays
+      // a measured fact about the emitted exposure, but stops short of "this framing
+      // is not the cause"; and a retained effect would lose its salience control,
+      // since an unread placebo rules nothing out.
+      const inertCaveat = analysis.placeboInert
+        ? ' Réserve (placebo inerte) : P n\'ayant été montré ni sur l\'exposition ni sur la' +
+          ' confiance, l\'expérience ne distingue pas « lu mais sans effet » de « ignoré » —' +
+          ' la conclusion se limite au fait mesuré : cet ajout, tel que formulé, ne déplace' +
+          ' pas l\'exposition demandée sur ces contextes.'
+        : '';
       if (dead.eliminated) {
         push(`- **${mandate} : éliminé** — augmente les réponses primaires invalides ou refusées.`);
       } else if (neg.eliminatedOnMedian || neg.eliminatedOnZeroLines) {
@@ -235,7 +247,12 @@ export function buildReport(params: {
       } else if (wins.length > 0) {
         push(
           `- **${mandate} : effet retenu** sur ${wins.map((w) => w.contextId).join(', ')} ` +
-            `(${wins.map((w) => `+${fmt(w.effectSize)} pts`).join(', ')}), non reproduit par le placebo.`,
+            `(${wins.map((w) => `+${fmt(w.effectSize)} pts`).join(', ')}), non reproduit par le placebo.` +
+            (analysis.placeboInert
+              ? ' Réserve : le placebo étant inerte, la condition « non reproduit par P » est' +
+                ' satisfaite trivialement et ne contrôle pas l\'effet générique d\'une instruction' +
+                ' saillante — l\'effet est mesuré, sa lecture causale reste à confirmer.'
+              : ''),
         );
       } else if (blocked.length > 0) {
         push(
@@ -244,8 +261,10 @@ export function buildReport(params: {
         );
       } else {
         push(
-          `- **${mandate} : pas d'effet au sens préenregistré.** C'est un résultat valide : cette` +
-            ' formulation n\'est pas la cause principale du niveau d\'exposition observé.',
+          `- **${mandate} : aucun déplacement au sens préenregistré** — médiane égale au contrôle` +
+            ' sur les trois contextes favorables, au seuil local près. Une absence d\'effet est un' +
+            ' résultat valide.' +
+            inertCaveat,
         );
       }
     }

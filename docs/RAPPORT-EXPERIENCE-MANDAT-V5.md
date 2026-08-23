@@ -1,6 +1,6 @@
 # Expérience — le cadrage du mandat v5 influence-t-il l'exposition totale demandée ?
 
-Généré le 2026-08-23T05:56:44.419Z par `npm run experiment:mandate`. Rapport entièrement
+Généré le 2026-08-23T06:03:25.735Z par `npm run experiment:mandate`. Rapport entièrement
 produit par le harnais à partir des artefacts de run — aucune valeur saisie à la main.
 
 ## Question et cadre
@@ -305,8 +305,8 @@ Réponses primaires invalides ou refusées, total sur les quatre contextes — c
 
 ## Synthèse (mécanique, depuis les règles préenregistrées)
 
-- **F : pas d'effet au sens préenregistré.** C'est un résultat valide : cette formulation n'est pas la cause principale du niveau d'exposition observé.
-- **O : pas d'effet au sens préenregistré.** C'est un résultat valide : cette formulation n'est pas la cause principale du niveau d'exposition observé.
+- **F : aucun déplacement au sens préenregistré** — médiane égale au contrôle sur les trois contextes favorables, au seuil local près. Une absence d'effet est un résultat valide. Réserve (placebo inerte) : P n'ayant été montré ni sur l'exposition ni sur la confiance, l'expérience ne distingue pas « lu mais sans effet » de « ignoré » — la conclusion se limite au fait mesuré : cet ajout, tel que formulé, ne déplace pas l'exposition demandée sur ces contextes.
+- **O : aucun déplacement au sens préenregistré** — médiane égale au contrôle sur les trois contextes favorables, au seuil local près. Une absence d'effet est un résultat valide. Réserve (placebo inerte) : P n'ayant été montré ni sur l'exposition ni sur la confiance, l'expérience ne distingue pas « lu mais sans effet » de « ignoré » — la conclusion se limite au fait mesuré : cet ajout, tel que formulé, ne déplace pas l'exposition demandée sur ces contextes.
 
 ## Hors périmètre, rappel
 
