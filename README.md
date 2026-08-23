@@ -702,7 +702,7 @@ src/
     ├── context.ts           # decision context: portfolio in place of testnet balances
     ├── llm.ts               # Anthropic client, structured call, token/latency capture, owned attempt deadline
     ├── llmFailure.ts        # THE single LLM failure classifier + versioned failure journal
-    ├── gitSha.ts            # commit SHA for traceability (env → git → null)
+    ├── gitSha.ts            # commit SHA for traceability (platform env → local git → null)
     ├── decide.ts            # orchestrator: derive → decide → clamp → movements → execute
     └── print.ts             # human-readable decision output
 
