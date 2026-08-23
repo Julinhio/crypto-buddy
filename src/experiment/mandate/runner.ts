@@ -363,6 +363,63 @@ async function main(): Promise<number> {
     );
     return 1;
   }
+  // Duplicates are detected HERE, on the raw journal, BEFORE the Map collapses them —
+  // collapsed, they would be invisible to every later check while the exactly-once
+  // requirement silently kept an arbitrary one of the two responses. Two concurrent
+  // runner processes are the realistic way to produce this.
+  const dupKeys = [...new Set(existing.map((c) => c.key).filter((k, i, arr) => arr.indexOf(k) !== i))];
+  if (dupKeys.length > 0) {
+    console.error(
+      `[STOP] ${dupKeys.length} clé(s) en double dans calls.jsonl (${dupKeys.join(', ')}) — ` +
+        'deux processus ont probablement écrit le même corpus. Aucune des deux réponses n\'est ' +
+        `choisie en silence : déplacer ou supprimer ${OUT_DIR} et relancer.`,
+    );
+    return 1;
+  }
+
+  // ── RE-JUDGE the stored corpus — the manifest's blind spot, closed ────────────
+  //
+  // The manifest freezes the prompts, the contexts and the model; it says nothing
+  // about the JUDGMENT code (schema, clamp, movements, coherence guard). A change
+  // there would leave the manifest identical while the stored verdicts describe a
+  // pipeline that no longer exists — and §6.4 makes refusal counts eliminatory, so a
+  // stale verdict is a stale conclusion. Rather than fingerprinting source files,
+  // the check is BEHAVIOURAL: every stored raw response is re-judged by the current
+  // pipeline (pure CPU, no network) and must reproduce its recorded verdict exactly.
+  const misjudged: string[] = [];
+  for (const record of existing) {
+    const rawPath = path.join(RAW_DIR, record.rawFile);
+    if (!existsSync(rawPath)) {
+      misjudged.push(`${record.key} (réponse brute absente: ${record.rawFile})`);
+      continue;
+    }
+    const raw = JSON.parse(readFileSync(rawPath, 'utf8')) as { rawResponse: string };
+    const cycle = cycleOf.get(record.contextId);
+    if (!cycle) {
+      misjudged.push(`${record.key} (contexte ${record.contextId} inconnu de l'expérience courante)`);
+      continue;
+    }
+    const rejudged = judgeResponse(raw.rawResponse, cycle.inputs);
+    const same =
+      rejudged.outcome === record.outcome &&
+      (rejudged.requestedExposure ?? null) === (record.requestedExposure ?? null) &&
+      JSON.stringify(rejudged.guard?.violations.map((v) => v.rule) ?? []) === JSON.stringify(record.guardRules) &&
+      JSON.stringify(rejudged.openedZeroLines) === JSON.stringify(record.openedZeroLines);
+    if (!same) misjudged.push(record.key);
+  }
+  if (misjudged.length > 0) {
+    console.error(
+      `[STOP] ${misjudged.length} appel(s) enregistré(s) dont le verdict ne se reproduit plus avec le ` +
+        `pipeline courant : ${misjudged.slice(0, 10).join(', ')}${misjudged.length > 10 ? '…' : ''}. ` +
+        'Le code de jugement a changé depuis le corpus — les conclusions stockées décrivent un autre ' +
+        `pipeline. Déplacer ou supprimer ${OUT_DIR} et relancer l'expérience entière.`,
+    );
+    return 1;
+  }
+  if (existing.length > 0) {
+    console.log(`[reprise] ${existing.length} appel(s) existant(s) — verdicts re-jugés et reproduits à l'identique.`);
+  }
+
   const done = new Map(existing.map((c) => [c.key, c]));
   const calls: CallRecord[] = [...done.values()];
 
@@ -443,16 +500,17 @@ async function main(): Promise<number> {
       expectedKeys.add(`${trigger.mandate}_${NEGATIVE_CONTROL}_r${REPS + i}`);
     }
   }
+  // Duplicates are impossible past the load-time check on the raw journal; what can
+  // still be wrong here is coverage — a call the plan expects and the corpus lacks
+  // (interrupted run under --analyze-only), or one the plan does not know.
   const presentKeys = calls.map((c) => c.key);
-  const duplicates = presentKeys.filter((k, i) => presentKeys.indexOf(k) !== i);
   const missing = [...expectedKeys].filter((k) => !presentKeys.includes(k));
   const unexpected = presentKeys.filter((k) => !expectedKeys.has(k));
-  if (duplicates.length > 0 || missing.length > 0 || unexpected.length > 0) {
+  if (missing.length > 0 || unexpected.length > 0) {
     console.error(
       '[STOP] corpus incomplet ou incohérent — aucun rapport final produit.\n' +
         `  manquants (${missing.length}) : ${missing.join(', ') || '—'}\n` +
         `  inattendus (${unexpected.length}) : ${unexpected.join(', ') || '—'}\n` +
-        `  doublons (${duplicates.length}) : ${duplicates.join(', ') || '—'}\n` +
         'Relancer `npm run experiment:mandate` pour compléter les appels manquants.',
     );
     return 1;
