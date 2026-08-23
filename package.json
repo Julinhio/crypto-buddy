@@ -25,10 +25,11 @@
     "backfill:position-state": "tsx src/migrations/backfillPositionState.ts",
     "probe:v5": "tsx src/probes/v5Behaviour.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/test/invariants.ts && tsx src/test/scheduler.ts && tsx src/test/regime.ts && tsx src/test/lifecycle.ts && tsx src/test/strategyVersion.ts && tsx src/test/coherence.ts && tsx src/test/intentReference.ts && tsx src/test/stickyTransition.ts && tsx src/test/transitionLayer.ts && tsx src/test/effectiveTarget.ts && tsx src/test/transitionVector.ts && tsx src/test/marketDataOutage.ts && tsx src/test/transitionEnforce.ts && tsx src/test/llmResilience.ts && tsx src/test/exposureCalibration.ts && tsx src/test/exposureObservation.ts && tsx src/test/gitSha.ts",
+    "test": "tsx src/test/invariants.ts && tsx src/test/scheduler.ts && tsx src/test/regime.ts && tsx src/test/lifecycle.ts && tsx src/test/strategyVersion.ts && tsx src/test/coherence.ts && tsx src/test/intentReference.ts && tsx src/test/stickyTransition.ts && tsx src/test/transitionLayer.ts && tsx src/test/effectiveTarget.ts && tsx src/test/transitionVector.ts && tsx src/test/marketDataOutage.ts && tsx src/test/transitionEnforce.ts && tsx src/test/llmResilience.ts && tsx src/test/exposureCalibration.ts && tsx src/test/exposureObservation.ts && tsx src/test/gitSha.ts && tsx src/test/mandateExperiment.ts",
     "calibrate:exposure": "tsx src/calibration/exposure/calibrate.ts",
     "validate:exposure": "tsx src/calibration/exposure/validate.ts",
-    "observe:exposure": "tsx src/observation/exposure/observe.ts"
+    "observe:exposure": "tsx src/observation/exposure/observe.ts",
+    "experiment:mandate": "tsx src/experiment/mandate/runner.ts"
   },
   "engines": {
     "node": ">=22"
