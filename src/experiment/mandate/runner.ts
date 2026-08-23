@@ -1,10 +1,13 @@
 import 'dotenv/config';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
+import { config } from '../../config/index.js';
 import { getSupabaseClient } from '../../persistence/supabase.js';
 import { assertAnthropicConfigured, resolveModel, runDecision } from '../../decision/llm.js';
 import { classifyLlmFailure } from '../../decision/llmFailure.js';
-import { buildMandates, proveVariantProperty, MANDATE_IDS, type MandateId } from './variants.js';
+import { buildDecisionSchema } from '../../decision/schema.js';
+import { buildMandates, proveVariantProperty, sha256, MANDATE_IDS, type MandateId } from './variants.js';
 import {
   EXPERIMENT_CONTEXTS,
   reconstructCycle,
@@ -332,13 +335,41 @@ async function main(): Promise<number> {
   // different system prompt re-judges identically — the judgment never reads the
   // prompt. A corpus without its own manifest is precisely the corpus whose provenance
   // cannot be established, so it is refused rather than adopted.
+  // ── WHAT THE MANIFEST HAS TO NAME: the whole CALL-GENERATION contract ─────────
+  //
+  // The prompts are not the only thing that decides what came back. Three more
+  // inputs shape a response, none of them recoverable from the response itself:
+  //
+  //   maxTokens            a lower ceiling truncates an answer into an invalid one;
+  //   outputSchemaSha256   the structured-output format sent to the API — the
+  //                        constraint the decoder emitted under. Re-judging catches a
+  //                        schema that got TIGHTER (old responses stop validating); it
+  //                        cannot see one that got LOOSER, because the old responses
+  //                        still pass. So the constraint is fingerprinted, not inferred;
+  //   planSha256           the full planned sequence. The interleaving is a variable
+  //                        this experiment explicitly CONTROLS (brief §3.3) and the
+  //                        report PUBLISHES as a proof — a corpus half-generated under
+  //                        another order would make that published proof false.
+  //                        `order.json` is the readable form of the same value.
+  //
+  // schemaVersion 2: version 1 named only the model and the prompts.
   const manifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     requestedModel,
+    maxTokens: config.decision.maxTokens,
     mandateSha256: Object.fromEntries(MANDATE_IDS.map((id) => [id, mandates[id].sha256])),
     userPromptSha256: Object.fromEntries(
       cycles.map((c) => [String(c.spec.decisionId), c.fingerprints.userPromptSha256]),
     ),
+    // Hashed from exactly what `runDecision` sends: `zodOutputFormat` over the schema
+    // built for THIS context's universe, under the v5 contract.
+    outputSchemaSha256: Object.fromEntries(
+      cycles.map((c) => [
+        String(c.spec.decisionId),
+        sha256(JSON.stringify(zodOutputFormat(buildDecisionSchema(c.inputs.assets, 'v5')))),
+      ]),
+    ),
+    planSha256: sha256(JSON.stringify(fullPlan)),
     reps: REPS,
     contexts: EXPERIMENT_CONTEXTS.map((s) => s.decisionId),
   };

@@ -1,6 +1,6 @@
 # Expérience — le cadrage du mandat v5 influence-t-il l'exposition totale demandée ?
 
-Généré le 2026-08-23T06:35:42.378Z par `npm run experiment:mandate`. Rapport entièrement
+Généré le 2026-08-23T06:45:05.659Z par `npm run experiment:mandate`. Rapport entièrement
 produit par le harnais à partir des artefacts de run — aucune valeur saisie à la main.
 
 ## Question et cadre
