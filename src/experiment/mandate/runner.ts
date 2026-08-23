@@ -179,6 +179,40 @@ function appendCall(record: CallRecord): void {
   appendFileSync(CALLS_FILE, `${JSON.stringify(record)}\n`);
 }
 
+/**
+ * THE REALIZED SEQUENCE — the 80 planned calls followed by whatever extensions the
+ * recorded data itself demands, with their order indices assigned.
+ *
+ * ONE definition, two consumers: phase E EXECUTES this, and the completeness gate
+ * VERIFIES the corpus against it. Two separate derivations of "which extension calls,
+ * in what order" is exactly how the executed protocol and the published one drift
+ * apart — and the interleaving is a variable the brief controls (§3.3) and the report
+ * publishes as a proof, so a drift there would make a published claim false.
+ *
+ * Deterministic given (fullPlan, calls): `extensionTriggers` is a pure function of the
+ * recorded corpus, so re-deriving it later reproduces the same sequence — which is what
+ * lets the gate check ORDER, not merely membership.
+ */
+function realizedSequence(fullPlan: PlannedCall[], calls: CallRecord[]): PlannedCall[] {
+  const sequence = [...fullPlan];
+  let orderIndex = fullPlan.length;
+  for (const trigger of extensionTriggers(calls)) {
+    for (let i = 1; i <= EXTENSION_REPS; i += 1) {
+      sequence.push({
+        orderIndex: orderIndex++,
+        phase: 'extension' as Phase,
+        mandate: trigger.mandate,
+        contextId: NEGATIVE_CONTROL,
+        rep: REPS + i,
+      });
+    }
+  }
+  return sequence;
+}
+
+const callKey = (p: { mandate: MandateId; contextId: number; rep: number }): string =>
+  `${p.mandate}_${p.contextId}_r${p.rep}`;
+
 /** Anomaly rule for the negative control (preregistered, brief §6.3). */
 function extensionTriggers(calls: CallRecord[]): Array<{ mandate: MandateId; reason: string }> {
   const controlExposures = calls
@@ -449,7 +483,13 @@ async function main(): Promise<number> {
       rejudged.outcome === record.outcome &&
       (rejudged.requestedExposure ?? null) === (record.requestedExposure ?? null) &&
       JSON.stringify(rejudged.guard?.violations.map((v) => v.rule) ?? []) === JSON.stringify(record.guardRules) &&
-      JSON.stringify(rejudged.openedZeroLines) === JSON.stringify(record.openedZeroLines);
+      JSON.stringify(rejudged.openedZeroLines) === JSON.stringify(record.openedZeroLines) &&
+      // CONFIDENCE IS VERDICT-BEARING, not decoration: §6.2 reads its distribution to
+      // decide whether the placebo was shown to be READ, and `placeboInert` qualifies
+      // every causal sentence the report emits. A judgment change that moved only this
+      // field would otherwise be accepted, and the resumed report would reach a
+      // different qualification than the current pipeline would.
+      (rejudged.decision?.confidence ?? null) === (record.confidence ?? null);
     if (!same) misjudged.push(record.key);
     // The VERDICT-bearing fields above must be identical, and are what §6 reads. The
     // movement DETAIL is descriptive, and its notionals are sized against the book —
@@ -513,21 +553,14 @@ async function main(): Promise<number> {
     // Phase B — the variants, interleaved.
     for (const planned of fullPlan.filter((p) => p.phase === 'variants')) await run(planned);
 
-    // Phase E — the negative control's extensions.
+    // Phase E — the negative control's extensions, taken from the SHARED sequence so
+    // what runs and what the completeness gate expects cannot be two different things.
     const triggers = extensionTriggers(calls);
-    let orderIndex = fullPlan.length;
     for (const trigger of triggers) {
       console.log(`[extension] ${trigger.mandate}@${NEGATIVE_CONTROL} : ${trigger.reason}`);
-      for (let i = 1; i <= EXTENSION_REPS; i += 1) {
-        const planned: PlannedCall = {
-          orderIndex: orderIndex++,
-          phase: 'extension' as Phase,
-          mandate: trigger.mandate,
-          contextId: NEGATIVE_CONTROL,
-          rep: REPS + i,
-        };
-        await run(planned);
-      }
+    }
+    for (const planned of realizedSequence(fullPlan, calls).filter((p) => p.phase === 'extension')) {
+      await run(planned);
     }
     if (triggers.length > 0) {
       writeFileSync(path.join(OUT_DIR, 'extensions.json'), JSON.stringify(triggers, null, 2));
@@ -544,13 +577,10 @@ async function main(): Promise<number> {
   // point a partial corpus, and a missing cell would read as a null median that the
   // mechanical synthesis renders as "pas d'effet" — a conclusion manufactured by
   // absence. So the final report is only ever produced from a corpus holding EVERY
-  // planned call exactly once, plus every extension the recorded data itself demands.
-  const expectedKeys = new Set(fullPlan.map((p) => `${p.mandate}_${p.contextId}_r${p.rep}`));
-  for (const trigger of extensionTriggers(calls)) {
-    for (let i = 1; i <= EXTENSION_REPS; i += 1) {
-      expectedKeys.add(`${trigger.mandate}_${NEGATIVE_CONTROL}_r${REPS + i}`);
-    }
-  }
+  // planned call exactly once, plus every extension the recorded data itself demands,
+  // EACH AT ITS PLACE IN THE SEQUENCE — see the order check below.
+  const expected = realizedSequence(fullPlan, calls);
+  const expectedKeys = new Set(expected.map(callKey));
   // THE JOURNAL IS RE-READ FROM DISK before anything is published. The load-time
   // duplicate check ran on a snapshot: two fresh processes started together both see
   // an empty journal, both pass it, and both append — each one's in-memory `calls`
@@ -586,6 +616,31 @@ async function main(): Promise<number> {
         `  manquants (${missing.length}) : ${missing.join(', ') || '—'}\n` +
         `  inattendus (${unexpected.length}) : ${unexpected.join(', ') || '—'}\n` +
         'Relancer `npm run experiment:mandate` pour compléter les appels manquants.',
+    );
+    return 1;
+  }
+
+  // ── THE ORDER CHECK — membership is not enough ────────────────────────────────
+  //
+  // The set of keys can be right while the SEQUENCE is wrong: change the extension
+  // protocol (its constant, its trigger rule, the order it visits variants) and a
+  // corpus can still hold exactly the demanded keys, generated in an order the
+  // current protocol would never produce. The interleaving is a controlled variable
+  // (§3.3) and the report PUBLISHES it as a proof, so an order the run did not
+  // actually follow would make that published proof false.
+  //
+  // `planSha256` in the manifest covers the 80 base calls; this covers the realized
+  // sequence, extensions included — which is the part a hash of `fullPlan` cannot see.
+  const positionOf = new Map(expected.map((p) => [callKey(p), p.orderIndex]));
+  const misordered = calls
+    .filter((c) => positionOf.get(c.key) !== c.orderIndex)
+    .map((c) => `${c.key} (enregistré ${c.orderIndex}, attendu ${positionOf.get(c.key)})`);
+  if (misordered.length > 0) {
+    console.error(
+      `[STOP] ${misordered.length} appel(s) à une position différente de celle que le protocole ` +
+        `courant produirait : ${misordered.slice(0, 10).join(', ')}${misordered.length > 10 ? '…' : ''}. ` +
+        "L'ordre d'entrelacement est une variable contrôlée et publiée : le corpus a été généré " +
+        `sous un autre protocole. Déplacer ou supprimer ${OUT_DIR} et relancer l'expérience entière.`,
     );
     return 1;
   }
