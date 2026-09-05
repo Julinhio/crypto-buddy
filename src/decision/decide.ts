@@ -1,4 +1,11 @@
-import { config, tradableBaseAssets, STRATEGY_VERSION, COHERENCE_GUARD, TRANSITION_MODE } from '../config/index.js';
+import {
+  config,
+  tradableBaseAssets,
+  STRATEGY_VERSION,
+  COHERENCE_GUARD,
+  TRANSITION_MODE,
+  EXPOSURE_BAND_MODE,
+} from '../config/index.js';
 import { Decimal, ZERO, dec, toNumericString } from '../money.js';
 import { evaluateTransition, judgeOrder, type TransitionVerdict } from '../transition/gate.js';
 import { judgeVector } from '../transition/vector.js';
@@ -12,6 +19,8 @@ import {
   saveTransitionObservations,
   toObservationRow,
 } from '../persistence/transitionObservations.js';
+import { observeBand } from '../exposure/observe.js';
+import { saveBandObservation } from '../persistence/exposureBandObservations.js';
 import { buildMarketContext, marketHealthOf, type MarketContext } from '../context/build.js';
 import { recordMarketDataOutage } from '../market/outage.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
@@ -562,6 +571,89 @@ export async function decide(): Promise<DecideResult> {
     await saveTransitionObservations(supabase, rows);
   };
 
+  /**
+   * THE EXPOSURE BAND, IN OBSERVATION MODE.
+   *
+   * Computes the deterministic context, the band it implies, where the retained target sits
+   * relative to that band, and what the freezes and the per-asset caps would actually let a
+   * correction reach — then writes one row. It corrects NOTHING and it creates NOTHING: no
+   * caller reads its return value, and the target that reaches `computeMovements` is the same
+   * object it was before this brick existed.
+   *
+   * That inertness is STRUCTURAL, not a promise, and it rests on three properties rather than
+   * on a comment:
+   *
+   *   1. the closure returns `void`, so no allocation or movement can be derived from it;
+   *   2. it is called from the terminal paths, AFTER the orders have been placed — the same
+   *      tier and the same placement as `observeTransition`, the equity snapshot and the
+   *      Telegram sends, so a stalled insert cannot weigh on the trading verdict;
+   *   3. its writer is best-effort and bounded by contract, so it cannot fail a cycle either.
+   *
+   * OFF BY DEFAULT. With `EXPOSURE_BAND_MODE` unset the closure returns immediately and not
+   * one byte of behaviour changes — including the write, so the table stays empty rather than
+   * accumulating rows nobody asked for.
+   *
+   * ── THE TARGET IT ASSESSES ───────────────────────────────────────────────────────
+   *
+   * The RISK-CLAMPED proposal, never `gateOutcome.appliedAllocation`. That is precisely where
+   * the correction will sit when it becomes real: the coherence guard has already judged the
+   * model's raw intention by then (§3.4.5), and the transition gate has not yet had its say
+   * (§3.4.2). Assessing the post-gate value would measure the band against a target that, on a
+   * refused cycle, is last cycle's vector — a number the band was never meant to constrain.
+   */
+  const observeExposureBand = async (
+    decisionId: number | null,
+    /** The clamped target the chain retained. Null on every cycle that produced none. */
+    targetAllocation: Record<string, number> | null,
+    /** The model's raw proposal, for the published comparison. */
+    rawAllocation: Record<string, number> | null,
+  ): Promise<void> => {
+    if (EXPOSURE_BAND_MODE === 'off') return;
+    // No decision row means no foreign key to hang the observation on. Nothing is lost that
+    // was not already lost: the cycle itself was not journaled either.
+    if (decisionId == null) return;
+
+    const row = observeBand({
+      decisionId,
+      mode: EXPOSURE_BAND_MODE,
+      policyVersion: config.exposureBand.version,
+      policy: config.exposureBand,
+      // PRODUCTION'S OWN POINT, not a rehydration of its own journal. The offline replay
+      // reaches the same reading through `regimePointFromJournal`, and the test asserts the
+      // two agree — so "live and replay read the same context" is a proof, not a hope.
+      regimePoint: context.regimePoint,
+      // The allocatable universe IS the breadth denominator, exactly as the controller
+      // defines it. Dividing by what happened to load would rescale the signal during a
+      // partial outage and push the state across a boundary on thinner evidence.
+      universe: tradableBaseAssets(config),
+      targetAllocation,
+      rawAllocation,
+      bookExposurePercent: portfolio.deployedPercent.toNumber(),
+      reserveAsset: reserveStable,
+      // The HOISTED verdicts — the very objects the payload and the gate used this cycle.
+      // Recomputing them would risk journaling a second opinion about the freeze.
+      gateByAsset: new Map(transitionVerdicts.map((v) => [v.asset, v.gate])),
+      capOf: (asset) => config.execution.caps.perAsset[asset] ?? config.execution.caps.defaultPerAsset,
+      maxDeployablePercent: 100 - config.execution.caps.minCashPercent,
+      equityQuote: portfolio.equity.toNumber(),
+      movementFloorQuote: movementFloor(portfolio.equity, config.execution.minMovementPercent).toNumber(),
+      // Under `observe` the stop generates no exit and the model's weight stands; under
+      // `enforce` `applyGate` is about to put the line flat. The band must size against the
+      // exposure the chain will really pursue, not against a line being liquidated.
+      stoppedWeightSurvives: TRANSITION_MODE === 'observe',
+    });
+
+    if (row.label != null && row.label !== 'aucune_correction') {
+      console.log(
+        `[band] ${row.state} [${row.band_low_percent}, ${row.band_high_percent}] — target at ` +
+          `${row.target_exposure_percent}%, ${row.label}` +
+          (row.unrealisable_points ? ` (${row.unrealisable_points} pt(s) out of reach)` : '') +
+          ' — OBSERVATION ONLY, nothing was corrected.',
+      );
+    }
+    await saveBandObservation(supabase, row);
+  };
+
   // The AI sees the virtual book, not the testnet balances.
   const decisionContext = toDecisionContext(context, portfolio, STRATEGY_VERSION, stateRead.states, {
     mode: TRANSITION_MODE,
@@ -616,6 +708,7 @@ export async function decide(): Promise<DecideResult> {
     const { persisted, id } = await insertDecision(supabase, row);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
+    await observeExposureBand(id, null, null);
     await observeMarketDataOutage(id);
     return emptyResult('skipped', persisted, id, row, portfolio, marketData);
   }
@@ -784,6 +877,7 @@ export async function decide(): Promise<DecideResult> {
     await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
+    await observeExposureBand(id, null, null);
     await observeMarketDataOutage(id);
     // The stop may have been armed on this book. Nothing is placed here — the alert only
     // makes the gap visible. See alertArmedStopNotFired.
@@ -835,6 +929,7 @@ export async function decide(): Promise<DecideResult> {
     guardEvents.push(event);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
+    await observeExposureBand(id, null, null);
     await observeMarketDataOutage(id);
     // After persistLifecycle, so anything it queued is written too. It cannot queue a
     // refusal here (it is called with no notes), but the ordering is the same on every
@@ -896,6 +991,7 @@ export async function decide(): Promise<DecideResult> {
     await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
+    await observeExposureBand(id, null, null);
     await observeMarketDataOutage(id);
     await alertArmedStopNotFired('parse_failed');
     return emptyResult('parse_failed', persisted, id, row, portfolio, marketData);
@@ -1280,6 +1376,8 @@ export async function decide(): Promise<DecideResult> {
   // blocks, so it is the one the atomicity provenance rehearses. Runs after every order is
   // placed, and its result is discarded — see the closure's header.
   await observeTransition(id, bookedLedger, proposedMovements);
+  // The CLAMPED target — where the correction will sit when it becomes real. See the closure.
+  await observeExposureBand(id, clamp.applied, v.targetAllocation);
 
   /**
    * THE REFUSED-INTENTION LEDGER — opened here, resolved here, read by nobody in this file.

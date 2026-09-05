@@ -49,3 +49,11 @@ out/mandate-experiment/
 # committing them would buy nothing and would put an operational export in the history of a
 # public repository.
 out/exposure-observation/
+
+# Exposure-BAND bite artefacts — never committed.
+#
+# Same nature and same reason as the observation artefacts above: a read-only extract of the
+# live journal (real targets, real book, real freezes), regenerable at any time from the same
+# corpus. The published deliverable is the report on stdout and the aggregates in
+# docs/RAPPORT-MORSURE-BANDE.md, never the per-cycle export.
+out/exposure-band-bite/
