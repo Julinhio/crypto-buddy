@@ -6,6 +6,8 @@ import { getSupabaseClient } from '../persistence/supabase.js';
 import { parseRegimeJournal, regimePointFromJournal } from '../market/regimeJournal.js';
 import type { TransitionGate } from '../transition/gate.js';
 import { observeBand, checkBarIntegrity, type BandObservationInsert } from '../exposure/observe.js';
+import { correctToBand } from '../exposure/correct.js';
+import { bookOf as portfolioOf, pricesOf, type StoredContext } from './storedCycle.js';
 
 /**
  * THE HISTORICAL BITE — the mandatory checkpoint of the pilot's first brick.
@@ -253,11 +255,11 @@ async function main(): Promise<void> {
     }
 
     const book = bookOf(decision.market_context);
+
     const gates = gatesByDecision.get(decision.id) ?? new Map<string, TransitionGate>();
     if (gates.size > 0) cyclesWithGates.push(decision.id);
 
-    rows.push(
-      observeBand({
+    const observation = observeBand({
         decisionId: decision.id,
         mode: 'observation',
         policyVersion: config.exposureBand.version,
@@ -276,12 +278,60 @@ async function main(): Promise<void> {
         maxDeployablePercent: 100 - config.execution.caps.minCashPercent,
         equityQuote: book.equity,
         movementFloorQuote: (book.equity * config.execution.minMovementPercent) / 100,
-        // The corpus ran entirely under TRANSITION_MODE=observe — zero rows carry an
-        // `applied_divergence_cause`, so no peak stop ever generated an exit. A stopped line
-        // therefore kept its weight, and that is what the replay reproduces.
-        stoppedWeightSurvives: true,
-      }),
-    );
+      // The corpus ran entirely under TRANSITION_MODE=observe — zero rows carry an
+      // `applied_divergence_cause`, so no peak stop ever generated an exit. A stopped line
+      // therefore kept its weight, and that is what the replay reproduces.
+      stoppedWeightSurvives: true,
+    });
+
+    /**
+     * THE REDISTRIBUTION, on the same cycle — which settles brick 1's open caveat.
+     *
+     * Brick 1 could only say whether the correction's TOTAL cleared one movement floor, and
+     * had to label that "necessary, not sufficient": split across four lines, a total worth
+     * two and a half floors still yields four sub-floor legs and nothing sent. Only the
+     * redistribution knows, and it exists now.
+     *
+     * The book comes from `storedCycle.ts` — production's own reconstruction, shared with the
+     * coherence replay. A second one built here would eventually disagree with it about the
+     * very quantity every leg is sized against.
+     */
+    // ONLY WHERE THE FEASIBILITY IS KNOWN, and that condition is the whole point of the flag.
+    //
+    // On the fortnight of v5 predating the transition layer there are no per-asset verdicts, so
+    // `observeBand` sets `feasibility_known` to false — it is the field that says "nobody can
+    // answer this". Running the redistribution anyway made every line fail closed for want of a
+    // verdict, and the outcome then ASSERTED an unchanged allocation, a fabricated realised gap
+    // and a `bande_partiellement_irrealisable` label, overwriting the deliberately non-committal
+    // one. None of the seven criteria read those values, but `bite.json` carried them on 185
+    // cycles — and that artefact is precisely what brick 3 will reconstruct from.
+    //
+    // So the correction facts stay INDETERMINATE where they are indeterminate. The observation
+    // facts the cycle really does carry — its context, its bar, its exposures, its feasibility
+    // flag — are published as before.
+    if (observation.assessment != null && observation.assessment.feasibility.known) {
+      const ctx = decision.market_context as StoredContext;
+      const correction = correctToBand({
+        assessment: observation.assessment,
+        clampedAllocation: allocationOf(decision.applied_allocation)!,
+        rawAllocation: allocationOf(decision.target_allocation),
+        reserveAsset: book.reserveAsset,
+        portfolio: portfolioOf(ctx),
+        priceOf: pricesOf(ctx),
+        feePercent: config.execution.feePercent,
+        minMovementPercent: config.execution.minMovementPercent,
+      });
+      observation.row.corrected_exposure_percent = correction.correctedExposurePercent;
+      observation.row.realised_exposure_percent = correction.realisedExposurePercent;
+      observation.row.realised_gap_points = correction.unrealisablePoints;
+      observation.row.consolidated = correction.consolidated;
+      observation.row.consolidation_rounds = correction.consolidationRounds;
+      observation.row.consolidation_attempts = correction.consolidationAttempts;
+      observation.row.planned_movements = correction.movements.length;
+      observation.row.suppressed_movements = correction.suppressed.length;
+      observation.row.label = correction.label;
+    }
+    rows.push(observation.row);
   }
 
   // ── C0 — the corpus is what we think it is ────────────────────────────────────────
@@ -433,7 +483,18 @@ async function main(): Promise<void> {
     // the same function the live cycle uses.
     const withGates = assessed.filter((r) => r.feasibility_known === true);
     const corrections = withGates.filter((r) => r.direction !== 'none');
-    const partial = corrections.filter((r) => r.label === 'bande_partiellement_irrealisable');
+    // ON THE GAP, NEVER ON THE LABEL — and the distinction is this criterion's whole subject.
+    //
+    // Brick 2 enriched `label`: it now says `bande_partiellement_irrealisable` whenever the
+    // REALISED book lands outside the band, movement floor included. That is a better label and
+    // it stays. But C4 asks a narrower question — what do the FREEZES and the CAPS allow — and
+    // `unrealisable_points` is the column that answers it.
+    //
+    // Filtering on the enriched label counted plumbing-only failures as gate infeasibility and
+    // averaged their zero shortfalls into the published gap: 46 partials at 8.93 pt became 124
+    // at 3.31 pt with a median of zero. Two notions of "unrealisable" collapsed into one
+    // predicate, and the tool stopped agreeing with the checkpoint report it had produced.
+    const partial = corrections.filter((r) => (r.unrealisable_points ?? 0) > 0);
     const totallyBlocked = corrections.filter((r) => r.unrealisable_points === r.required_points);
     const noActionable = withGates.filter((r) => r.increasable_assets.length === 0);
     // TWO DIFFERENT REASONS a correction produces nothing, deliberately not merged. A
@@ -554,6 +615,27 @@ async function main(): Promise<void> {
         'donc aucun rendement ni aucun drawdown ne peut en être tiré — et aucun n\'est calculé ici.',
     ]);
   }
+
+  // ── C7 AND C8 ARE NOT HERE, AND THAT IS THE ARBITRATION ──────────────────────────
+  //
+  // Two criteria used to live at this point: what the redistribution would actually SEND, and
+  // whether the model would keep or undo a position the corrector created.
+  //
+  // Both ask questions ACROSS CYCLES — whose leg is this, in which valuation frame, which cause
+  // deleted what — against a history in which no correction ever happened. Answering them
+  // demanded a corrected bot that never existed, re-anchored one step at a time, and every
+  // answer uncovered the next attribution problem. That is not a defect of the redistribution;
+  // it is the wrong tool for the question.
+  //
+  // The RIGHT tool is brick 3. Witnesses E and P are exactly a chained counterfactual with a
+  // pre-registered, reproducible method, and cross-cycle interpretation belongs there.
+  //
+  // What stays here is what this replay can answer honestly: the per-cycle facts. The
+  // correction is still computed for every cycle and its result still travels into the
+  // artefact's rows — corrected exposure, realised exposure, the two gaps, the consolidation,
+  // the per-line origin and cause — so brick 3 reconstructs from durable data rather than from
+  // a conclusion this brick was not equipped to draw.
+
 
   // ── The artefact ─────────────────────────────────────────────────────────────────
   mkdirSync(OUT_DIR, { recursive: true });
