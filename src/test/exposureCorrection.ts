@@ -1,0 +1,681 @@
+import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
+import path from 'node:path';
+import { config } from '../config/index.js';
+import { Decimal, dec } from '../money.js';
+import type { PriceLookup, VirtualPortfolio } from '../portfolio/derive.js';
+import { planMovements } from '../execution/movements.js';
+import type { TransitionGate } from '../transition/gate.js';
+import { assessBand, type AssessBandInput } from '../exposure/band.js';
+import { correctToBand, type CorrectInput, type CorrectionOutcome } from '../exposure/correct.js';
+import { toCorrectionRows } from '../persistence/exposureBandCorrections.js';
+
+/**
+ * THE PROOFS OF THE BAND CORRECTION — brick 2 of the constrained-exposure pilot.
+ *
+ * No network, no database, no LLM, no clock. Everything is a fixture.
+ *
+ * Brick 1 proved WHETHER the band bites and by how much. This proves WHICH LINE absorbs it,
+ * which is where §3.5, §3.6 and the precedence contract actually live.
+ *
+ * ── THE CASES THAT MUST PASS COUNT AS MUCH AS THE ONES THAT MUST BLOCK ─────────────────
+ *
+ * A correction that bit on every cycle would turn the pilot into a permanent forced
+ * intervention, and this project has already had a failure of that family. So the untouched
+ * cases — a target inside its band, a line the correction has no reason to move, a model leg
+ * the correction must not disturb — are proven as deliberately as the blocked ones.
+ */
+
+let passed = 0;
+function ok(label: string, cond: boolean): void {
+  assert.ok(cond, label);
+  console.log(`  ok: ${label}`);
+  passed += 1;
+}
+
+const ROOT = process.cwd();
+const RESERVE = 'USDT';
+const CAPS: Record<string, number> = { BTC: 35, ETH: 35, BNB: 20, XRP: 15 };
+const capOf = (asset: string): number => CAPS[asset] ?? 15;
+
+// ── fixtures ─────────────────────────────────────────────────────────────────────────
+
+/** Every price is 100, so a point of equity is a point of price — the arithmetic stays legible. */
+const priceOf: PriceLookup = (asset) => (asset === RESERVE ? dec(1) : dec(100));
+
+/**
+ * A book holding `weights` percent of `equity` on each line, the rest in cash.
+ *
+ * The book matters as much as the target here: `computeMovements` sizes every leg as
+ * `target − book`, so a correction's leg is only as big as the DISTANCE it has to travel.
+ */
+function bookOf(weights: Record<string, number>, equity = 1000): VirtualPortfolio {
+  const positions = Object.entries(weights).map(([asset, weightPercent]) => {
+    const value = (equity * weightPercent) / 100;
+    return {
+      asset,
+      qty: dec(value / 100),
+      avgCost: dec(100),
+      price: dec(100),
+      priceStale: false,
+      value: dec(value),
+      unrealizedPnl: dec(0),
+      weightPercent: dec(weightPercent),
+    };
+  });
+  const deployed = Object.values(weights).reduce((a, b) => a + b, 0);
+  return {
+    reserveAsset: RESERVE,
+    startingCapital: dec(equity),
+    cash: dec((equity * (100 - deployed)) / 100),
+    positions,
+    equity: dec(equity),
+    deployedPercent: dec(deployed),
+    realizedPnl: dec(0),
+    unrealizedPnl: dec(0),
+    totalPnl: dec(0),
+  };
+}
+
+function gates(map: Record<string, TransitionGate>): Map<string, TransitionGate> {
+  return new Map(Object.entries(map));
+}
+
+const ALL_ACTIONABLE = gates({ BTC: 'actionable', ETH: 'actionable', BNB: 'actionable', XRP: 'actionable' });
+
+/** Builds the assessment + the correction for one scenario, through the real functions. */
+function correct(opts: {
+  state: 'defensive' | 'neutral' | 'constructive';
+  target: Record<string, number>;
+  book?: Record<string, number>;
+  gates?: Map<string, TransitionGate>;
+  equity?: number;
+  raw?: Record<string, number> | null;
+}): CorrectionOutcome {
+  const equity = opts.equity ?? 1000;
+  const portfolio = bookOf(opts.book ?? {}, equity);
+  const gateByAsset = opts.gates ?? ALL_ACTIONABLE;
+  const target = { ...opts.target };
+  const exposure = Object.entries(target)
+    .filter(([a]) => a !== RESERVE)
+    .reduce((sum, [, w]) => sum + w, 0);
+  target[RESERVE] = 100 - exposure;
+
+  const assessInput: AssessBandInput = {
+    policyVersion: config.exposureBand.version,
+    policy: config.exposureBand,
+    state: opts.state,
+    targetAllocation: target,
+    rawAllocation: opts.raw ?? null,
+    bookExposurePercent: portfolio.deployedPercent.toNumber(),
+    reserveAsset: RESERVE,
+    gateByAsset,
+    capOf,
+    maxDeployablePercent: 100 - config.execution.caps.minCashPercent,
+    equityQuote: equity,
+    movementFloorQuote: (equity * config.execution.minMovementPercent) / 100,
+    stoppedWeightSurvives: true,
+  };
+  const assessment = assessBand(assessInput);
+
+  const input: CorrectInput = {
+    assessment,
+    clampedAllocation: target,
+    rawAllocation: opts.raw ?? null,
+    reserveAsset: RESERVE,
+    portfolio,
+    priceOf,
+    feePercent: config.execution.feePercent,
+    minMovementPercent: config.execution.minMovementPercent,
+  };
+  return correctToBand(input);
+}
+
+function weightOf(outcome: CorrectionOutcome, asset: string): number {
+  return outcome.lines.find((l) => l.asset === asset)?.correctedWeightPercent ?? 0;
+}
+function lineOf(outcome: CorrectionOutcome, asset: string) {
+  return outcome.lines.find((l) => l.asset === asset)!;
+}
+/**
+ * Percentage comparison, to 1e-5 of a point.
+ *
+ * Weights are published rounded to six decimals per line, so a sum over three or four lines
+ * carries up to a few units in the sixth — an equal split of 20 points over three lines is
+ * exactly that case. On a $1000 book, 1e-5 of a point is a hundredth of a cent, which is
+ * immaterial by several orders of magnitude; the allocation's own consistency (it sums to
+ * exactly 100) is asserted separately in Proof 10 and is the property that actually matters.
+ */
+function near(a: number, b: number, tol = 1e-5): boolean {
+  return Math.abs(a - b) <= tol;
+}
+
+// ── PROOF 1 — the cases that must pass ──────────────────────────────────────────────
+console.log('Proof 1 — a target inside its band is not touched, and neither are its lines:');
+{
+  const inside = correct({
+    state: 'constructive',
+    target: { BTC: 30, ETH: 20, BNB: 0, XRP: 0 },
+    book: { BTC: 30, ETH: 20 },
+  });
+  ok('the label is aucune_correction', inside.label === 'aucune_correction');
+  ok('no line moved', inside.lines.every((l) => l.correctionPoints === 0));
+  ok('every line keeps the model as its origin', inside.lines.every((l) => l.origin === 'modele'));
+  ok('the corrected exposure IS the target', inside.correctedExposurePercent === 50);
+  ok('nothing is unrealisable', inside.unrealisablePoints === 0);
+  ok('and no consolidation was attempted', !inside.consolidated && inside.consolidationRounds === 0);
+
+  // A NEUTRAL target the model is already holding: the quiet cycle, which must produce no
+  // movement at all. If the band generated turnover here it would be paying fees to stand
+  // still, on the majority of cycles.
+  const quiet = correct({
+    state: 'neutral',
+    target: { BTC: 20, ETH: 10, BNB: 0, XRP: 0 },
+    book: { BTC: 20, ETH: 10 },
+  });
+  ok('a neutral target the book already holds generates NO movement', quiet.movements.length === 0);
+  ok('and nothing is suppressed either — there was nothing to suppress', quiet.suppressed.length === 0);
+}
+
+// ── PROOF 2 — §3.5.1, proportional to the model's own convictions ──────────────────
+console.log('\nProof 2 — §3.5.1: the deficit goes first to the model\'s positive targets, pro rata:');
+{
+  // Constructive floor 45, target 20 → deficit 25, shared 15:5.
+  const out = correct({
+    state: 'constructive',
+    target: { BTC: 15, ETH: 5, BNB: 0, XRP: 0 },
+    book: { BTC: 15, ETH: 5 },
+  });
+  ok('the floor is reached exactly', near(out.correctedExposurePercent, 45));
+  ok('BTC takes three quarters of the deficit (15/20)', near(weightOf(out, 'BTC'), 33.75));
+  ok('ETH takes one quarter (5/20)', near(weightOf(out, 'ETH'), 11.25));
+  ok('the lines the model left at zero stay at zero', weightOf(out, 'BNB') === 0 && weightOf(out, 'XRP') === 0);
+  ok('both moved lines are labelled correction_de_bande', lineOf(out, 'BTC').origin === 'correction_de_bande' && lineOf(out, 'ETH').origin === 'correction_de_bande');
+  ok('NO line is labelled allocation_de_secours — the model\'s conviction sufficed', out.lines.every((l) => l.origin !== 'allocation_de_secours'));
+  ok('the label is hausse_vers_plancher', out.label === 'hausse_vers_plancher');
+  ok('and the whole thing is realisable', out.unrealisablePoints === 0 && near(out.realisedExposurePercent, 45));
+}
+
+// ── PROOF 3 — §3.5.2, caps bound the pass and the excess is re-poured ─────────────
+console.log('\nProof 3 — §3.5.2: a cap clips a line and its excess goes to the others, not away:');
+{
+  // 18:2 pro rata of 25 would give BTC +22.5 → 40.5, above its 35 cap. It is clipped at 35
+  // (+17), and the 5.5 it could not take is re-poured on ETH.
+  const out = correct({
+    state: 'constructive',
+    target: { BTC: 18, ETH: 2, BNB: 0, XRP: 0 },
+    book: { BTC: 18, ETH: 2 },
+  });
+  ok('BTC stops exactly at its 35 cap', near(weightOf(out, 'BTC'), 35));
+  ok('ETH absorbs both its share and the clipped excess', near(weightOf(out, 'ETH'), 10));
+  ok('the floor is still reached — the excess was re-poured, not dropped', near(out.correctedExposurePercent, 45));
+  ok('BTC names the cap as its cause', lineOf(out, 'BTC').cause === 'plafond_individuel');
+  ok('ETH has nothing stopping it', lineOf(out, 'ETH').cause === 'aucune');
+}
+
+// ── PROOF 4 — §3.5.3 and §3.5.4, the equal-weight rescue ──────────────────────────
+console.log('\nProof 4 — §3.5.3/4: what conviction cannot supply is split equally, and labelled:');
+{
+  // BTC alone, at 20, capped at 35 → pass 1 can only add 15. The remaining 10 goes equally to
+  // the three lines the model gave nothing to.
+  const out = correct({
+    state: 'constructive',
+    target: { BTC: 20, ETH: 0, BNB: 0, XRP: 0 },
+    book: { BTC: 20 },
+  });
+  ok('BTC is lifted to its cap by the proportional pass', near(weightOf(out, 'BTC'), 35));
+  ok('the remaining 10 points are split equally, 3.33 each', near(weightOf(out, 'ETH'), 10 / 3) && near(weightOf(out, 'BNB'), 10 / 3) && near(weightOf(out, 'XRP'), 10 / 3));
+  ok('the floor is reached', near(out.correctedExposurePercent, 45));
+  ok('BTC keeps correction_de_bande — its weight started from the model\'s conviction', lineOf(out, 'BTC').origin === 'correction_de_bande');
+  for (const asset of ['ETH', 'BNB', 'XRP']) {
+    ok(
+      `${asset} is labelled allocation_de_secours — the model expressed nothing there`,
+      lineOf(out, asset).origin === 'allocation_de_secours',
+    );
+  }
+}
+
+// ── PROOF 5 — the precedence contract, clause by clause ───────────────────────────
+console.log('\nProof 5 — §3.4: the transition gate wins over BOTH bounds:');
+{
+  // (a) A FROZEN LINE IS NEITHER RAISED...
+  const frozenUp = correct({
+    state: 'constructive',
+    target: { BTC: 10, ETH: 10, BNB: 0, XRP: 0 },
+    book: { BTC: 10, ETH: 10 },
+    gates: gates({ BTC: 'frozen', ETH: 'actionable', BNB: 'actionable', XRP: 'actionable' }),
+  });
+  ok('[gel — hausse] the frozen line is left exactly where the model put it', weightOf(frozenUp, 'BTC') === 10);
+  ok('its cause names the freeze', lineOf(frozenUp, 'BTC').cause === 'gel');
+  ok('the deficit went to the actionable lines instead', weightOf(frozenUp, 'ETH') > 10);
+  ok('and the floor is still reached', near(frozenUp.correctedExposurePercent, 45));
+
+  // (b) ...NOR REDUCED.
+  const frozenDown = correct({
+    state: 'neutral',
+    target: { BTC: 35, ETH: 25, BNB: 0, XRP: 0 },
+    book: { BTC: 35, ETH: 25 },
+    gates: gates({ BTC: 'frozen', ETH: 'actionable', BNB: 'actionable', XRP: 'actionable' }),
+  });
+  ok('[gel — baisse] the frozen line keeps its 35 even above the ceiling', weightOf(frozenDown, 'BTC') === 35);
+  ok('the reducible line absorbs the whole reduction', near(weightOf(frozenDown, 'ETH'), 10));
+  ok('the ceiling is reached', near(frozenDown.correctedExposurePercent, 45));
+
+  // (c) RISK_OFF LIFTS THE FREEZE FOR REDUCTIONS ONLY — the one direction a transition must
+  // never be able to block is the book getting smaller.
+  const riskOff = correct({
+    state: 'defensive',
+    target: { BTC: 25, ETH: 15, BNB: 0, XRP: 0 },
+    book: { BTC: 25, ETH: 15 },
+    gates: gates({ BTC: 'risk_off_reduction', ETH: 'risk_off_reduction', BNB: 'risk_off_reduction', XRP: 'risk_off_reduction' }),
+  });
+  ok('[risk_off] the defensive ceiling of 20 is reached', near(riskOff.correctedExposurePercent, 20));
+  ok('both lines are scaled down proportionally (25:15 of 20)', near(weightOf(riskOff, 'BTC'), 12.5) && near(weightOf(riskOff, 'ETH'), 7.5));
+  ok('nothing is unrealisable', riskOff.unrealisablePoints === 0);
+
+  // (d) A CONFIRMED RISK_OFF MAY NOT BUY. If the band ever asked for an increase there, the
+  // capability map refuses it — an increase under a global de-risk is the one thing the
+  // ladder's rung 2 explicitly does not licence.
+  const riskOffUp = correct({
+    state: 'constructive',
+    target: { BTC: 10, ETH: 10, BNB: 0, XRP: 0 },
+    book: { BTC: 10, ETH: 10 },
+    gates: gates({ BTC: 'risk_off_reduction', ETH: 'risk_off_reduction', BNB: 'risk_off_reduction', XRP: 'risk_off_reduction' }),
+  });
+  ok('[risk_off — hausse] no line may be raised', riskOffUp.lines.every((l) => l.correctionPoints <= 0));
+  ok('so the whole 25 points are journaled as out of reach', near(riskOffUp.unrealisablePoints, 25));
+  ok('and the cycle is labelled irrealisable rather than silently corrected', riskOffUp.label === 'bande_partiellement_irrealisable');
+
+  // (e) `no_regime` FAILS CLOSED — absence of a reading is not permission.
+  const noRegime = correct({
+    state: 'constructive',
+    target: { BTC: 10, ETH: 10, BNB: 0, XRP: 0 },
+    book: { BTC: 10, ETH: 10 },
+    gates: gates({ BTC: 'no_regime', ETH: 'no_regime', BNB: 'no_regime', XRP: 'no_regime' }),
+  });
+  ok('[no_regime] nothing is touched', noRegime.lines.every((l) => l.correctionPoints === 0));
+  ok('and the shortfall is the whole deficit', near(noRegime.unrealisablePoints, 25));
+}
+
+// ── PROOF 6 — §3.4.4 and §3.5.6, the shortfall is executed and journaled ─────────
+console.log('\nProof 6 — §3.4.4: the maximum feasible runs, the gap is journaled, no freeze is lifted:');
+{
+  // Only XRP (cap 15) may rise, from 0. The floor of 45 needs 25 points and 15 exist.
+  const out = correct({
+    state: 'constructive',
+    target: { BTC: 10, ETH: 10, BNB: 0, XRP: 0 },
+    book: { BTC: 10, ETH: 10 },
+    gates: gates({ BTC: 'frozen', ETH: 'frozen', BNB: 'frozen', XRP: 'actionable' }),
+  });
+  ok('XRP is taken to its cap — the maximum feasible really runs', near(weightOf(out, 'XRP'), 15));
+  ok('the frozen lines are untouched', weightOf(out, 'BTC') === 10 && weightOf(out, 'ETH') === 10);
+  ok('the corrected exposure is 35, not 45', near(out.correctedExposurePercent, 35));
+  ok('the 10-point gap is journaled', near(out.unrealisablePoints, 10));
+  ok('and the label says so', out.label === 'bande_partiellement_irrealisable');
+
+  // §3.6.3 — the frozen lines exceed the ceiling on their own. Every authorised reduction
+  // still runs, all the way to zero, and the residue is journaled.
+  const overCeiling = correct({
+    state: 'neutral',
+    target: { BTC: 35, ETH: 20, BNB: 5, XRP: 0 },
+    book: { BTC: 35, ETH: 20, BNB: 5 },
+    gates: gates({ BTC: 'frozen', ETH: 'frozen', BNB: 'actionable', XRP: 'actionable' }),
+  });
+  ok('[lignes gelées au-dessus du plafond] the reducible line goes to ZERO, not part-way', weightOf(overCeiling, 'BNB') === 0);
+  ok('the frozen 55 stands', near(overCeiling.correctedExposurePercent, 55));
+  ok('the 10-point overshoot is journaled', near(overCeiling.unrealisablePoints, 10));
+  ok('labelled irrealisable', overCeiling.label === 'bande_partiellement_irrealisable');
+}
+
+// ── PROOF 7 — §3.5.5, the consolidation ─────────────────────────────────────────
+console.log('\nProof 7 — §3.5.5: a distribution the 2% floor would delete is consolidated instead:');
+{
+  // Equity 1000 → the floor is 20 quote = 2 points. The book already holds the model's target,
+  // so the ONLY legs are the correction's own. A 3-point deficit spread over three lines gives
+  // legs of 10.6, 10.6 and 8.8 quote — all deleted. Concentrated on one, it is 30 quote.
+  const out = correct({
+    state: 'neutral',
+    target: { BTC: 6, ETH: 6, BNB: 5, XRP: 0 },
+    book: { BTC: 6, ETH: 6, BNB: 5 },
+  });
+  ok('the target reaches the floor', near(out.correctedExposurePercent, 20));
+  ok('consolidation fired', out.consolidated);
+  ok('and it landed on ONE line rather than three', out.lines.filter((l) => l.correctionPoints > 0).length === 1);
+  ok('it kept the highest-conviction line, BTC', lineOf(out, 'BTC').correctionPoints > 0);
+  ok('that line clears the floor', out.movements.length === 1 && out.movements[0]!.notional.gt(dec(20)));
+  ok('so the book really reaches the floor', near(out.realisedExposurePercent, 20));
+  ok('with nothing left unrealisable', out.unrealisablePoints === 0);
+
+  // THE PROOF THAT THIS IS NOT COSMETIC: without consolidation the same deficit spread over
+  // three lines produces three sub-floor legs and moves NOTHING. Run the plan by hand on the
+  // naive allocation to show the failure the rule exists to prevent.
+  const naive = planMovements(
+    bookOf({ BTC: 6, ETH: 6, BNB: 5 }),
+    { BTC: 6 + 18 / 17, ETH: 6 + 18 / 17, BNB: 5 + 15 / 17, USDT: 80 },
+    priceOf,
+    config.execution.feePercent,
+    config.execution.minMovementPercent,
+  );
+  ok('the naive spread sends NO movement at all', naive.movements.length === 0);
+  ok('and the floor deletes all three legs', naive.suppressed.length === 3 && naive.suppressed.every((s) => s.reason === 'movement_floor'));
+  ok('which is exactly the "target that moves nothing" §3.5.5 forbids', naive.movements.length === 0 && out.movements.length > 0);
+
+  // ── THE LIMIT OF THE RULE, AND IT IS A REAL MECHANICAL ONE ────────────────────────
+  //
+  // A deficit worth about ONE movement floor cannot be saved by any amount of concentrating:
+  // the buy budget is split then divided by (1 + fee), so a leg sized at exactly 2 points of a
+  // 1000 book arrives at 19.98 against a floor of 20.00. Every narrowing is tried, none helps,
+  // and the honest outcome is a 2-point gap rather than a target that pretends to move.
+  const atTheFloor = correct({
+    state: 'neutral',
+    target: { BTC: 6, ETH: 6, BNB: 6, XRP: 0 },
+    book: { BTC: 6, ETH: 6, BNB: 6 },
+  });
+  ok('a deficit of exactly one floor: the target still reaches the bound', near(atTheFloor.correctedExposurePercent, 20));
+  // Four candidates, not three: XRP sits at zero weight and is still eligible for the rescue
+  // pass, so it is one of the lines the narrowing sheds first.
+  ok('every narrowing was evaluated', atTheFloor.consolidationAttempts === 4);
+  ok('none of them helped, so none is claimed', !atTheFloor.consolidated);
+  ok('no movement is sent', atTheFloor.movements.length === 0);
+  ok('and the 2-point gap is journaled rather than hidden', near(atTheFloor.unrealisablePoints, 2) && near(atTheFloor.realisedExposurePercent, 18));
+  ok('the label reports it', atTheFloor.label === 'bande_partiellement_irrealisable');
+
+  // NARROWING SHEDS THE RESCUE LINES FIRST. The model's convictions are the last thing given
+  // up, so consolidation costs as little of its expressed preference as possible.
+  const keepsConviction = correct({
+    state: 'neutral',
+    target: { BTC: 17, ETH: 0, BNB: 0, XRP: 0 },
+    book: { BTC: 17 },
+  });
+  ok('a 3-point deficit on a single conviction line lands on that line', near(weightOf(keepsConviction, 'BTC'), 20));
+  ok('no rescue line was needed', keepsConviction.lines.every((l) => l.origin !== 'allocation_de_secours'));
+}
+
+// ── PROOF 8 — §3.3, the four facts are separable ────────────────────────────────
+console.log('\nProof 8 — §3.3: the target and what the book really holds are different numbers:');
+{
+  // A 1-point deficit that no consolidation can save: one point of a 1000 book is 10 quote,
+  // half the floor. The target reaches the bound; the book does not.
+  const out = correct({
+    state: 'neutral',
+    target: { BTC: 19, ETH: 0, BNB: 0, XRP: 0 },
+    book: { BTC: 19 },
+  });
+  ok('FACT 3 — the corrected target reaches the floor', near(out.correctedExposurePercent, 20));
+  ok('FACT 4 — the book does NOT: the leg is under the floor', near(out.realisedExposurePercent, 19));
+  ok('the two are published separately, never collapsed', out.correctedExposurePercent !== out.realisedExposurePercent);
+  ok('the shortfall is measured on the BOOK, not on the target', near(out.unrealisablePoints, 1));
+  ok('the deleted leg stays visible', out.suppressed.length === 1 && out.suppressed[0]!.asset === 'BTC');
+  ok('and it names the floor as its reason', out.suppressed[0]!.reason === 'movement_floor');
+  ok('the line names the plumbing as its cause', lineOf(out, 'BTC').cause === 'seuil_de_mouvement');
+  ok('while the label reports the band as partially unrealisable', out.label === 'bande_partiellement_irrealisable');
+
+  // FACT 1 travels untouched: the raw proposal is carried, never used as an operand.
+  const withRaw = correct({
+    state: 'constructive',
+    target: { BTC: 15, ETH: 5, BNB: 0, XRP: 0 },
+    book: { BTC: 15, ETH: 5 },
+    raw: { BTC: 15, ETH: 5, BNB: 0, XRP: 0, USDT: 80 },
+  });
+  ok('FACT 1 — every line carries the model\'s raw weight', lineOf(withRaw, 'BTC').rawWeightPercent === 15);
+  ok('FACT 2 — and the signed points the band added', near(lineOf(withRaw, 'BTC').correctionPoints, 18.75));
+  ok('facts 1 + 2 reconstruct fact 3 exactly', near(lineOf(withRaw, 'BTC').clampedWeightPercent + lineOf(withRaw, 'BTC').correctionPoints, lineOf(withRaw, 'BTC').correctedWeightPercent));
+}
+
+// ── PROOF 9 — the correction never disturbs what the model itself asked ─────────
+console.log('\nProof 9 — the correction adds to the model\'s legs, it does not replace them:');
+{
+  // The model wants to buy ETH (book 0, target 10). The band lifts the whole vector. The ETH
+  // leg must still be there, bigger — never suppressed by the correction's arrival.
+  const out = correct({
+    state: 'constructive',
+    target: { BTC: 10, ETH: 10, BNB: 0, XRP: 0 },
+    book: { BTC: 20, ETH: 0 },
+  });
+  const eth = out.movements.find((m) => m.asset === 'ETH');
+  ok('the model\'s ETH buy survives the correction', eth != null && eth.side === 'buy');
+  ok('and it is BIGGER than the 10 points the model asked for', eth!.notional.gt(dec(100)));
+
+  // A SELL the model asked for is not turned into a buy by a floor correction: the band moves
+  // the total, and a line the model wants smaller than the book stays a sell unless the
+  // correction genuinely lifts it past the book.
+  const trim = correct({
+    state: 'neutral',
+    target: { BTC: 30, ETH: 5, BNB: 0, XRP: 0 },
+    book: { BTC: 30, ETH: 20 },
+  });
+  ok('a target inside the band leaves the model\'s trim alone', trim.label === 'aucune_correction');
+  const ethTrim = trim.movements.find((m) => m.asset === 'ETH');
+  ok('and the ETH sell is exactly what the model asked for', ethTrim != null && ethTrim.side === 'sell' && ethTrim.notional.eq(dec(150)));
+}
+
+// ── PROOF 10 — the allocation stays an allocation ──────────────────────────────
+console.log('\nProof 10 — the corrected allocation is still a well-formed one:');
+{
+  const cases: Array<[string, CorrectionOutcome]> = [
+    ['inside the band', correct({ state: 'constructive', target: { BTC: 30, ETH: 20 }, book: { BTC: 30, ETH: 20 } })],
+    ['lifted to the floor', correct({ state: 'constructive', target: { BTC: 15, ETH: 5 }, book: { BTC: 15, ETH: 5 } })],
+    ['rescued', correct({ state: 'constructive', target: { BTC: 20 }, book: { BTC: 20 } })],
+    ['trimmed to the ceiling', correct({ state: 'neutral', target: { BTC: 35, ETH: 25 }, book: { BTC: 35, ETH: 25 } })],
+    ['partly frozen', correct({ state: 'constructive', target: { BTC: 10, ETH: 10 }, book: { BTC: 10, ETH: 10 }, gates: gates({ BTC: 'frozen', ETH: 'actionable', BNB: 'actionable', XRP: 'actionable' }) })],
+  ];
+  for (const [label, outcome] of cases) {
+    const sum = Object.values(outcome.correctedAllocation).reduce((a, b) => a + b, 0);
+    ok(`${label}: the allocation still sums to 100`, near(sum, 100, 1e-6));
+    ok(`${label}: no weight is negative`, Object.values(outcome.correctedAllocation).every((w) => w >= -1e-9));
+    ok(
+      `${label}: no line exceeds its cap`,
+      outcome.lines.every((l) => l.correctedWeightPercent <= l.capPercent + 1e-9),
+    );
+    ok(
+      `${label}: the reserve never falls under the ${config.execution.caps.minCashPercent}% floor`,
+      outcome.correctedAllocation[RESERVE]! >= config.execution.caps.minCashPercent - 1e-6,
+    );
+  }
+}
+
+// ── PROOF 11 — pure, total, deterministic ─────────────────────────────────────
+console.log('\nProof 11 — nothing here can fail a trading cycle:');
+{
+  const twice = [
+    correct({ state: 'constructive', target: { BTC: 15, ETH: 5 }, book: { BTC: 15, ETH: 5 } }),
+    correct({ state: 'constructive', target: { BTC: 15, ETH: 5 }, book: { BTC: 15, ETH: 5 } }),
+  ];
+  ok('the correction is deterministic', JSON.stringify(twice[0]) === JSON.stringify(twice[1]));
+
+  // Degenerate inputs are answers, not crashes.
+  const allCash = correct({ state: 'neutral', target: {}, book: {} });
+  ok('an all-cash target with an empty book is answered, not thrown', allCash.label !== undefined);
+  ok('and the rescue lines supply the floor', near(allCash.correctedExposurePercent, 20));
+
+  const noLines = correct({
+    state: 'constructive',
+    target: { BTC: 10, ETH: 10 },
+    book: { BTC: 10, ETH: 10 },
+    gates: new Map(),
+  });
+  ok('no verdict at all means nothing may move', noLines.lines.every((l) => l.correctionPoints === 0));
+  ok('and the whole deficit is journaled', near(noLines.unrealisablePoints, 25));
+
+  // THE MODULE GRAPH: pure means pure. Neither the corrector nor the band may reach a query.
+  const graph = moduleGraph(path.join(ROOT, 'src/exposure/correct.ts'));
+  const writers = [...graph].filter((file) =>
+    /\.(insert|upsert|update|delete|rpc)\s*\(|\.from\('/.test(readFileSync(file, 'utf8')),
+  );
+  ok(
+    `the corrector's graph can build no query at all (${writers.map((f) => path.basename(f)).join(', ') || 'none'})`,
+    writers.length === 0,
+  );
+}
+
+// ── PROOF 12 — the floor rule exists exactly once ─────────────────────────────
+console.log('\nProof 12 — the correction applies the executor\'s own floor, not a copy of it:');
+{
+  const movements = readFileSync(path.join(ROOT, 'src/execution/movements.ts'), 'utf8');
+  ok(
+    'computeMovements is a thin wrapper over planMovements',
+    /export function computeMovements\([\s\S]{0,400}?return planMovements\(/.test(movements),
+  );
+  ok(
+    'the floor predicate is named in exactly one place',
+    [...movements.matchAll(/export function isBelowFloor/g)].length === 1,
+  );
+  const corrector = readFileSync(path.join(ROOT, 'src/exposure/correct.ts'), 'utf8');
+  ok(
+    'and the corrector never re-implements it — it calls planMovements',
+    corrector.includes('planMovements(') && !/isBelowFloor|minMovementPercent\s*\)\s*\/\s*100/.test(corrector.replace(/minMovementPercent: input\.minMovementPercent|minMovementPercent: number/g, '')),
+  );
+}
+
+// ── PROOF 13 — brick 2 does not touch the order path ──────────────────────────
+//
+// The correction exists, it is computed on every cycle, and NOTHING sends it. That is the
+// whole safety claim of this brick, and it is structural rather than promised: `correctToBand`
+// is called from inside the observation closure, which runs after the orders are placed and
+// returns void. Moving it up to the risk clamp — where it will eventually have to live — is
+// the last brick's job, and it should be one reviewable diff rather than something that has
+// quietly already happened.
+console.log('\nProof 13 — the correction is computed and nothing sends it:');
+{
+  const decide = readFileSync(path.join(ROOT, 'src/decision/decide.ts'), 'utf8');
+
+  // (a) EXACTLY ONE CALL SITE, and it is inside the observation closure.
+  const calls = [...decide.matchAll(/correctToBand\(\{/g)];
+  ok('correctToBand is called exactly once in decide()', calls.length === 1);
+  const closureStart = decide.indexOf('const observeExposureBand');
+  const closureEnd = decide.indexOf('// The AI sees the virtual book');
+  ok(
+    'and that call sits inside the observation closure',
+    calls[0]!.index! > closureStart && calls[0]!.index! < closureEnd,
+  );
+
+  // (b) THE ORDER PATH STILL READS THE GUARD'S OWN MOVEMENTS. If the correction ever reached
+  // the executor it would have to pass through here, and this is the line that would change.
+  ok(
+    'the executed vector still comes from the guard-evaluated movements',
+    /const \{ clamp, movements: proposedMovements \} = evaluated;/.test(decide),
+  );
+  ok(
+    'and the gate is still judged on those, not on a corrected vector',
+    /judgeVector\(\s*proposedMovements\.map/.test(decide),
+  );
+  ok(
+    'no corrected allocation is ever handed to computeMovements',
+    !/computeMovements\([^)]*correct/i.test(decide),
+  );
+  ok(
+    'nor to applyGate',
+    !/applyGate\(\{[\s\S]{0,600}?correct/i.test(decide),
+  );
+
+  // (c) THE CORRECTION RUNS AFTER EXECUTION. Same tier as every other observational write.
+  ok(
+    'the single call site is after executeMovements in the file',
+    decide.indexOf('await executeMovements(') < decide.lastIndexOf('await observeExposureBand({'),
+  );
+}
+
+// ── PROOF 14 — the rows satisfy what the database will check ─────────────────
+//
+// The writer is best-effort by design: a row the constraints reject fails silently, forever,
+// with only a log line. The two constraints that encode the journal's meaning — the facts must
+// reconcile, and an untouched line must carry the model's origin — are therefore asserted here
+// too, offline, on every scenario the other proofs build.
+console.log('\nProof 14 — every row satisfies the constraints the migration declares:');
+{
+  const scenarios: Array<[string, CorrectionOutcome]> = [
+    ['untouched', correct({ state: 'constructive', target: { BTC: 30, ETH: 20 }, book: { BTC: 30, ETH: 20 } })],
+    ['lifted', correct({ state: 'constructive', target: { BTC: 15, ETH: 5 }, book: { BTC: 15, ETH: 5 } })],
+    ['rescued', correct({ state: 'constructive', target: { BTC: 20 }, book: { BTC: 20 } })],
+    ['trimmed', correct({ state: 'neutral', target: { BTC: 35, ETH: 25 }, book: { BTC: 35, ETH: 25 } })],
+    ['consolidated', correct({ state: 'neutral', target: { BTC: 6, ETH: 6, BNB: 5 }, book: { BTC: 6, ETH: 6, BNB: 5 } })],
+    ['frozen', correct({ state: 'constructive', target: { BTC: 10, ETH: 10 }, book: { BTC: 10, ETH: 10 }, gates: gates({ BTC: 'frozen', ETH: 'frozen', BNB: 'actionable', XRP: 'actionable' }) })],
+  ];
+
+  for (const [label, outcome] of scenarios) {
+    const rows = toCorrectionRows({
+      decisionId: 1,
+      correction: outcome,
+      gateByAsset: ALL_ACTIONABLE,
+      bookedLedger: [],
+      portfolioAfter: null,
+    });
+    ok(`${label}: one row per line`, rows.length === outcome.lines.length);
+    ok(
+      `${label}: facts 2 and 3 reconcile (the migration's CHECK)`,
+      rows.every((r) => Math.abs(r.clamped_weight_percent + r.correction_points - r.corrected_weight_percent) < 1e-6),
+    );
+    ok(
+      `${label}: an untouched line carries the model's origin, and only it (the migration's CHECK)`,
+      rows.every((r) => (r.correction_points === 0) === (r.origin === 'modele')),
+    );
+    ok(
+      `${label}: every origin and cause is one the constraint allows`,
+      rows.every(
+        (r) =>
+          ['modele', 'correction_de_bande', 'allocation_de_secours'].includes(r.origin) &&
+          ['aucune', 'gel', 'plafond_individuel', 'seuil_de_mouvement', 'autre_impossibilite'].includes(r.cause),
+      ),
+    );
+  }
+
+  // FACT 4 comes from the REAL cycle, and is null when there was none — never a fabricated
+  // zero, which would be indistinguishable from a line that really went flat.
+  const outcome = correct({ state: 'constructive', target: { BTC: 15, ETH: 5 }, book: { BTC: 15, ETH: 5 } });
+  const noExecution = toCorrectionRows({
+    decisionId: 1,
+    correction: outcome,
+    gateByAsset: ALL_ACTIONABLE,
+    bookedLedger: [],
+    portfolioAfter: null,
+  });
+  ok('with no execution, fact 4 is null rather than zero', noExecution.every((r) => r.post_cycle_weight_percent === null && r.booked_side === null));
+
+  const withExecution = toCorrectionRows({
+    decisionId: 1,
+    correction: outcome,
+    gateByAsset: ALL_ACTIONABLE,
+    bookedLedger: [],
+    portfolioAfter: bookOf({ BTC: 12 }),
+  });
+  ok('with a post-trade book, a line it does not mention is a real zero', withExecution.find((r) => r.asset === 'ETH')?.post_cycle_weight_percent === 0);
+  ok('and one it does mention carries its weight', withExecution.find((r) => r.asset === 'BTC')?.post_cycle_weight_percent === 12);
+}
+
+// ── helpers ────────────────────────────────────────────────────────────────────
+
+/**
+ * The transitive RUNTIME module graph — `import type` edges are erased, deliberately.
+ *
+ * The band's own proof (`exposureBand.ts`) follows every edge, because there the question is
+ * "could the calibration harness be reached", and over-reporting reachability is the safe
+ * direction. Here the question is the opposite one — "can this graph touch the database" — and
+ * over-reporting produces a FALSE POSITIVE: `movements.ts` imports `ExecutionInsert` from
+ * `persistence/executions.ts` with `import type`, which TypeScript erases entirely, so no
+ * query builder is ever loaded. Counting that edge would fail a proof about behaviour on the
+ * strength of a type annotation.
+ */
+function moduleGraph(entry: string): Set<string> {
+  const seen = new Set<string>();
+  const queue = [path.resolve(entry)];
+  while (queue.length > 0) {
+    const file = queue.pop()!;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    let source: string;
+    try {
+      source = readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    // `import type { … } from '…'` is erased at compile time; every other form emits a real
+    // import of the module, even when some of its named bindings are types.
+    const runtime = source.replace(/^import\s+type\s[\s\S]*?from\s+'[^']+';/gm, '');
+    for (const match of runtime.matchAll(/from\s+'(\.[^']+)'/g)) {
+      queue.push(path.resolve(path.dirname(file), match[1]!.replace(/\.js$/, '.ts')));
+    }
+  }
+  return seen;
+}
+
+console.log(`\nAll ${passed} exposure-correction proofs passed.`);

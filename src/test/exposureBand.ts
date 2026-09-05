@@ -480,7 +480,7 @@ console.log('\nProof 11 — a cycle without a context or without a target keeps 
     stoppedWeightSurvives: true,
   };
 
-  const noRegime = observeBand({ ...base, regimePoint: null, targetAllocation: { BTC: 10, USDT: 90 } });
+  const noRegime = observeBand({ ...base, regimePoint: null, targetAllocation: { BTC: 10, USDT: 90 } }).row;
   ok('a cycle with no regime still produces a row', noRegime.decision_id === 1);
   ok('with the gap named', noRegime.gap === 'no_regime');
   ok('and NO state — absence never becomes neutral', noRegime.state === null);
@@ -490,7 +490,7 @@ console.log('\nProof 11 — a cycle without a context or without a target keeps 
     ...base,
     regimePoint: journalOf('2026-08-12T00:00:00.000Z', BULL),
     targetAllocation: null,
-  });
+  }).row;
   ok('a cycle with no target keeps its CONTEXT', noTarget.state === 'constructive' && noTarget.bar_at != null);
   ok('which is what lets its bar still be counted for coverage', noTarget.context_fingerprint != null);
   ok('while the gap says why there is no assessment', noTarget.gap === 'no_target' && noTarget.label === null);
@@ -501,7 +501,7 @@ console.log('\nProof 11 — a cycle without a context or without a target keeps 
     ...base,
     regimePoint: journalOf('2026-08-12T00:00:00.000Z', BULL),
     targetAllocation: { BTC: 10, ETH: 10, USDT: 80 },
-  });
+  }).row;
   for (const [label, row] of [['no_regime', noRegime], ['no_target', noTarget], ['assessed', assessed]] as const) {
     ok(`${label}: exactly one of (label, gap) is set`, (row.label == null) === (row.gap != null));
   }
@@ -553,14 +553,14 @@ console.log('\nProof 12 — two cycles of one 4h bar disagreeing on the context 
     universe: UNIVERSE, targetAllocation: { BTC: 10, USDT: 90 }, rawAllocation: null,
     bookExposurePercent: 10, reserveAsset: RESERVE, gateByAsset: ALL_ACTIONABLE, capOf,
     maxDeployablePercent: 70, equityQuote: 1000, movementFloorQuote: 20, stoppedWeightSurvives: true,
-  });
+  }).row;
   const b = observeBand({
     decisionId: 2, mode: 'observation', policyVersion: 'A', policy: config.exposureBand,
     regimePoint: journalOf(bar, { BTC: 'trend_down', ETH: 'trend_up', BNB: 'range', XRP: 'range' }),
     universe: UNIVERSE, targetAllocation: { BTC: 10, USDT: 90 }, rawAllocation: null,
     bookExposurePercent: 10, reserveAsset: RESERVE, gateByAsset: ALL_ACTIONABLE, capOf,
     maxDeployablePercent: 70, equityQuote: 1000, movementFloorQuote: 20, stoppedWeightSurvives: true,
-  });
+  }).row;
   ok('the two bars read the same state and the same net breadth', a.state === b.state && a.net_breadth === b.net_breadth);
   // NOT a finding, and deliberately so. The fingerprint covers the CONTROLLER'S READING, which
   // is what the protocol calls "the context": a per-asset swap that leaves the reading
@@ -577,7 +577,7 @@ console.log('\nProof 12 — two cycles of one 4h bar disagreeing on the context 
     universe: UNIVERSE, targetAllocation: { BTC: 10, USDT: 90 }, rawAllocation: null,
     bookExposurePercent: 10, reserveAsset: RESERVE, gateByAsset: ALL_ACTIONABLE, capOf,
     maxDeployablePercent: 70, equityQuote: 1000, movementFloorQuote: 20, stoppedWeightSurvives: true,
-  });
+  }).row;
   ok('losing one asset mid-bar changes the reading (unavailable moves)', partial.unavailable === 1 && a.unavailable === 0);
   ok('and THAT is a finding — the bar is not internally consistent', checkBarIntegrity([a, partial]).length === 1);
 
@@ -589,14 +589,14 @@ console.log('\nProof 12 — two cycles of one 4h bar disagreeing on the context 
     universe: UNIVERSE, targetAllocation: { BTC: 10, USDT: 90 }, rawAllocation: null,
     bookExposurePercent: 10, reserveAsset: RESERVE, gateByAsset: ALL_ACTIONABLE, capOf,
     maxDeployablePercent: 70, equityQuote: 1000, movementFloorQuote: 20, stoppedWeightSurvives: true,
-  });
+  }).row;
   const constructive = observeBand({
     decisionId: 5, mode: 'observation', policyVersion: 'A', policy: config.exposureBand,
     regimePoint: journalOf(bar, BULL),
     universe: UNIVERSE, targetAllocation: { BTC: 10, USDT: 90 }, rawAllocation: null,
     bookExposurePercent: 10, reserveAsset: RESERVE, gateByAsset: ALL_ACTIONABLE, capOf,
     maxDeployablePercent: 70, equityQuote: 1000, movementFloorQuote: 20, stoppedWeightSurvives: true,
-  });
+  }).row;
   ok('a bar read defensive at one wake-up and constructive at another', flipped.state === 'defensive' && constructive.state === 'constructive');
   ok('fails the check loudly — the first cycle must not be allowed to mask it', checkBarIntegrity([constructive, flipped]).length === 1);
 }
@@ -617,7 +617,14 @@ console.log('\nProof 13 — the band cannot change what the bot does:');
   // (b) THE RETURN TYPE is void, so no allocation, movement or order can be derived from it.
   // This is the structural half of "it creates nothing": a caller cannot use what it cannot
   // receive.
-  ok('the closure returns void — nothing downstream can read a band decision', body.startsWith('): Promise<void> => {'));
+  ok(
+    'the closure returns void — nothing downstream can read a band decision',
+    body.startsWith('): Promise<void> => {'),
+  );
+  ok(
+    'and its declared return type appears exactly once, so the slice above is the real body',
+    [...closure.matchAll(/\): Promise<void> => \{/g)].length === 1,
+  );
 
   // (c) NO CALL SITE assigns it. A `const x = await observeExposureBand(...)` would be void,
   // but the grep is the cheap guard against the shape ever changing under someone's feet.
@@ -642,13 +649,16 @@ console.log('\nProof 13 — the band cannot change what the bot does:');
   // And the ONE path that must not publish a book exposure does not: when the execution
   // journal cannot be read, `derivePortfolio` returns a 100%-cash book that does not exist,
   // and a fabricated 0% would be indistinguishable from a book that really was flat.
+  // The options object spells each fact out by name, so these read the FIELD rather than a
+  // positional argument whose meaning a future reorder could silently change.
   ok(
     'the lifecycle-read-failure skip passes a NULL book exposure',
-    decide.includes('await observeExposureBand(id, null, null, null);'),
+    [...decide.matchAll(/observeExposureBand\(\{[^}]*bookExposurePercent: null,\s*\}\)/g)].length === 1,
   );
   ok(
-    'and it is the only call site that does',
-    [...decide.matchAll(/await observeExposureBand\(id, null, null, null\);/g)].length === 1,
+    'and it is the only call site that does — every other path publishes what it measured',
+    [...decide.matchAll(/bookExposurePercent: portfolio\.deployedPercent\.toNumber\(\)/g)].length ===
+      outageCalls - 1,
   );
 
   // (e) IT RUNS AFTER THE ORDERS. On the decided path the observation sits after
@@ -669,7 +679,8 @@ console.log('\nProof 13 — the band cannot change what the bot does:');
       !file.includes(`${path.sep}test${path.sep}`) &&
       !file.includes(`${path.sep}replay${path.sep}`) &&
       !file.includes(`${path.sep}exposure${path.sep}`) &&
-      !file.endsWith(path.join('persistence', 'exposureBandObservations.ts')),
+      !file.endsWith(path.join('persistence', 'exposureBandObservations.ts')) &&
+      !file.endsWith(path.join('persistence', 'exposureBandCorrections.ts')),
   );
   // The QUERY, not the name. A table can only be reached through `.from('<table>')`, so that
   // is the tight check; grepping the bare name would flag a comment that merely mentions it,
@@ -709,7 +720,7 @@ console.log('\nProof 14 — nothing here can fail a trading cycle:');
     rawAllocation: null, bookExposurePercent: 10, reserveAsset: RESERVE,
     gateByAsset: ALL_ACTIONABLE, capOf, maxDeployablePercent: 70, equityQuote: 1000,
     movementFloorQuote: 20, stoppedWeightSurvives: true,
-  });
+  }).row;
   ok('an unclassifiable regime does not throw', row.decision_id === 1);
   ok('it is recorded as itself, never as neutral', row.gap === 'unclassifiable_regime' && row.state === null);
   ok('and the refusal keeps its explanation', (row.gap_detail ?? '').includes('sideways_ish'));
@@ -762,40 +773,84 @@ console.log('\nProof 14 — nothing here can fail a trading cycle:');
 // the evidence at the end.
 //
 // So the shape is checked against the MIGRATION, offline, on every test run.
-console.log('\nProof 15 — the insert shape matches the migration, column for column:');
+console.log('');
+console.log('Proof 15 — every insert shape matches its migration, column for column:');
 {
-  const source = readFileSync(path.join(ROOT, 'src/exposure/observe.ts'), 'utf8');
-  const iface = source.slice(
-    source.indexOf('export interface BandObservationInsert'),
-    source.indexOf('export interface ObserveBandInput'),
-  );
-  const rowKeys = [...iface.matchAll(/^ {2}([a-z_]+)\??:/gm)].map((m) => m[1]!).sort();
+  /**
+   * The columns a migration declares for one table — the CREATE TABLE body plus any ALTER.
+   *
+   * Reading only the CREATE was enough for one PR and would have been wrong for the next: a
+   * column added by an "alter table ... add column" is just as real, and a proof that missed
+   * it would go green on a row the database cannot store.
+   */
+  const columnsOf = (file: string, table: string): string[] => {
+    const sql = readFileSync(path.join(ROOT, 'supabase/migrations', file), 'utf8');
+    const found = new Set<string>();
+    const createAt = sql.indexOf('create table if not exists public.' + table + ' (');
+    if (createAt >= 0) {
+      const body = sql.slice(createAt, sql.indexOf('\n);', createAt));
+      for (const m of body.matchAll(/^ {2}([a-z_]+) +(?!.*\breferences public\.decisions\b)[a-z]/gm)) {
+        found.add(m[1]!);
+      }
+    }
+    const alterAt = sql.indexOf('alter table public.' + table + '\n  add column');
+    if (alterAt >= 0) {
+      const body = sql.slice(alterAt, sql.indexOf(';', alterAt));
+      for (const m of body.matchAll(/add column if not exists ([a-z_]+)/g)) found.add(m[1]!);
+    }
+    return [...found].filter((name) => !['id', 'created_at', 'constraint'].includes(name));
+  };
 
-  const migration = readFileSync(
-    path.join(ROOT, 'supabase/migrations/0028_exposure_band_observations.sql'),
-    'utf8',
-  );
-  const body = migration.slice(
-    migration.indexOf('create table if not exists public.exposure_band_observations ('),
-    migration.indexOf('comment on table'),
-  );
-  // Column declarations only: a line starting with an identifier followed by a type. The
-  // constraint lines start with `constraint`, and the generated columns are excluded below.
-  const declared = [...body.matchAll(/^ {2}([a-z_]+) +(?!.*\breferences public\.decisions\b)[a-z]/gm)]
-    .map((m) => m[1]!)
-    .filter((name) => !['id', 'created_at', 'constraint'].includes(name));
-  const columns = [...new Set([...declared, 'decision_id'])].sort();
+  const keysOf = (file: string, iface: string, until: string): string[] => {
+    const source = readFileSync(path.join(ROOT, file), 'utf8');
+    const body = source.slice(source.indexOf('export interface ' + iface), source.indexOf(until));
+    return [...body.matchAll(/^ {2}([a-z_]+)\??:/gm)].map((m) => m[1]!).sort();
+  };
 
-  ok(`the migration declares ${columns.length} writable columns`, columns.length > 30);
-  ok(
-    `and the insert shape carries exactly the same ${rowKeys.length}`,
-    rowKeys.join(',') === columns.join(','),
+  const compare = (label: string, columns: string[], rowKeys: string[], minimum: number): void => {
+    ok(label + ': the migrations declare ' + columns.length + ' writable columns', columns.length > minimum);
+    ok(
+      label + ': the insert shape carries exactly the same ' + rowKeys.length,
+      rowKeys.join(',') === columns.join(','),
+    );
+    const extra = rowKeys.filter((k) => !columns.includes(k));
+    const missing = columns.filter((c) => !rowKeys.includes(c));
+    ok(label + ': nothing written the table lacks (' + (extra.join(', ') || 'none') + ')', extra.length === 0);
+    ok(label + ': nothing left unwritten (' + (missing.join(', ') || 'none') + ')', missing.length === 0);
+  };
+
+  // THE OBSERVATION ROW — created by 0028, extended by 0030.
+  compare(
+    'observations',
+    [
+      ...new Set([
+        ...columnsOf('0028_exposure_band_observations.sql', 'exposure_band_observations'),
+        ...columnsOf('0030_exposure_band_corrections.sql', 'exposure_band_observations'),
+        'decision_id',
+      ]),
+    ].sort(),
+    keysOf('src/exposure/observe.ts', 'BandObservationInsert', 'export interface ObserveBandInput'),
+    40,
   );
-  const missing = columns.filter((c) => !rowKeys.includes(c));
-  const extra = rowKeys.filter((k) => !columns.includes(k));
-  ok(`no column is written that the table lacks (${extra.join(', ') || 'none'})`, extra.length === 0);
-  ok(`no column is left unwritten (${missing.join(', ') || 'none'})`, missing.length === 0);
+
+  // THE FOUR-FACT ROW — created by 0030.
+  compare(
+    'corrections',
+    [
+      ...new Set([
+        ...columnsOf('0030_exposure_band_corrections.sql', 'exposure_band_corrections'),
+        'decision_id',
+      ]),
+    ].sort(),
+    keysOf(
+      'src/persistence/exposureBandCorrections.ts',
+      'BandCorrectionInsert',
+      'export interface ToCorrectionRowsInput',
+    ),
+    15,
+  );
 }
+
 
 // ── helpers ─────────────────────────────────────────────────────────────────────────
 

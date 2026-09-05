@@ -6,6 +6,8 @@ import { getSupabaseClient } from '../persistence/supabase.js';
 import { parseRegimeJournal, regimePointFromJournal } from '../market/regimeJournal.js';
 import type { TransitionGate } from '../transition/gate.js';
 import { observeBand, checkBarIntegrity, type BandObservationInsert } from '../exposure/observe.js';
+import { correctToBand, type CorrectionOutcome } from '../exposure/correct.js';
+import { bookOf as portfolioOf, pricesOf, type StoredContext } from './storedCycle.js';
 
 /**
  * THE HISTORICAL BITE — the mandatory checkpoint of the pilot's first brick.
@@ -231,6 +233,8 @@ async function main(): Promise<void> {
    * publish a bite over a corpus it can no longer read correctly.
    */
   const postGateOnly: number[] = [];
+  /** The redistribution, per cycle — keyed by decision so later criteria can walk it in order. */
+  const corrections = new Map<number, CorrectionOutcome>();
 
   for (const decision of decisions) {
     statuses[decision.status] = (statuses[decision.status] ?? 0) + 1;
@@ -256,8 +260,7 @@ async function main(): Promise<void> {
     const gates = gatesByDecision.get(decision.id) ?? new Map<string, TransitionGate>();
     if (gates.size > 0) cyclesWithGates.push(decision.id);
 
-    rows.push(
-      observeBand({
+    const observation = observeBand({
         decisionId: decision.id,
         mode: 'observation',
         policyVersion: config.exposureBand.version,
@@ -276,12 +279,49 @@ async function main(): Promise<void> {
         maxDeployablePercent: 100 - config.execution.caps.minCashPercent,
         equityQuote: book.equity,
         movementFloorQuote: (book.equity * config.execution.minMovementPercent) / 100,
-        // The corpus ran entirely under TRANSITION_MODE=observe — zero rows carry an
-        // `applied_divergence_cause`, so no peak stop ever generated an exit. A stopped line
-        // therefore kept its weight, and that is what the replay reproduces.
-        stoppedWeightSurvives: true,
-      }),
-    );
+      // The corpus ran entirely under TRANSITION_MODE=observe — zero rows carry an
+      // `applied_divergence_cause`, so no peak stop ever generated an exit. A stopped line
+      // therefore kept its weight, and that is what the replay reproduces.
+      stoppedWeightSurvives: true,
+    });
+
+    /**
+     * THE REDISTRIBUTION, on the same cycle — which settles brick 1's open caveat.
+     *
+     * Brick 1 could only say whether the correction's TOTAL cleared one movement floor, and
+     * had to label that "necessary, not sufficient": split across four lines, a total worth
+     * two and a half floors still yields four sub-floor legs and nothing sent. Only the
+     * redistribution knows, and it exists now.
+     *
+     * The book comes from `storedCycle.ts` — production's own reconstruction, shared with the
+     * coherence replay. A second one built here would eventually disagree with it about the
+     * very quantity every leg is sized against.
+     */
+    let correction: CorrectionOutcome | null = null;
+    if (observation.assessment != null) {
+      const ctx = decision.market_context as StoredContext;
+      correction = correctToBand({
+        assessment: observation.assessment,
+        clampedAllocation: allocationOf(decision.applied_allocation)!,
+        rawAllocation: allocationOf(decision.target_allocation),
+        reserveAsset: book.reserveAsset,
+        portfolio: portfolioOf(ctx),
+        priceOf: pricesOf(ctx),
+        feePercent: config.execution.feePercent,
+        minMovementPercent: config.execution.minMovementPercent,
+      });
+      observation.row.corrected_exposure_percent = correction.correctedExposurePercent;
+      observation.row.realised_exposure_percent = correction.realisedExposurePercent;
+      observation.row.realised_gap_points = correction.unrealisablePoints;
+      observation.row.consolidated = correction.consolidated;
+      observation.row.consolidation_rounds = correction.consolidationRounds;
+      observation.row.consolidation_attempts = correction.consolidationAttempts;
+      observation.row.planned_movements = correction.movements.length;
+      observation.row.suppressed_movements = correction.suppressed.length;
+      observation.row.label = correction.label;
+      corrections.set(decision.id, correction);
+    }
+    rows.push(observation.row);
   }
 
   // ── C0 — the corpus is what we think it is ────────────────────────────────────────
@@ -552,6 +592,121 @@ async function main(): Promise<void> {
         'compter séparément pondérerait une bougie par la fréquence du scheduler.',
       'Mesure ré-ancrée à un pas, PAS une trajectoire : rien n\'est chaîné d\'une bougie à la suivante, ' +
         'donc aucun rendement ni aucun drawdown ne peut en être tiré — et aucun n\'est calculé ici.',
+    ]);
+  }
+
+  // ── C7 — THE REDISTRIBUTION: what the correction would actually SEND ─────────────
+  //
+  // This is the question brick 1 could not answer and had to label "necessary, not
+  // sufficient". A correction whose total clears one movement floor can still be deleted
+  // entirely once it is split into legs, and only §3.5's redistribution knows which.
+  {
+    const withCorrection = rows
+      .filter((r) => r.label != null && r.label !== 'aucune_correction')
+      .map((r) => ({ row: r, correction: corrections.get(r.decision_id)! }))
+      .filter((entry) => entry.correction != null);
+
+    // ONE POPULATION FOR THE WHOLE CRITERION: the corrections whose feasibility is knowable.
+    //
+    // On the fortnight of v5 that predates the transition layer there are no per-asset
+    // verdicts, so `correctToBand` sees every line as frozen and moves nothing. That is an
+    // artefact of the journal, not a fact about the redistribution — and folding those cycles
+    // into "N corrections produce no movement" would blame the 2% floor for a missing column.
+    const comparable = withCorrection.filter((e) => e.row.feasibility_known === true);
+    const excluded = withCorrection.length - comparable.length;
+
+    const moves = comparable.filter((e) => e.correction.movements.length > 0);
+    const inert = comparable.filter((e) => e.correction.movements.length === 0);
+    const consolidated = comparable.filter((e) => e.correction.consolidated);
+    const rescued = comparable.filter((e) =>
+      e.correction.lines.some((l) => l.origin === 'allocation_de_secours'),
+    );
+    const legs = comparable.reduce((sum, e) => sum + e.correction.movements.length, 0);
+    const suppressedLegs = comparable.reduce((sum, e) => sum + e.correction.suppressed.length, 0);
+
+    // THE TWO GAPS. `unrealisable_points` counts only the freezes and the caps; the
+    // correction's own counts the plumbing too. Their difference is the movement floor's share,
+    // and it is only derivable because the two are never merged into one column.
+    const freezeGap = comparable.map((e) => e.row.unrealisable_points!);
+    const realisedGap = comparable.map((e) => e.correction.unrealisablePoints);
+    const plumbingShare = comparable
+      .map((e) => e.correction.unrealisablePoints - e.row.unrealisable_points!)
+      .filter((v) => v > 0.000001);
+
+    record('C7', 'la répartition : ce que la correction enverrait réellement', true, [
+      `Population : ${comparable.length} corrections portant une lecture de transition. ` +
+        `${excluded} exclue(s) — sans verdict par actif, le correcteur ne peut rien bouger, et ` +
+        'compter ça comme une correction inerte imputerait au seuil de 2 % une colonne manquante.',
+      `${moves.length} produisent au moins un mouvement ` +
+        `(${((moves.length / Math.max(comparable.length, 1)) * 100).toFixed(1)} %), ` +
+        `${inert.length} n'en produisent AUCUN une fois le seuil passé.`,
+      `${legs} jambes envoyées, ${suppressedLegs} effacées par le seuil.`,
+      `Consolidation (§3.5.5) : elle change le résultat sur ${consolidated.length} cycle(s).`,
+      `Allocation de secours (§3.5.4) : ${rescued.length} cycle(s) posent du poids sur une ligne où le ` +
+        'modèle n\'avait RIEN dit — sa conviction ne suffisait pas à atteindre le plancher.',
+      '',
+      'Décomposition de l\'écart :',
+      `  écart dû aux GELS et PLAFONDS  : moyenne ${mean(freezeGap)} pt`,
+      `  écart après la PLOMBERIE aussi : moyenne ${mean(realisedGap)} pt`,
+      `  ${plumbingShare.length} cycle(s) où le seuil de mouvement AGGRAVE l'écart, de ` +
+        `${mean(plumbingShare)} pt en moyenne.`,
+      '',
+      'C\'est la réponse à la réserve de la brique 1 : « au-dessus du seuil » ne garantissait rien, ' +
+        'et voici ce que la répartition en fait réellement.',
+    ]);
+  }
+
+  // ── C8 — LE MODÈLE UTILISE-T-IL L'EXPOSITION IMPOSÉE, OU LUTTE-T-IL CONTRE ? ─────
+  //
+  // Demandé explicitement. CONTREFACTUEL, et il faut le dire fort : sur cet historique rien
+  // n'a jamais été corrigé, donc le modèle n'a jamais VU une position que le correcteur aurait
+  // créée. Ce que ce compteur mesure, c'est « si elle avait existé, le modèle aurait-il demandé
+  // de la défaire », lu sur ce qu'il a réellement proposé au réveil suivant.
+  //
+  // Trois lectures, parce qu'une seule serait trompeuse. « Le modèle demande moins que la
+  // position imposée » est presque automatique — il ré-émet sa propre préférence. Ce qui
+  // distingue l'indifférence de la lutte, c'est qu'il descende PLUS BAS qu'il n'était descendu
+  // lui-même, et ce qui distingue l'adoption, c'est qu'il monte au niveau imposé.
+  {
+    const ordered = [...corrections.entries()].sort((a, b) => a[0] - b[0]);
+    let undoRequested = 0;
+    let undoIntensified = 0;
+    let adopted = 0;
+    let observedPairs = 0;
+
+    for (let i = 0; i < ordered.length - 1; i += 1) {
+      const [, current] = ordered[i]!;
+      const [, next] = ordered[i + 1]!;
+      const nextRaw = new Map(next.lines.map((l) => [l.asset, l.rawWeightPercent ?? l.clampedWeightPercent]));
+      for (const line of current.lines) {
+        // Only lines the corrector actually LIFTED — a trim or an untouched line is not a
+        // position the correction created.
+        if (line.correctionPoints <= 0) continue;
+        const raw = nextRaw.get(line.asset);
+        if (raw == null) continue;
+        observedPairs += 1;
+        if (raw >= line.correctedWeightPercent - 0.000001) adopted += 1;
+        else {
+          undoRequested += 1;
+          if (raw < line.clampedWeightPercent - 0.000001) undoIntensified += 1;
+        }
+      }
+    }
+
+    const pct = (n: number): string =>
+      `${n} (${((n / Math.max(observedPairs, 1)) * 100).toFixed(1)} %)`;
+    record('C8', "le modèle utiliserait-il l'exposition imposée, ou lutterait-il contre", true, [
+      'CONTREFACTUEL. Rien n\'a jamais été corrigé sur cet historique, donc le modèle n\'a jamais ' +
+        'vu ces positions. Le compteur lit ce qu\'il a RÉELLEMENT proposé au réveil suivant, face ' +
+        'à une position que le correcteur aurait créée au précédent.',
+      `${observedPairs} paires (ligne liftée, réveil suivant) observées.`,
+      `ADOPTÉE   — le modèle demande au moins autant que la position imposée : ${pct(adopted)}`,
+      `DÉFAITE   — il demande moins : ${pct(undoRequested)}`,
+      `  dont LUTTE — il descend plus bas que sa propre cible précédente : ${pct(undoIntensified)}`,
+      '',
+      'La lecture qui compte est la troisième. « Demander moins que la position imposée » est ' +
+        'presque automatique : le modèle ré-émet sa préférence. Descendre plus bas qu\'il n\'était ' +
+        'descendu lui-même est en revanche un mouvement actif contre la correction.',
     ]);
   }
 

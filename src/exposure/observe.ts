@@ -104,6 +104,27 @@ export interface BandObservationInsert {
   movement_floor_quote: number | null;
   clears_movement_floor: boolean | null;
 
+  // ── the CORRECTION's vector-level result (brick 2) ─────────────────────────────
+  //
+  // Null on a cycle with no assessment, and on one where the band had nothing to correct.
+  /** FACT 3 at the vector level — Σ of the corrected non-reserve weights. */
+  corrected_exposure_percent: number | null;
+  /** FACT 4's counterpart: what the BOOK would hold once the 2% floor has had its say. */
+  realised_exposure_percent: number | null;
+  /**
+   * Points still outside the band once the freezes, the caps AND the plumbing are through.
+   *
+   * Kept apart from `unrealisable_points`, which counts only the first two. Their difference
+   * is exactly the share of the gap the movement floor is responsible for, and one merged
+   * column would make that attribution underivable.
+   */
+  realised_gap_points: number | null;
+  consolidated: boolean | null;
+  consolidation_rounds: number | null;
+  consolidation_attempts: number | null;
+  planned_movements: number | null;
+  suppressed_movements: number | null;
+
   /** Per-asset detail: weight, gate, and what the correction would be allowed to do. */
   lines: unknown;
 
@@ -199,6 +220,14 @@ function withoutAssessment(
     attainable_notional_quote: null,
     movement_floor_quote: null,
     clears_movement_floor: null,
+    corrected_exposure_percent: null,
+    realised_exposure_percent: null,
+    realised_gap_points: null,
+    consolidated: null,
+    consolidation_rounds: null,
+    consolidation_attempts: null,
+    planned_movements: null,
+    suppressed_movements: null,
     lines: null,
     gap,
     gap_detail: detail,
@@ -249,10 +278,34 @@ function withAssessment(
     attainable_notional_quote: assessment.attainableNotionalQuote,
     movement_floor_quote: assessment.movementFloorQuote,
     clears_movement_floor: assessment.clearsMovementFloor,
+    // Filled by the CALLER once the correction has run — the redistribution is a separate
+    // brick, and this file has no business computing it.
+    corrected_exposure_percent: null,
+    realised_exposure_percent: null,
+    realised_gap_points: null,
+    consolidated: null,
+    consolidation_rounds: null,
+    consolidation_attempts: null,
+    planned_movements: null,
+    suppressed_movements: null,
     lines: assessment.lines,
     gap: null,
     gap_detail: null,
   };
+}
+
+/**
+ * One cycle's observation: the database row, and the ASSESSMENT it was built from.
+ *
+ * The assessment travels with the row rather than being reconstructed from it. Rebuilding a
+ * typed object out of a persisted row means writing a second constructor for it — one that
+ * cannot be type-checked against the first, and that would silently drift the day a field
+ * changes shape. The correction needs the real object; it gets the real object.
+ */
+export interface BandObservation {
+  row: BandObservationInsert;
+  /** Null exactly when the row carries a `gap` — there was nothing to assess. */
+  assessment: BandAssessment | null;
 }
 
 /**
@@ -264,35 +317,44 @@ function withAssessment(
  * unclassified regime must never fall through to a default), so it is caught and recorded
  * rather than suppressed.
  */
-export function observeBand(input: ObserveBandInput): BandObservationInsert {
+export function observeBand(input: ObserveBandInput): BandObservation {
   if (input.regimePoint == null) {
-    return withoutAssessment(
-      input,
-      null,
-      'no_regime',
-      'the cycle computed no regime — no usable 4h series, or no closed bar in common across the pairs',
-    );
+    return {
+      row: withoutAssessment(
+        input,
+        null,
+        'no_regime',
+        'the cycle computed no regime — no usable 4h series, or no closed bar in common across the pairs',
+      ),
+      assessment: null,
+    };
   }
 
   let reading: ControllerReading;
   try {
     reading = readContext(input.regimePoint, input.universe);
   } catch (err) {
-    return withoutAssessment(
-      input,
-      null,
-      'unclassifiable_regime',
-      err instanceof Error ? err.message : String(err),
-    );
+    return {
+      row: withoutAssessment(
+        input,
+        null,
+        'unclassifiable_regime',
+        err instanceof Error ? err.message : String(err),
+      ),
+      assessment: null,
+    };
   }
 
   if (input.targetAllocation == null) {
-    return withoutAssessment(
-      input,
-      reading,
-      'no_target',
-      'the cycle produced no retained target — skipped, errored, unparseable, or refused by the guard',
-    );
+    return {
+      row: withoutAssessment(
+        input,
+        reading,
+        'no_target',
+        'the cycle produced no retained target — skipped, errored, unparseable, or refused by the guard',
+      ),
+      assessment: null,
+    };
   }
 
   const assessment = assessBand({
@@ -311,7 +373,7 @@ export function observeBand(input: ObserveBandInput): BandObservationInsert {
     stoppedWeightSurvives: input.stoppedWeightSurvives,
   });
 
-  return withAssessment(input, reading, assessment);
+  return { row: withAssessment(input, reading, assessment), assessment };
 }
 
 /**

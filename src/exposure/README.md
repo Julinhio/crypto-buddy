@@ -1,20 +1,21 @@
-# Pilote d'exposition contrainte — brique 1 : contexte, bornes, observation
+# Pilote d'exposition contrainte — briques 1 et 2
 
-## Ce que cette brique fait, et ce qu'elle ne fait pas
+| Brique | Fichier | Ce qu'elle fait |
+|---|---|---|
+| 1 | `band.ts` | **évalue** : le contexte, la bande, où la cible se situe, ce que les gels et les plafonds laissent atteindre |
+| 1 | `observe.ts` | une ligne d'observation par cycle + le contrôle d'intégrité par bougie |
+| 2 | `correct.ts` | **répartit** : §3.5 vers le plancher, §3.6 vers le plafond, la préséance, la consolidation |
 
-Elle **évalue**. À chaque cycle : le contexte déterministe, la bande qu'il implique, où la
-cible retenue se situe par rapport à cette bande, et — la partie qui compte le plus — ce que
-les gels et les plafonds par actif laissent **réellement** atteindre.
+Les tenir séparées est ce qui a rendu le point de contrôle honnête : la morsure s'est publiée,
+lue et contestée avant qu'une seule ligne de correction n'existe.
 
-Elle ne **corrige rien**. La répartition par actif du §3.5 et du §3.6 — proportionnelle aux
-cibles positives du modèle, puis l'allocation de secours équipondérée, puis la consolidation
-du reliquat sous le seuil — est la brique 2. Les tenir séparées est ce qui rend le point de
-contrôle honnête : la morsure se publie, se lit et se conteste avant qu'une seule ligne de
-correction n'existe.
-
-**Ce qu'elle ne produit pas, et ne produira jamais dans cet état : ni P&L, ni drawdown, ni
-rendement.** Le rejeu historique le dit dans son propre artefact (`bite.json` →
+**Ce qu'elles ne produisent pas, et ne produiront jamais dans cet état : ni P&L, ni drawdown,
+ni rendement.** Le rejeu historique le dit dans son propre artefact (`bite.json` →
 `contract.not_measured`), pas seulement ici.
+
+**Ni l'une ni l'autre ne touche au chemin des ordres.** Le mode `application` reste refusé par
+le binaire jusqu'à la dernière brique ; jusque-là la correction est calculée, journalisée, et
+rien ne l'envoie.
 
 ---
 
@@ -212,7 +213,99 @@ l'état) et a fortiori un état qui bascule entre deux réveils.
 
 ---
 
-## Ce que cette brique ne peut pas conclure
+## La répartition (brique 2)
+
+### §3.5 — vers le plancher
+
+1. **Proportionnellement** aux cibles risquées strictement positives du modèle qui peuvent
+   encore augmenter. Le poids du modèle EST la part : une ligne à zéro n'a aucune conviction à
+   mettre à l'échelle et ne reçoit rien — « strictement positives » exprimé en arithmétique
+   plutôt qu'en filtre qu'il faudrait tenir en phase.
+2. Plafonds et gels respectés : ils bornent le `headroom`, donc aucune passe ne peut les
+   violer. L'excédent d'une ligne écrêtée est **re-versé** sur celles qui ont encore de la
+   place, jamais perdu (`waterfill`).
+3. Le reliquat est **réparti également** entre les autres lignes actionnables ayant de la
+   capacité — exactement celles que le modèle a laissées à zéro, plus celles qu'il a saturées.
+4. Cette seconde part porte `allocation_de_secours`, parce qu'elle n'exprime **aucune**
+   conviction du modèle et qu'il ne faut pas qu'on puisse la relire plus tard comme si oui.
+5. **La consolidation.** Le seuil de 2 % s'applique au résultat, et une répartition en petites
+   jambes peut laisser la borne inaccessible alors qu'une jambe exécutable l'atteindrait. La
+   recherche est un **rétrécissement** : chaque tentative garde les k candidats les plus
+   prioritaires, donc le même déficit atterrit sur moins de lignes et les jambes grossissent.
+   k = 1 est le cas « une jambe exécutable » que le protocole nomme.
+   - La priorité est le poids du modèle décroissant : le rétrécissement **abandonne les lignes
+     de secours avant toute ligne à laquelle le modèle croyait**.
+   - Exclure toutes les lignes tombées d'un coup — la première implémentation évidente — est
+     faux : quand toutes sont tombées, ça vide le pool et la correction s'effondre, ce qui est
+     l'inverse de consolider.
+6. Ce qui reste hors d'atteinte est journalisé, jamais attendu en silence.
+
+### §3.6 — vers le plafond
+
+Symétrique et tout aussi contraignant : l'exposition non modifiable des lignes gelées est
+**réservée en premier**, le budget restant est réparti proportionnellement entre les cibles
+positives du modèle sur les lignes réductibles, et si les gels dépassent le plafond à eux
+seuls, **toutes les réductions autorisées descendent jusqu'à zéro** et le dépassement résiduel
+est journalisé.
+
+**Pas de consolidation ici**, délibérément. Le §3.5.5 la demande côté plancher et le §3.6 ne
+la demande pas. Ajouter une règle non arbitrée à un protocole préenregistré ferait diverger les
+deux côtés pour une raison que personne n'a tranchée.
+
+### La limite mécanique qu'il faut connaître
+
+Un déficit valant **environ un seuil de mouvement** ne peut être sauvé par aucune
+concentration : le budget d'achat est divisé par `(1 + frais)`, donc une jambe calibrée
+exactement sur 2 points d'un livre de 1000 arrive à 19,98 contre un seuil de 20,00. Toutes les
+tentatives sont évaluées, aucune n'aide, et le résultat honnête est un écart de 2 points plutôt
+qu'une cible qui prétend bouger. `consolidation_attempts` sépare « rien à faire » de « tout
+essayé, rien n'a marché ».
+
+### Le seuil de mouvement n'est jamais réimplémenté
+
+La correction appelle `planMovements` — la fonction de l'exécuteur — sur chaque allocation
+candidate. `computeMovements` en est devenu une enveloppe fine. Une correction qui aurait
+modélisé le seuil elle-même finirait par diverger de ce qui envoie réellement les ordres.
+
+Les plans candidats sont **étiquetés `[skip:band]`** dans les logs : sans ça, leurs lignes de
+refus seraient indiscernables de celles du cycle réel et l'opérateur verrait deux fois plus de
+refus qu'il n'y en a eu.
+
+## Le journal en quatre faits
+
+Un objectif d'allocation n'est pas une exécution.
+
+| | Colonne | Ce que c'est |
+|---|---|---|
+| 1 | `raw_weight_percent` | ce que le **modèle** a proposé |
+| 2 | `correction_points` | ce que la **bande** a imposé, signé |
+| 3 | `corrected_weight_percent` | la **cible finale** pour le moteur d'exécution |
+| 4 | `booked_*`, `post_cycle_weight_percent` | ce qui a **réellement** bougé et ce que le livre tient |
+
+En mode `observation`, le fait 4 décrit le cycle **réel** du bot, qui n'est pas corrigé.
+L'écart entre le fait 3 et le fait 4 est donc exactement la non-application de la correction —
+c'est voulu, et c'est ce qui rendra le passage en `application` lisible : les deux convergeront.
+
+**Deux écarts, pas un.** `unrealisable_points` mesure ce que les gels et les plafonds rendent
+impossible ; `realised_gap_points` mesure ce qui reste hors bande une fois la plomberie passée
+aussi. Leur différence est la part imputable au seuil de mouvement, et une colonne fusionnée
+rendrait cette attribution indérivable.
+
+**La cause par ligne va du plus spécifique au moins** : un gel est un gel quoi qu'il arrive, un
+plafond atteint l'est quoi que dise le seuil, la plomberie n'est blâmée qu'en dernier. Les
+confondre laisserait le seuil de 2 % prendre le crédit d'un gel.
+
+### Le compteur « le modèle utilise-t-il l'exposition imposée »
+
+Dérivé **en lecture**, jamais écrit dans le cycle : les colonnes ci-dessus suffisent, et
+ajouter une lecture en base au chemin de trading pour une statistique serait un mode de panne
+gratuit. La requête vit dans le rejeu (`C8`).
+
+Trois lectures, parce qu'une seule serait trompeuse. « Le modèle demande moins que la position
+imposée » est presque automatique — il ré-émet sa propre préférence. Ce qui distingue
+l'indifférence de la **lutte**, c'est qu'il descende plus bas qu'il n'était descendu lui-même.
+
+## Ce que ces briques ne peuvent pas conclure
 
 Elle ne conclut pas que la bande A est bonne, ni qu'elle est déployable. Elle ne produit aucun
 chiffre de rendement, et aucun ne serait recevable au point de contrôle. Ce qu'elle produit,

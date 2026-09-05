@@ -20,7 +20,9 @@ import {
   toObservationRow,
 } from '../persistence/transitionObservations.js';
 import { observeBand } from '../exposure/observe.js';
+import { correctToBand } from '../exposure/correct.js';
 import { saveBandObservation } from '../persistence/exposureBandObservations.js';
+import { saveBandCorrections, toCorrectionRows } from '../persistence/exposureBandCorrections.js';
 import { buildMarketContext, marketHealthOf, type MarketContext } from '../context/build.js';
 import { recordMarketDataOutage } from '../market/outage.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
@@ -601,12 +603,12 @@ export async function decide(): Promise<DecideResult> {
    * (§3.4.2). Assessing the post-gate value would measure the band against a target that, on a
    * refused cycle, is last cycle's vector — a number the band was never meant to constrain.
    */
-  const observeExposureBand = async (
-    decisionId: number | null,
+  const observeExposureBand = async (opts: {
+    decisionId: number | null;
     /** The clamped target the chain retained. Null on every cycle that produced none. */
-    targetAllocation: Record<string, number> | null,
+    targetAllocation: Record<string, number> | null;
     /** The model's raw proposal, for the published comparison. */
-    rawAllocation: Record<string, number> | null,
+    rawAllocation: Record<string, number> | null;
     /**
      * The book's exposure before the decision — passed in rather than read from `portfolio`,
      * because ONE path must not publish it.
@@ -617,14 +619,27 @@ export async function decide(): Promise<DecideResult> {
      * reader, from a book that really was flat. So that path passes null, and every other path
      * passes what it actually measured.
      */
-    bookExposurePercent: number | null,
-  ): Promise<void> => {
+    bookExposurePercent: number | null;
+    /**
+     * FACT 4 — what really booked this cycle, and the book it produced.
+     *
+     * The REAL cycle's, never the correction's: in `observation` the bot executes its own
+     * uncorrected target, so the gap between fact 3 and fact 4 IS the correction's
+     * non-application. That is the point, and collapsing the two would erase it.
+     */
+    bookedLedger?: LedgerEntry[];
+    portfolioAfter?: VirtualPortfolio | null;
+  }): Promise<void> => {
+    // THE OFF-SWITCH IS THE FIRST STATEMENT, before even destructuring the options. Not for
+    // the microseconds — so that "off computes nothing" is a property a reader can check by
+    // looking at one line, and a test can assert without interpreting the rest of the body.
     if (EXPOSURE_BAND_MODE === 'off') return;
+    const { decisionId, targetAllocation, rawAllocation, bookExposurePercent } = opts;
     // No decision row means no foreign key to hang the observation on. Nothing is lost that
     // was not already lost: the cycle itself was not journaled either.
     if (decisionId == null) return;
 
-    const row = observeBand({
+    const { row, assessment } = observeBand({
       decisionId,
       mode: EXPOSURE_BAND_MODE,
       policyVersion: config.exposureBand.version,
@@ -654,15 +669,72 @@ export async function decide(): Promise<DecideResult> {
       stoppedWeightSurvives: TRANSITION_MODE === 'observe',
     });
 
+    /**
+     * THE CORRECTION — §3.5, §3.6, and the four-fact journal.
+     *
+     * Computed here and NOWHERE ELSE in the cycle. It is deliberately not hoisted next to the
+     * risk clamp, where it will eventually have to live: from inside this closure it is
+     * structurally incapable of reaching `computeMovements`, and brick 2's whole safety claim
+     * is that the order path is untouched. Moving it up is the last brick's job, and it should
+     * be one reviewable diff rather than something that quietly already happened.
+     *
+     * `correctToBand` is pure and total, so this cannot throw on a live trading path.
+     */
+    const correction =
+      assessment == null || targetAllocation == null
+        ? null
+        : correctToBand({
+            assessment,
+            clampedAllocation: targetAllocation,
+            rawAllocation,
+            reserveAsset: reserveStable,
+            portfolio,
+            priceOf,
+            feePercent: config.execution.feePercent,
+            minMovementPercent: config.execution.minMovementPercent,
+          });
+
+    if (correction != null) {
+      row.corrected_exposure_percent = correction.correctedExposurePercent;
+      row.realised_exposure_percent = correction.realisedExposurePercent;
+      row.realised_gap_points = correction.unrealisablePoints;
+      row.consolidated = correction.consolidated;
+      row.consolidation_rounds = correction.consolidationRounds;
+      row.consolidation_attempts = correction.consolidationAttempts;
+      row.planned_movements = correction.movements.length;
+      row.suppressed_movements = correction.suppressed.length;
+      // The vector label comes from the CORRECTION once it exists: only the redistribution
+      // knows whether the bound was actually reachable line by line, and brick 1's label was
+      // computed before the 2% floor had had its say.
+      row.label = correction.label;
+    }
+
     if (row.label != null && row.label !== 'aucune_correction') {
+      // The line the operator reads. It carries the THREE numbers that differ — the model's
+      // target, the corrected one, and what the book would really hold — because collapsing
+      // them is exactly the confusion the four-fact journal exists to prevent.
       console.log(
-        `[band] ${row.state} [${row.band_low_percent}, ${row.band_high_percent}] — target at ` +
-          `${row.target_exposure_percent}%, ${row.label}` +
-          (row.unrealisable_points ? ` (${row.unrealisable_points} pt(s) out of reach)` : '') +
-          ' — OBSERVATION ONLY, nothing was corrected.',
+        `[band] ${row.state} [${row.band_low_percent}, ${row.band_high_percent}] — ` +
+          `target ${row.target_exposure_percent}% → corrected ${row.corrected_exposure_percent}% ` +
+          `→ book would hold ${row.realised_exposure_percent}% · ${row.label}` +
+          (row.realised_gap_points ? ` (${row.realised_gap_points} pt(s) out of reach)` : '') +
+          ` · ${row.planned_movements} leg(s) would be sent, ${row.suppressed_movements} deleted ` +
+          'by the floor — OBSERVATION ONLY, nothing was corrected and nothing was sent.',
       );
     }
     await saveBandObservation(supabase, row);
+    if (correction != null) {
+      await saveBandCorrections(
+        supabase,
+        toCorrectionRows({
+          decisionId,
+          correction,
+          gateByAsset: new Map(transitionVerdicts.map((v) => [v.asset, v.gate])),
+          bookedLedger: opts.bookedLedger ?? [],
+          portfolioAfter: opts.portfolioAfter ?? null,
+        }),
+      );
+    }
   };
 
   // The AI sees the virtual book, not the testnet balances.
@@ -712,7 +784,12 @@ export async function decide(): Promise<DecideResult> {
     // closure protocol counts bars from — biasing the denominators of every rate published on
     // it. It is recorded with no target (`gap='no_target'`) and, crucially, with a NULL book
     // exposure: the fallback book is the very thing this branch exists to distrust.
-    await observeExposureBand(id, null, null, null);
+    await observeExposureBand({
+      decisionId: id,
+      targetAllocation: null,
+      rawAllocation: null,
+      bookExposurePercent: null,
+    });
     await observeMarketDataOutage(id);
     return emptyResult('skipped', persisted, id, row, portfolio, marketData);
   }
@@ -727,7 +804,12 @@ export async function decide(): Promise<DecideResult> {
     const { persisted, id } = await insertDecision(supabase, row);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
-    await observeExposureBand(id, null, null, portfolio.deployedPercent.toNumber());
+    await observeExposureBand({
+      decisionId: id,
+      targetAllocation: null,
+      rawAllocation: null,
+      bookExposurePercent: portfolio.deployedPercent.toNumber(),
+    });
     await observeMarketDataOutage(id);
     return emptyResult('skipped', persisted, id, row, portfolio, marketData);
   }
@@ -896,7 +978,12 @@ export async function decide(): Promise<DecideResult> {
     await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
-    await observeExposureBand(id, null, null, portfolio.deployedPercent.toNumber());
+    await observeExposureBand({
+      decisionId: id,
+      targetAllocation: null,
+      rawAllocation: null,
+      bookExposurePercent: portfolio.deployedPercent.toNumber(),
+    });
     await observeMarketDataOutage(id);
     // The stop may have been armed on this book. Nothing is placed here — the alert only
     // makes the gap visible. See alertArmedStopNotFired.
@@ -948,7 +1035,12 @@ export async function decide(): Promise<DecideResult> {
     guardEvents.push(event);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
-    await observeExposureBand(id, null, null, portfolio.deployedPercent.toNumber());
+    await observeExposureBand({
+      decisionId: id,
+      targetAllocation: null,
+      rawAllocation: null,
+      bookExposurePercent: portfolio.deployedPercent.toNumber(),
+    });
     await observeMarketDataOutage(id);
     // After persistLifecycle, so anything it queued is written too. It cannot queue a
     // refusal here (it is called with no notes), but the ordering is the same on every
@@ -1010,7 +1102,12 @@ export async function decide(): Promise<DecideResult> {
     await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
-    await observeExposureBand(id, null, null, portfolio.deployedPercent.toNumber());
+    await observeExposureBand({
+      decisionId: id,
+      targetAllocation: null,
+      rawAllocation: null,
+      bookExposurePercent: portfolio.deployedPercent.toNumber(),
+    });
     await observeMarketDataOutage(id);
     await alertArmedStopNotFired('parse_failed');
     return emptyResult('parse_failed', persisted, id, row, portfolio, marketData);
@@ -1396,7 +1493,17 @@ export async function decide(): Promise<DecideResult> {
   // placed, and its result is discarded — see the closure's header.
   await observeTransition(id, bookedLedger, proposedMovements);
   // The CLAMPED target — where the correction will sit when it becomes real. See the closure.
-  await observeExposureBand(id, clamp.applied, v.targetAllocation, portfolio.deployedPercent.toNumber());
+  await observeExposureBand({
+    decisionId: id,
+    targetAllocation: clamp.applied,
+    rawAllocation: v.targetAllocation,
+    bookExposurePercent: portfolio.deployedPercent.toNumber(),
+    // FACT 4 — what the cycle REALLY booked, and the book it produced. The bot's own
+    // movements, never the correction's: in observation mode the two differ by construction,
+    // and that difference is the measurement.
+    bookedLedger,
+    portfolioAfter,
+  });
 
   /**
    * THE REFUSED-INTENTION LEDGER — opened here, resolved here, read by nobody in this file.

@@ -20,6 +20,34 @@ export interface Movement {
   fullExit: boolean;
 }
 
+/**
+ * A leg the plan REFUSED to send, and why.
+ *
+ * `computeMovements` has always dropped these — silently as far as any caller could tell,
+ * with only a `console.log` to show for it. That was fine while the only question was "what
+ * do we send". It stops being fine the moment something has to answer "what did the band ask
+ * for that never reached the venue", which the exposure pilot's journal requires per line.
+ *
+ * Reported rather than re-derived: a second function that reapplied the floor rule to guess
+ * which legs had been dropped would be a second copy of the rule, and the two would drift.
+ */
+export interface SuppressedLeg {
+  asset: string;
+  side: 'buy' | 'sell';
+  /** What the leg would have been worth, in quote. */
+  notional: Decimal;
+  reason: 'movement_floor' | 'no_price' | 'dust';
+  /** The floor it failed to clear, when that is the reason. */
+  floor: Decimal;
+  detail: string;
+}
+
+/** What a plan produces: the legs that may be sent, and the ones that may not. */
+export interface MovementPlan {
+  movements: Movement[];
+  suppressed: SuppressedLeg[];
+}
+
 // Below this notional there's effectively nothing to do — skip the movement.
 // This is just float/dust noise, NOT the exchange's min-notional filter (PR B).
 const DUST_NOTIONAL = new Decimal('0.01');
@@ -86,13 +114,24 @@ interface Leg {
  *      side and cash ends at exactly its target %: cash% = appliedReserve% ·
  *      (equity_before / equity_after) ≥ appliedReserve% ≥ floor.
  */
-export function computeMovements(
+export function planMovements(
   portfolio: VirtualPortfolio,
   appliedAllocation: Record<string, number>,
   priceOf: PriceLookup,
   feePercent: number,
   minMovementPercent: number,
-): Movement[] {
+  /**
+   * Tags this plan's log lines, so a COUNTERFACTUAL plan cannot be mistaken for the cycle's
+   * real one. The exposure band plans a second allocation on every cycle to find out what its
+   * correction would move; without a tag its `[skip]` lines are byte-identical to the ones the
+   * bot prints for movements it really declined to send, and the operator reading the logs
+   * would see twice as many refusals as happened.
+   *
+   * Optional and defaulted to the empty tag, so every existing caller keeps printing exactly
+   * what it printed before.
+   */
+  logTag = '',
+): MovementPlan {
   const equity = portfolio.equity;
   const reserve = portfolio.reserveAsset;
   const feeRate = new Decimal(feePercent).div(100);
@@ -100,6 +139,8 @@ export function computeMovements(
 
   const currentValue = new Map<string, Decimal>();
   for (const p of portfolio.positions) currentValue.set(p.asset, p.value);
+
+  const suppressed: SuppressedLeg[] = [];
 
   // Split the coins into sells and buys (the reserve/cash is never traded).
   const sells: Leg[] = [];
@@ -114,7 +155,15 @@ export function computeMovements(
 
     const price = priceOf(asset);
     if (price == null || price.lte(0)) {
-      console.warn(`[warn] no live price for ${asset} — cannot size its movement this cycle, skipping.`);
+      console.warn(`[warn${logTag}] no live price for ${asset} — cannot size its movement this cycle, skipping.`);
+      suppressed.push({
+        asset,
+        side: deltaValue.gt(0) ? 'buy' : 'sell',
+        notional: deltaValue.abs(),
+        reason: 'no_price',
+        floor,
+        detail: 'no live price this cycle — the movement could not be sized',
+      });
       continue;
     }
 
@@ -132,10 +181,18 @@ export function computeMovements(
     // in 47 days. Dropping it here also keeps the arithmetic honest: the buy budget
     // below is computed from the sells that will REALLY happen.
     if (isBelowFloor(deltaValue.abs(), floor, fullExit)) {
-      console.log(
-        `[skip] ${asset}: ${deltaValue.gt(0) ? 'buy' : 'sell'} of ${deltaValue.abs().toFixed(2)} ` +
-          `is under the ${minMovementPercent}% floor (${floor.toFixed(2)}) — not a movement, nothing journaled.`,
-      );
+      const detail =
+        `${deltaValue.gt(0) ? 'buy' : 'sell'} of ${deltaValue.abs().toFixed(2)} is under the ` +
+        `${minMovementPercent}% floor (${floor.toFixed(2)})`;
+      console.log(`[skip${logTag}] ${asset}: ${detail} — not a movement, nothing journaled.`);
+      suppressed.push({
+        asset,
+        side: deltaValue.gt(0) ? 'buy' : 'sell',
+        notional: deltaValue.abs(),
+        reason: 'movement_floor',
+        floor,
+        detail,
+      });
       continue;
     }
 
@@ -179,10 +236,18 @@ export function computeMovements(
       // allocation is the contract with the executor, and over-filling one asset because
       // another was dropped would quietly break it.
       if (isBelowFloor(notional, floor, false)) {
-        console.log(
-          `[skip] ${b.asset}: buy sized at ${notional.toFixed(2)} after the pro-rata split is under ` +
-            `the ${minMovementPercent}% floor (${floor.toFixed(2)}) — not a movement, nothing journaled.`,
-        );
+        const detail =
+          `buy sized at ${notional.toFixed(2)} after the pro-rata split is under the ` +
+          `${minMovementPercent}% floor (${floor.toFixed(2)})`;
+        console.log(`[skip${logTag}] ${b.asset}: ${detail} — not a movement, nothing journaled.`);
+        suppressed.push({
+          asset: b.asset,
+          side: 'buy',
+          notional,
+          reason: 'movement_floor',
+          floor,
+          detail,
+        });
         continue;
       }
       const fee = notional.times(feeRate);
@@ -199,7 +264,24 @@ export function computeMovements(
     }
   }
 
-  return movements;
+  return { movements, suppressed };
+}
+
+/**
+ * The movements alone — the shape every existing caller wants.
+ *
+ * A thin wrapper over `planMovements` rather than a second implementation, so the executor,
+ * the coherence guard's rule 2, the replays and the exposure band all apply the SAME floor
+ * rule. The plumbing floor is the kind of threshold that must exist exactly once.
+ */
+export function computeMovements(
+  portfolio: VirtualPortfolio,
+  appliedAllocation: Record<string, number>,
+  priceOf: PriceLookup,
+  feePercent: number,
+  minMovementPercent: number,
+): Movement[] {
+  return planMovements(portfolio, appliedAllocation, priceOf, feePercent, minMovementPercent).movements;
 }
 
 /**
