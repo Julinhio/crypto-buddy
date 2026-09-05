@@ -872,11 +872,13 @@ console.log('\nProof 16 — a quiet cycle can still fail, and a lifted target is
   );
 }
 
-// ── PROOF 17 — the two defects the third review round found ──────────────────
+// ── PROOF 17 — a created position is smaller than the one asked for ──────────
 //
-// Both were introduced by the SECOND round's own fixes, which is the ordinary shape of this:
-// measuring a gap on in-band cycles gave those cycles a non-quiet label, and filtering C8 by
-// holdings left its threshold still reading a target.
+// A PER-CYCLE FACT, and it stays for that reason. What a line would really hold after this
+// cycle's plan is not what the plan asked for: the buy is sized from the cash budget and then
+// divided by (1 + fee), and every leg's fee comes off equity. Any later reading of an imposed
+// position — brick 3's witnesses first among them — has to start from the position created,
+// never from the one requested.
 console.log('\nProof 17 — a created position is smaller than the one asked for:');
 {
   // (a) THE REALISED WEIGHT, PER LINE. The buy is sized from the cash budget and divided by
@@ -904,83 +906,6 @@ console.log('\nProof 17 — a created position is smaller than the one asked for
   const sum = lifted.lines.reduce((total, l) => total + l.realisedWeightPercent, 0);
   ok('the per-line realised weights sum to the realised exposure', near(sum, lifted.realisedExposurePercent));
 
-  // (b) THE REPLAY FILTERS ITS CORRECTIONS ON THE DIRECTION, NOT ON THE LABEL.
-  //
-  // Since an in-band cycle can now carry `bande_partiellement_irrealisable` — its own
-  // target-to-book move fell under the floor — a label filter would count ordinary model
-  // movements as band corrections, and would read their null `unrealisable_points` as a zero,
-  // charging the whole gap to the plumbing.
-  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandBite.ts'), 'utf8');
-  ok(
-    "C7 selects its population on direction, as C4 already does",
-    /const withCorrection = rows\s*\n\s*\.filter\(\(r\) => r\.direction != null && r\.direction !== 'none'\)/.test(replay),
-  );
-  ok(
-    'and no criterion selects corrections by label any more',
-    !/\.filter\(\(r\) => r\.label != null && r\.label !== 'aucune_correction'\)/.test(replay),
-  );
-  // The threshold is built FROM the realised weight — never from the corrected target. Proof 18
-  // covers the other half: that realised weight is then revalued into the next cycle's frame
-  // before anything is compared to it.
-  ok(
-    'C8 builds its threshold from the REALISED holding, not the target',
-    /line\.realisedWeightPercent \/ 100\) \* postEquityHere/.test(replay),
-  );
-  ok(
-    'and the corrected target is never a threshold there',
-    !/raw >= line\.correctedWeightPercent/.test(replay),
-  );
-}
-
-// ── PROOF 18 — a weight from one cycle is not comparable to a target from the next ──
-//
-// The imposed position is a QUANTITY. Its percentage moves with prices and with equity, so
-// comparing the weight it had at one wake-up against a target proposed at the next inverts the
-// verdict whenever the asset moves — and it inverts it in the direction that flatters the
-// policy, which is the worst way for a measurement to be wrong.
-console.log('\nProof 18 — the imposed position is revalued before it is compared:');
-{
-  // The inversion, in arithmetic. A 20% imposed holding on a 1000 book is 200 of value. If the
-  // asset then appreciates 25% and nothing else moves, the same quantity is worth 250 against
-  // an equity of 1050 — 23.8%. A next-cycle target of 24% is therefore an INCREASE, while the
-  // stale 20% would have read it as an increase too… but a target of 22% is a TRIM that the
-  // stale comparison would call adoption.
-  const equityHere = 1000;
-  const priceHere = 100;
-  const imposedWeightHere = 20;
-  const quantity = ((imposedWeightHere / 100) * equityHere) / priceHere;
-  const priceThere = 125;
-  const equityThere = equityHere + quantity * (priceThere - priceHere);
-  const imposedThere = ((quantity * priceThere) / equityThere) * 100;
-
-  ok('the imposed holding is 2 units at 100', near(quantity, 2));
-  ok('worth 23.81% of the book once the asset gains 25%', near(imposedThere, 23.809524, 1e-4));
-
-  const nextTarget = 22;
-  ok(
-    'a next target of 22% is a TRIM of the imposed position',
-    nextTarget < imposedThere,
-  );
-  ok(
-    'while the stale weight would have called it adoption — the inversion, exactly',
-    nextTarget >= imposedWeightHere,
-  );
-
-  // And the replay does the revaluation rather than the stale comparison.
-  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandBite.ts'), 'utf8');
-  ok(
-    'C8 carries the holding as a quantity',
-    /const quantity = valueHere \/ priceHere\.toNumber\(\);/.test(replay),
-  );
-  ok(
-    'revalues it at the NEXT cycle prices and equity',
-    /const imposedThere = \(\(quantity \* priceThere\.toNumber\(\)\) \/ there\.equity\) \* 100;/.test(replay),
-  );
-  ok('and classifies against that, never against the stale weight', /raw >= imposedThere/.test(replay));
-  ok(
-    'a pair whose frame cannot be read is counted apart, not compared',
-    /unrevaluable \+= 1;\s*\n\s*continue;/.test(replay),
-  );
 }
 
 // ── PROOF 19 — the last three findings ───────────────────────────────────────
@@ -1046,21 +971,6 @@ console.log('\nProof 19 — an outcome may not contradict itself, and a cause ma
     out.movements.some((m) => m.asset === 'BTC' && m.side === 'sell'),
   );
 
-  // (b) C8 COMPARES WITH THE NEXT ACTUAL PROPOSAL, not the next assessed cycle.
-  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandBite.ts'), 'utf8');
-  ok(
-    'the replay collects every cycle carrying a raw proposal',
-    /const proposals: Array<\{ id: number; raw: Record<string, number> \}> = \[\];/.test(replay),
-  );
-  ok(
-    'and C8 takes the next one by decision order',
-    /const following = proposals\.find\(\(p\) => p\.id > currentId\);/.test(replay),
-  );
-  ok(
-    'a cycle with no following proposal is counted apart, not silently skipped',
-    /withoutFollowingProposal \+= 1;/.test(replay),
-  );
-
   // (c) A SUPPRESSED LEG IS ATTRIBUTED TO ITS OWN REASON.
   //
   // `planMovements` suppresses for the 2% floor, for a MISSING PRICE, or for dust. Reporting
@@ -1082,78 +992,25 @@ console.log('\nProof 19 — an outcome may not contradict itself, and a cause ma
     'never as a movement-floor deletion',
     !noPricePlan.suppressed.some((leg) => leg.asset === 'ETH' && leg.reason === 'movement_floor'),
   );
+  // The DISTINCTION belongs to the execution journal and stays, whatever any report does with
+  // it: `suppressed_reason` is a per-cycle fact, and without it a later reader cannot tell a
+  // partial market-data outage from damage done by a threshold.
   ok(
-    'and the replay counts the two apart',
-    /const floorLegs = countSuppressed\('movement_floor'\);/.test(replay) &&
-      /const noPriceLegs = countSuppressed\('no_price'\);/.test(replay),
-  );
-  ok(
-    'while a cycle that lost a price is excluded from the floor attribution',
-    /\.filter\(\(e\) => !lostAPrice\(e\)\)/.test(replay),
-  );
-  ok(
-    'and reported on its own line instead',
-    /priceLossShare/.test(replay),
+    'the journal carries the reason per line, not a single "suppressed" flag',
+    /suppressed_reason: dropped\?\.reason \?\? null,/.test(
+      readFileSync(path.join(ROOT, 'src/persistence/exposureBandCorrections.ts'), 'utf8'),
+    ),
   );
 }
 
-// ── PROOF 20 — the last round: whose leg, whose frame, whose silence ─────────
-console.log('\nProof 20 — the band is credited only with what the band caused:');
+// ── PROOF 20 — the suppression accounting is exhaustive ──────────────────────
+//
+// `dust` sat in the result type, in the journal's constraint and in the band's report while
+// both early exits in `planMovements` returned without appending — so the category could never
+// be produced, and the accounting was incomplete while every consumer believed it exhaustive.
+console.log('');
+console.log('Proof 20 — every suppressed leg says why, including the ones worth nothing:');
 {
-  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandBite.ts'), 'utf8');
-
-  // (a) A LEG OF THE CORRECTED PLAN IS NOT NECESSARILY A LEG OF THE BAND.
-  //
-  // `correction.movements` is the COMPLETE plan: the model's own target-to-book legs travel in
-  // it alongside the band's. Counting it whole credited the correction with an unrelated exit
-  // that survived while the band's own lift was deleted.
-  const mixed = correct({
-    state: 'constructive',
-    // ETH is a pure model move — it wants out of a line the band never touches.
-    target: { BTC: 15, ETH: 0, BNB: 5, XRP: 0 },
-    book: { BTC: 15, ETH: 20, BNB: 5 },
-  });
-  const ethLeg = mixed.movements.find((mv) => mv.asset === 'ETH');
-  ok('[jambe du modèle] the model sells ETH out entirely', ethLeg != null && ethLeg.side === 'sell');
-  ok(
-    "and the band never touched that line, so it moves no holding of the band's",
-    lineOf(mixed, 'ETH').correctionPoints === 0,
-  );
-  ok(
-    'the lines the band DID lift report a holding change',
-    mixed.lines.filter((l) => l.correctionPoints > 0).some((l) => l.correctionMovesHolding),
-  );
-  ok(
-    'C7 counts a leg as the band\'s only where the correction moved that holding',
-    /const moved = new Set\(e\.correction\.lines\.filter\(\(l\) => l\.correctionMovesHolding\)\.map\(\(l\) => l\.asset\)\);/.test(replay),
-  );
-  ok(
-    'and counts a SUPPRESSION as the band\'s on a different test — the line was corrected at all',
-    /const touched = new Set\(e\.correction\.lines\.filter\(\(l\) => l\.correctionPoints !== 0\)\.map\(\(l\) => l\.asset\)\);/.test(replay),
-  );
-  ok(
-    'the model\'s own legs are reported apart rather than hidden',
-    /autre\(s\) jambe\(s\) du plan corrigé appartiennent au modèle/.test(replay),
-  );
-
-  // (b) EVERY PROPOSAL CARRIES ITS FRAME. Recording it inside the assessment block undid the
-  // previous round's fix in silence: C8 would find an unassessed cycle as the following
-  // proposal and then call every one of its lines unrevaluable, for want of a frame sitting in
-  // the very `market_context` it had just read.
-  ok(
-    'the frame is stored with the proposal, not with the assessment',
-    /proposals\.push\(\{ id: decision\.id, raw: rawProposal \}\);[\s\S]{0,600}?frames\.set\(decision\.id,/.test(replay),
-  );
-  ok(
-    'and the assessment block no longer sets it a second time',
-    [...replay.matchAll(/frames\.set\(/g)].length === 1,
-  );
-
-  // (c) THE DUST BRANCHES RECORD WHAT THEY SUPPRESS.
-  //
-  // `dust` was in the result type, in the journal's constraint and in C7's report, while both
-  // early exits returned without appending — so the category could never be produced and the
-  // accounting was incomplete while every consumer believed it exhaustive.
   const nothingToDo = planMovements(
     bookOf({ BTC: 20, ETH: 10 }),
     { BTC: 20, ETH: 10, USDT: 70 },

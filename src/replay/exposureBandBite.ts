@@ -2,13 +2,11 @@ import 'dotenv/config';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { config, tradableBaseAssets } from '../config/index.js';
-import type { Decimal } from '../money.js';
-import type { Movement, SuppressedLeg } from '../execution/movements.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
 import { parseRegimeJournal, regimePointFromJournal } from '../market/regimeJournal.js';
 import type { TransitionGate } from '../transition/gate.js';
 import { observeBand, checkBarIntegrity, type BandObservationInsert } from '../exposure/observe.js';
-import { correctToBand, type CorrectionOutcome } from '../exposure/correct.js';
+import { correctToBand } from '../exposure/correct.js';
 import { bookOf as portfolioOf, pricesOf, type StoredContext } from './storedCycle.js';
 
 /**
@@ -235,26 +233,6 @@ async function main(): Promise<void> {
    * publish a bite over a corpus it can no longer read correctly.
    */
   const postGateOnly: number[] = [];
-  /** The redistribution, per cycle — keyed by decision so later criteria can walk it in order. */
-  const corrections = new Map<number, CorrectionOutcome>();
-  /**
-   * EVERY CYCLE'S RAW PROPOSAL, in decision order — not only the assessed ones.
-   *
-   * C8 says "the following wake-up", and it has to mean it. `corrections` holds only the
-   * cycles `observeBand` could assess (a regime AND a retained target); a decided cycle that
-   * journaled no regime carries a perfectly usable raw allocation and is absent from it.
-   * Walking `corrections` pairwise would then skip that wake-up and compare the imposed
-   * position with a LATER proposal, while the report still calls it the next one.
-   */
-  const proposals: Array<{ id: number; raw: Record<string, number> }> = [];
-  /**
-   * THE VALUATION FRAME of each assessed cycle: its equity and its prices.
-   *
-   * A weight is only comparable to another weight measured against the same equity and the
-   * same prices. C8 compares a holding created at one wake-up with a target proposed at the
-   * next, and those are two different frames — so the frame travels with the cycle.
-   */
-  const frames = new Map<number, { equity: number; priceOf: (asset: string) => Decimal | null }>();
 
   for (const decision of decisions) {
     statuses[decision.status] = (statuses[decision.status] ?? 0) + 1;
@@ -278,17 +256,6 @@ async function main(): Promise<void> {
 
     const book = bookOf(decision.market_context);
 
-    const rawProposal = allocationOf(decision.target_allocation);
-    if (rawProposal != null) {
-      proposals.push({ id: decision.id, raw: rawProposal });
-      // THE FRAME TRAVELS WITH THE PROPOSAL, not with the assessment.
-      //
-      // Recording it only inside the assessment block undid the previous fix in silence: C8
-      // would find an unassessed cycle as the following proposal — exactly the case that fix
-      // recovered — and then classify every one of its lines `unrevaluable` for want of a
-      // frame it could have read from the same `market_context`.
-      frames.set(decision.id, { equity: book.equity, priceOf: pricesOf(decision.market_context as StoredContext) });
-    }
     const gates = gatesByDecision.get(decision.id) ?? new Map<string, TransitionGate>();
     if (gates.size > 0) cyclesWithGates.push(decision.id);
 
@@ -329,10 +296,9 @@ async function main(): Promise<void> {
      * coherence replay. A second one built here would eventually disagree with it about the
      * very quantity every leg is sized against.
      */
-    let correction: CorrectionOutcome | null = null;
     if (observation.assessment != null) {
       const ctx = decision.market_context as StoredContext;
-      correction = correctToBand({
+      const correction = correctToBand({
         assessment: observation.assessment,
         clampedAllocation: allocationOf(decision.applied_allocation)!,
         rawAllocation: allocationOf(decision.target_allocation),
@@ -351,7 +317,6 @@ async function main(): Promise<void> {
       observation.row.planned_movements = correction.movements.length;
       observation.row.suppressed_movements = correction.suppressed.length;
       observation.row.label = correction.label;
-      corrections.set(decision.id, correction);
     }
     rows.push(observation.row);
   }
@@ -627,241 +592,26 @@ async function main(): Promise<void> {
     ]);
   }
 
-  // ── C7 — THE REDISTRIBUTION: what the correction would actually SEND ─────────────
+  // ── C7 AND C8 ARE NOT HERE, AND THAT IS THE ARBITRATION ──────────────────────────
   //
-  // This is the question brick 1 could not answer and had to label "necessary, not
-  // sufficient". A correction whose total clears one movement floor can still be deleted
-  // entirely once it is split into legs, and only §3.5's redistribution knows which.
-  {
-    // ON THE DIRECTION, NOT ON THE LABEL — the same predicate C4 uses.
-    //
-    // Since the band started measuring the gap on in-band targets too, a cycle where the band
-    // corrected NOTHING can carry `bande_partiellement_irrealisable`: the model's own
-    // target-to-book move fell under the floor and left the book outside the band. That is a
-    // real fact and it belongs in the journal — but it is not a band correction, and counting
-    // it here would put ordinary model movements in "what the correction would send". Those
-    // rows also carry a null `unrealisable_points` (the assessment computes none when no
-    // correction is due), which the subtraction below would read as zero and charge the whole
-    // gap to the plumbing.
-    const withCorrection = rows
-      .filter((r) => r.direction != null && r.direction !== 'none')
-      .map((r) => ({ row: r, correction: corrections.get(r.decision_id)! }))
-      .filter((entry) => entry.correction != null);
-
-    // ONE POPULATION FOR THE WHOLE CRITERION: the corrections whose feasibility is knowable.
-    //
-    // On the fortnight of v5 that predates the transition layer there are no per-asset
-    // verdicts, so `correctToBand` sees every line as frozen and moves nothing. That is an
-    // artefact of the journal, not a fact about the redistribution — and folding those cycles
-    // into "N corrections produce no movement" would blame the 2% floor for a missing column.
-    const comparable = withCorrection.filter((e) => e.row.feasibility_known === true);
-    const excluded = withCorrection.length - comparable.length;
-
-    // ── WHAT THE BAND CAUSED, SEPARATED FROM WHAT THE MODEL WOULD HAVE DONE ANYWAY ──
-    //
-    // `correction.movements` is the COMPLETE corrected plan: it carries the model's own
-    // target-to-book legs alongside the band's. Counting it whole would credit the correction
-    // with an unrelated full exit that survived while the band's own one-point lift was
-    // deleted — and the comments here already claimed to be counting only band corrections.
-    //
-    // A leg belongs to the band when the correction changed that line's HOLDING, which is the
-    // same test `correctionMovesHolding` runs: corrected plan against uncorrected plan.
-    // A SUPPRESSION belongs to the band on a different test — a leg the band asked for and the
-    // plumbing deleted moves no holding by construction, so the holding test would discard
-    // exactly the cases worth counting. There it is the line having been corrected at all.
-    const bandMoves = (e: (typeof comparable)[number]): Movement[] => {
-      const moved = new Set(e.correction.lines.filter((l) => l.correctionMovesHolding).map((l) => l.asset));
-      return e.correction.movements.filter((mv) => moved.has(mv.asset));
-    };
-    const bandSuppressed = (e: (typeof comparable)[number]): SuppressedLeg[] => {
-      const touched = new Set(e.correction.lines.filter((l) => l.correctionPoints !== 0).map((l) => l.asset));
-      return e.correction.suppressed.filter((leg) => touched.has(leg.asset));
-    };
-
-    const moves = comparable.filter((e) => bandMoves(e).length > 0);
-    const inert = comparable.filter((e) => bandMoves(e).length === 0);
-    const consolidated = comparable.filter((e) => e.correction.consolidated);
-    const rescued = comparable.filter((e) =>
-      e.correction.lines.some((l) => l.origin === 'allocation_de_secours'),
-    );
-    const legs = comparable.reduce((sum, e) => sum + bandMoves(e).length, 0);
-    const modelLegs = comparable.reduce(
-      (sum, e) => sum + e.correction.movements.length - bandMoves(e).length,
-      0,
-    );
-    // BY REASON, never as one number. `planMovements` suppresses a leg for the 2% floor, for a
-    // MISSING PRICE, or for dust — and only the first is the plumbing floor. Publishing the
-    // total as "effacées par le seuil" would report a partial market-data outage as damage done
-    // by a threshold, which is the wrong thing to go and fix.
-    const countSuppressed = (reason: string): number =>
-      comparable.reduce((sum, e) => sum + bandSuppressed(e).filter((leg) => leg.reason === reason).length, 0);
-    const floorLegs = countSuppressed('movement_floor');
-    const noPriceLegs = countSuppressed('no_price');
-    const dustLegs = countSuppressed('dust');
-    // A cycle that lost a price cannot have its residual charged to the floor: the two causes
-    // are mixed inside one number there, and nothing separates them after the fact. Those
-    // cycles are reported apart rather than attributed.
-    const lostAPrice = (e: (typeof comparable)[number]): boolean =>
-      bandSuppressed(e).some((leg) => leg.reason === 'no_price');
-
-    // THE TWO GAPS. `unrealisable_points` counts only the freezes and the caps; the
-    // correction's own counts the plumbing too. Their difference is the movement floor's share,
-    // and it is only derivable because the two are never merged into one column.
-    const freezeGap = comparable.map((e) => e.row.unrealisable_points!);
-    const realisedGap = comparable.map((e) => e.correction.unrealisablePoints);
-    const plumbingShare = comparable
-      .filter((e) => !lostAPrice(e))
-      .map((e) => e.correction.unrealisablePoints - e.row.unrealisable_points!)
-      .filter((v) => v > 0.000001);
-    const priceLossShare = comparable
-      .filter(lostAPrice)
-      .map((e) => e.correction.unrealisablePoints - e.row.unrealisable_points!)
-      .filter((v) => v > 0.000001);
-
-    record('C7', 'la répartition : ce que la correction enverrait réellement', true, [
-      `Population : ${comparable.length} corrections portant une lecture de transition. ` +
-        `${excluded} exclue(s) — sans verdict par actif, le correcteur ne peut rien bouger, et ` +
-        'compter ça comme une correction inerte imputerait au seuil de 2 % une colonne manquante.',
-      `${moves.length} produisent au moins un mouvement ` +
-        `(${((moves.length / Math.max(comparable.length, 1)) * 100).toFixed(1)} %), ` +
-        `${inert.length} n'en produisent AUCUN une fois le seuil passé.`,
-      `${legs} jambes DE LA BANDE envoyées · ${floorLegs} effacées par le SEUIL de mouvement · ` +
-        `${noPriceLegs} par un PRIX MANQUANT · ${dustLegs} par la poussière.`,
-      `${modelLegs} autre(s) jambe(s) du plan corrigé appartiennent au modèle — son propre écart ` +
-        "cible-vers-livre, que la bande n'a pas causé et qui ne lui est donc pas compté.",
-      `Consolidation (§3.5.5) : elle change le résultat sur ${consolidated.length} cycle(s).`,
-      `Allocation de secours (§3.5.4) : ${rescued.length} cycle(s) posent du poids sur une ligne où le ` +
-        'modèle n\'avait RIEN dit — sa conviction ne suffisait pas à atteindre le plancher.',
-      '',
-      'Décomposition de l\'écart :',
-      `  écart dû aux GELS et PLAFONDS  : moyenne ${mean(freezeGap)} pt`,
-      `  écart après la PLOMBERIE aussi : moyenne ${mean(realisedGap)} pt`,
-      `  ${plumbingShare.length} cycle(s) où le SEUIL aggrave l'écart, de ${mean(plumbingShare)} pt ` +
-        'en moyenne.',
-      priceLossShare.length === 0
-        ? "  Aucun cycle n'a perdu de prix : tout le résidu est imputable au seuil."
-        : `  ${priceLossShare.length} cycle(s) ont AUSSI perdu un prix (${mean(priceLossShare)} pt de ` +
-          "résidu) : leurs deux causes sont mêlées et rien ne les sépare après coup, donc ils sont " +
-          "rapportés à part plutôt qu'imputés au seuil.",
-      '',
-      'C\'est la réponse à la réserve de la brique 1 : « au-dessus du seuil » ne garantissait rien, ' +
-        'et voici ce que la répartition en fait réellement.',
-    ]);
-  }
-
-  // ── C8 — LE MODÈLE UTILISE-T-IL L'EXPOSITION IMPOSÉE, OU LUTTE-T-IL CONTRE ? ─────
+  // Two criteria used to live at this point: what the redistribution would actually SEND, and
+  // whether the model would keep or undo a position the corrector created.
   //
-  // Demandé explicitement. CONTREFACTUEL, et il faut le dire fort : sur cet historique rien
-  // n'a jamais été corrigé, donc le modèle n'a jamais VU une position que le correcteur aurait
-  // créée. Ce que ce compteur mesure, c'est « si elle avait existé, le modèle aurait-il demandé
-  // de la défaire », lu sur ce qu'il a réellement proposé au réveil suivant.
+  // Both ask questions ACROSS CYCLES — whose leg is this, in which valuation frame, which cause
+  // deleted what — against a history in which no correction ever happened. Answering them
+  // demanded a corrected bot that never existed, re-anchored one step at a time, and every
+  // answer uncovered the next attribution problem. That is not a defect of the redistribution;
+  // it is the wrong tool for the question.
   //
-  // Trois lectures, parce qu'une seule serait trompeuse. « Le modèle demande moins que la
-  // position imposée » est presque automatique — il ré-émet sa propre préférence. Ce qui
-  // distingue l'indifférence de la lutte, c'est qu'il descende PLUS BAS qu'il n'était descendu
-  // lui-même, et ce qui distingue l'adoption, c'est qu'il monte au niveau imposé.
-  {
-    const ordered = [...corrections.entries()].sort((a, b) => a[0] - b[0]);
-    let undoRequested = 0;
-    let undoIntensified = 0;
-    let adopted = 0;
-    let observedPairs = 0;
+  // The RIGHT tool is brick 3. Witnesses E and P are exactly a chained counterfactual with a
+  // pre-registered, reproducible method, and cross-cycle interpretation belongs there.
+  //
+  // What stays here is what this replay can answer honestly: the per-cycle facts. The
+  // correction is still computed for every cycle and its result still travels into the
+  // artefact's rows — corrected exposure, realised exposure, the two gaps, the consolidation,
+  // the per-line origin and cause — so brick 3 reconstructs from durable data rather than from
+  // a conclusion this brick was not equipped to draw.
 
-    let unrevaluable = 0;
-    let withoutFollowingProposal = 0;
-    for (let i = 0; i < ordered.length; i += 1) {
-      const [currentId, current] = ordered[i]!;
-      // THE NEXT WAKE-UP THAT ACTUALLY PROPOSED SOMETHING, by decision order — not the next
-      // entry in `corrections`. See `proposals`.
-      const following = proposals.find((p) => p.id > currentId);
-      if (following == null) {
-        withoutFollowingProposal += 1;
-        continue;
-      }
-      const nextRaw = new Map(Object.entries(following.raw));
-      const here = frames.get(currentId);
-      const there = frames.get(following.id);
-      for (const line of current.lines) {
-        // Only lines the corrector actually LIFTED — a trim or an untouched line is not a
-        // position the correction created.
-        if (line.correctionPoints <= 0) continue;
-        // AND ONLY WHERE IT ACTUALLY CREATED SOMETHING. A lifted target is not a position: on
-        // a $1000 book, raising a neutral target from 19 to 20 produces a $10 leg the $20 floor
-        // deletes, and the line finishes exactly where it started. Counting the next 19%
-        // proposal as "the model undoing an imposed position" would be counting the undoing of
-        // a position that never existed — and those inert rows would inflate the denominator
-        // and drag all three published rates toward whatever they happen to look like.
-        //
-        // `correctionMovesHolding` compares the holdings of two EXECUTABLE plans, corrected
-        // and uncorrected, rather than their targets.
-        if (!line.correctionMovesHolding) continue;
-        const raw = nextRaw.get(line.asset);
-        if (raw == null) continue;
-
-        // ── ONE FRAME, OR NO COMPARISON ────────────────────────────────────────────────
-        //
-        // `realisedWeightPercent` is the imposed holding as a percentage of the equity at THIS
-        // wake-up, valued at THIS wake-up's prices. `raw` is a percentage at the NEXT one.
-        // Comparing them directly inverts the verdict whenever the asset moves: a 20% imposed
-        // holding that appreciates to 25% would read as "adopted" against a next target of 24%,
-        // which is in fact a trim.
-        //
-        // So the holding is carried as a QUANTITY and revalued in the next cycle's frame. The
-        // equity used there is the REAL bot's, not a corrected bot's — the same one-step
-        // re-anchoring the whole replay rests on, and the same approximation PR #37's snapshot
-        // documents. A cycle whose frame cannot be read is COUNTED APART rather than compared
-        // in a frame nobody can vouch for.
-        const priceHere = here?.priceOf(line.asset) ?? null;
-        const priceThere = there?.priceOf(line.asset) ?? null;
-        if (
-          here == null ||
-          there == null ||
-          priceHere == null ||
-          priceThere == null ||
-          !priceHere.gt(0) ||
-          !(there.equity > 0)
-        ) {
-          unrevaluable += 1;
-          continue;
-        }
-        // The quantity the correction would have created, then what it is worth next time.
-        const postEquityHere = here.equity * (1 - current.feeDragPoints / 100);
-        const valueHere = (line.realisedWeightPercent / 100) * postEquityHere;
-        const quantity = valueHere / priceHere.toNumber();
-        const imposedThere = ((quantity * priceThere.toNumber()) / there.equity) * 100;
-
-        observedPairs += 1;
-        if (raw >= imposedThere - 0.000001) adopted += 1;
-        else {
-          undoRequested += 1;
-          if (raw < line.baseWeightPercent - 0.000001) undoIntensified += 1;
-        }
-      }
-    }
-
-    const pct = (n: number): string =>
-      `${n} (${((n / Math.max(observedPairs, 1)) * 100).toFixed(1)} %)`;
-    record('C8', "le modèle utiliserait-il l'exposition imposée, ou lutterait-il contre", true, [
-      'CONTREFACTUEL. Rien n\'a jamais été corrigé sur cet historique, donc le modèle n\'a jamais ' +
-        'vu ces positions. Le compteur lit ce qu\'il a RÉELLEMENT proposé au réveil suivant, face ' +
-        'à une position que le correcteur aurait créée au précédent.',
-      `${observedPairs} paires observées (${withoutFollowingProposal} cycle(s) sans réveil ` +
-        `suivant portant une proposition) — une ligne dont la correction change RÉELLEMENT ` +
-        "l'avoir, et le réveil suivant. Une cible liftée dont la jambe passe sous le seuil ne " +
-        'crée aucune position, donc ne peut pas être défaite : elle est écartée du dénominateur.',
-      `La position imposée est portée comme une QUANTITÉ et revalorisée aux prix et à l'équité du ` +
-        `réveil suivant : un poids d'un cycle et une cible du suivant ne sont pas dans le même ` +
-        `cadre, et les comparer inverse le verdict dès que l'actif bouge. ${unrevaluable} paire(s) ` +
-        `dont le cadre est illisible sont comptées à part plutôt que comparées.`,
-      `ADOPTÉE   — le modèle demande au moins autant que la position imposée : ${pct(adopted)}`,
-      `DÉFAITE   — il demande moins : ${pct(undoRequested)}`,
-      `  dont LUTTE — il descend plus bas que sa propre cible précédente : ${pct(undoIntensified)}`,
-      '',
-      'La lecture qui compte est la troisième. « Demander moins que la position imposée » est ' +
-        'presque automatique : le modèle ré-émet sa préférence. Descendre plus bas qu\'il n\'était ' +
-        'descendu lui-même est en revanche un mouvement actif contre la correction.',
-    ]);
-  }
 
   // ── The artefact ─────────────────────────────────────────────────────────────────
   mkdirSync(OUT_DIR, { recursive: true });
