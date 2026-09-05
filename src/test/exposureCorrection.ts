@@ -91,8 +91,6 @@ function correct(opts: {
   gates?: Map<string, TransitionGate>;
   equity?: number;
   raw?: Record<string, number> | null;
-  /** Defaults to today's production mode: the gate observes and refuses nothing. */
-  gateEnforces?: boolean;
 }): CorrectionOutcome {
   const equity = opts.equity ?? 1000;
   const portfolio = bookOf(opts.book ?? {}, equity);
@@ -129,7 +127,6 @@ function correct(opts: {
     priceOf,
     feePercent: config.execution.feePercent,
     minMovementPercent: config.execution.minMovementPercent,
-    gateEnforces: opts.gateEnforces ?? false,
   };
   return correctToBand(input);
 }
@@ -714,7 +711,6 @@ console.log('\nProof 15 — the three enforce-mode defects, and their fixes:');
     priceOf,
     feePercent: config.execution.feePercent,
     minMovementPercent: config.execution.minMovementPercent,
-    gateEnforces: true,
   });
   const btc = outcome.lines.find((l) => l.asset === 'BTC')!;
   ok('[stop_exit] the clamped weight is still the model\'s 20', btc.clampedWeightPercent === 20);
@@ -737,38 +733,45 @@ console.log('\nProof 15 — the three enforce-mode defects, and their fixes:');
     rows.some((r) => Math.abs(r.clamped_weight_percent + r.correction_points - r.corrected_weight_percent) >= 1e-6),
   );
 
-  // (b) A LEG THE GATE WOULD REFUSE IS NOT COUNTED AS SENT.
+  // (b) THE PLAN IS PRE-GATE, AND THAT IS THE CONTRACT — not an omission.
   //
-  // The model wants BTC at 20 while the book holds 10, and BTC is frozen. The correction never
-  // touches that line — but the PLAN still emits the model's own buy, and under `enforce` the
-  // gate would refuse it. Counting it would credit the correction with a movement that never
-  // leaves, and would inflate the exposure the book is said to reach.
-  const frozenLeg = {
-    state: 'constructive' as const,
-    target: { BTC: 20, ETH: 10, BNB: 0, XRP: 0 },
-    book: { BTC: 10, ETH: 10 },
-    gates: gates({ BTC: 'frozen', ETH: 'actionable', BNB: 'actionable', XRP: 'actionable' }),
-  };
-  const observing = correct({ ...frozenLeg, gateEnforces: false });
-  const enforcing = correct({ ...frozenLeg, gateEnforces: true });
-
+  // A previous round filtered these legs by the correction's own capability map. That map
+  // answers "what may the correction create", and the gate's rule for a leg is a different
+  // question: `judgeOrder` EXEMPTS deterministic exits, so a stop-exit line's full-exit sell
+  // always executes while both its capabilities read false. The filter dropped exactly that
+  // leg — after `computeMovements` had sized the buys from the cash it was going to raise.
+  //
+  // One gate, in one place. `decide()` runs `judgeVector` then `applyGate` on whatever vector
+  // it is about to execute; the correction records the gate's verdict per line and applies
+  // none of it.
+  const stopSell = outcome.movements.find((m) => m.asset === 'BTC');
   ok(
-    '[gel] under observe the gate refuses nothing, so the model\'s BTC leg is in the plan',
-    observing.movements.some((m) => m.asset === 'BTC'),
-  );
-  ok('and nothing is reported as gated', observing.gated.length === 0 && !observing.atomicRefusalRisk);
-  ok(
-    'under enforce the same leg is NOT counted as sent',
-    !enforcing.movements.some((m) => m.asset === 'BTC'),
-  );
-  ok('it is reported apart, as gated', enforcing.gated.some((m) => m.asset === 'BTC'));
-  ok(
-    'and the atomic-refusal risk is raised — vector.ts refuses a target WHOLE or not at all',
-    enforcing.atomicRefusalRisk,
+    '[stop_exit] the full-exit sell is IN the plan, not filtered away',
+    stopSell != null && stopSell.side === 'sell',
   );
   ok(
-    'so the enforcing plan claims LESS realised exposure than the observing one',
-    enforcing.realisedExposurePercent < observing.realisedExposurePercent,
+    'and it is the whole line — the stop takes it to zero',
+    stopSell != null && stopSell.notional.eq(dec(200)),
+  );
+  const correctSrc = readFileSync(path.join(ROOT, 'src/exposure/correct.ts'), 'utf8');
+  // CALLS, not mentions: the header explains at length why the gate is not modelled here, and
+  // an assertion that forbade the words would forbid the explanation.
+  ok(
+    'the corrector never calls a gate function',
+    !/\b(judgeOrder|judgeVector|applyGate|isDeterministic)\s*\(/.test(correctSrc),
+  );
+  ok(
+    'and imports nothing from the transition layer at all',
+    !/from '\.\.\/transition\//.test(correctSrc),
+  );
+  ok(
+    'and it takes no flag telling it what the gate would do',
+    !/gateEnforces/.test(correctSrc),
+  );
+  const decideSrc = readFileSync(path.join(ROOT, 'src/decision/decide.ts'), 'utf8');
+  ok(
+    'while decide() still runs the real gate on the vector it executes',
+    /judgeVector\(\s*proposedMovements\.map/.test(decideSrc) && /applyGate\(\{/.test(decideSrc),
   );
 
   // (c) THE REALISED EXPOSURE IS REPLAYED FROM THE NOTIONALS, not assumed from the target.
@@ -790,6 +793,72 @@ console.log('\nProof 15 — the three enforce-mode defects, and their fixes:');
   ok(
     'so no shortfall is claimed for a cost the projection cannot avoid',
     lifted.unrealisablePoints === 0 && lifted.label === 'hausse_vers_plancher',
+  );
+}
+
+// ── PROOF 16 — the two defects the second review round found ─────────────────
+console.log('\nProof 16 — a quiet cycle can still fail, and a lifted target is not a position:');
+{
+  // (a) "THE BAND ASKED FOR NOTHING" IS NOT "THE BOOK ENDED UP INSIDE THE BAND".
+  //
+  // A neutral 20% target is comfortably in [20, 45]. Held against a 19% book it produces a
+  // one-point buy — $10 on a $1000 book — which the $20 floor deletes. The cycle ends holding
+  // 19%, outside the band, and reporting a zero gap would hide exactly the plumbing failures
+  // this pilot exists to count.
+  const quietFailure = correct({
+    state: 'neutral',
+    target: { BTC: 20, ETH: 0, BNB: 0, XRP: 0 },
+    book: { BTC: 19 },
+  });
+  ok('[cible dans la bande] the band asks for no correction', quietFailure.direction === 'none');
+  ok('no line is touched', quietFailure.lines.every((l) => l.correctionPoints === 0));
+  ok('the one-point buy is deleted by the floor', quietFailure.movements.length === 0);
+  ok('so the book stays at 19%, outside the band', near(quietFailure.realisedExposurePercent, 19));
+  ok('the gap is MEASURED, not assumed to be zero', near(quietFailure.unrealisablePoints, 1));
+  ok(
+    'and the label says the band was not reached',
+    quietFailure.label === 'bande_partiellement_irrealisable',
+  );
+
+  // The ordinary quiet cycle must still be quiet: a book already inside the band, with no
+  // correction due, reports nothing at all. If this flipped, every calm cycle would be a
+  // failure and the label would stop meaning anything.
+  const genuinelyQuiet = correct({
+    state: 'neutral',
+    target: { BTC: 25, ETH: 0, BNB: 0, XRP: 0 },
+    book: { BTC: 25 },
+  });
+  ok('a book inside the band with nothing to do reports no gap', genuinelyQuiet.unrealisablePoints === 0);
+  ok('and keeps the quiet label', genuinelyQuiet.label === 'aucune_correction');
+
+  // (b) A LIFTED TARGET IS NOT A CREATED POSITION.
+  //
+  // The counter "how often would the model undo a position the corrector created" is
+  // meaningless on a position that was never created. Membership has to be a HOLDINGS
+  // difference between two executable plans, not a target delta.
+  const inertLift = correct({
+    state: 'neutral',
+    target: { BTC: 19, ETH: 0, BNB: 0, XRP: 0 },
+    book: { BTC: 19 },
+  });
+  const btcInert = lineOf(inertLift, 'BTC');
+  ok('[lift inerte] the target IS lifted', btcInert.correctionPoints > 0);
+  ok('but the leg is under the floor and nothing is sent', inertLift.movements.length === 0);
+  ok('so the correction moves no holding, and says so', !btcInert.correctionMovesHolding);
+
+  const realLift = correct({
+    state: 'constructive',
+    target: { BTC: 15, ETH: 5, BNB: 0, XRP: 0 },
+    book: { BTC: 15, ETH: 5 },
+  });
+  ok('[lift réel] a 25-point correction does send legs', realLift.movements.length > 0);
+  ok(
+    'and every line it lifted reports a real holding change',
+    realLift.lines.filter((l) => l.correctionPoints > 0).every((l) => l.correctionMovesHolding),
+  );
+  ok(
+    'while the lines it left alone report none',
+    realLift.lines.filter((l) => l.correctionPoints === 0).every((l) => !l.correctionMovesHolding),
   );
 }
 

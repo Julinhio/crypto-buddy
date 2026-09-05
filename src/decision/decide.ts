@@ -692,10 +692,6 @@ export async function decide(): Promise<DecideResult> {
             priceOf,
             feePercent: config.execution.feePercent,
             minMovementPercent: config.execution.minMovementPercent,
-            // Whether a leg the layer forbids would actually be stopped. Under `observe` it
-            // would not, so it belongs in the plan; the correction must describe the run it
-            // is in, not the one it might one day be in.
-            gateEnforces: TRANSITION_MODE === 'enforce',
           });
 
     if (correction != null) {

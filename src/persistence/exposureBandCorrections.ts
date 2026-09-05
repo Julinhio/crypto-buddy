@@ -37,6 +37,15 @@ export interface BandCorrectionInsert {
   origin: LineOrigin;
   cause: LineCause;
   corrected_weight_percent: number;
+  /**
+   * Does the correction change what this line actually HOLDS — see
+   * `CorrectedLine.correctionMovesHolding`.
+   *
+   * Persisted rather than derived, because the counter it gates is read in SQL over the whole
+   * eight weeks: without the column, the query cannot tell a lifted target from a created
+   * position, and every rate it publishes inherits that bias.
+   */
+  correction_moves_holding: boolean;
 
   book_weight_percent: number;
   cap_percent: number;
@@ -122,6 +131,7 @@ export function toCorrectionRows(input: ToCorrectionRowsInput): BandCorrectionIn
       origin: line.origin,
       cause: line.cause,
       corrected_weight_percent: line.correctedWeightPercent,
+      correction_moves_holding: line.correctionMovesHolding,
       book_weight_percent: line.bookWeightPercent,
       cap_percent: line.capPercent,
       gate: gateByAsset.get(line.asset) ?? null,

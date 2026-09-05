@@ -309,10 +309,6 @@ async function main(): Promise<void> {
         priceOf: pricesOf(ctx),
         feePercent: config.execution.feePercent,
         minMovementPercent: config.execution.minMovementPercent,
-        // The corpus ran entirely under `TRANSITION_MODE=observe`: zero rows carry an
-        // `applied_divergence_cause`, and C0 fails the run if one ever appears. So the gate
-        // refused nothing, and a leg on a frozen line really would have been sent.
-        gateEnforces: false,
       });
       observation.row.corrected_exposure_percent = correction.correctedExposurePercent;
       observation.row.realised_exposure_percent = correction.realisedExposurePercent;
@@ -686,6 +682,16 @@ async function main(): Promise<void> {
         // Only lines the corrector actually LIFTED — a trim or an untouched line is not a
         // position the correction created.
         if (line.correctionPoints <= 0) continue;
+        // AND ONLY WHERE IT ACTUALLY CREATED SOMETHING. A lifted target is not a position: on
+        // a $1000 book, raising a neutral target from 19 to 20 produces a $10 leg the $20 floor
+        // deletes, and the line finishes exactly where it started. Counting the next 19%
+        // proposal as "the model undoing an imposed position" would be counting the undoing of
+        // a position that never existed — and those inert rows would inflate the denominator
+        // and drag all three published rates toward whatever they happen to look like.
+        //
+        // `correctionMovesHolding` compares the holdings of two EXECUTABLE plans, corrected
+        // and uncorrected, rather than their targets.
+        if (!line.correctionMovesHolding) continue;
         const raw = nextRaw.get(line.asset);
         if (raw == null) continue;
         observedPairs += 1;
@@ -703,7 +709,9 @@ async function main(): Promise<void> {
       'CONTREFACTUEL. Rien n\'a jamais été corrigé sur cet historique, donc le modèle n\'a jamais ' +
         'vu ces positions. Le compteur lit ce qu\'il a RÉELLEMENT proposé au réveil suivant, face ' +
         'à une position que le correcteur aurait créée au précédent.',
-      `${observedPairs} paires (ligne liftée, réveil suivant) observées.`,
+      `${observedPairs} paires observées — une ligne dont la correction change RÉELLEMENT ` +
+        "l'avoir, et le réveil suivant. Une cible liftée dont la jambe passe sous le seuil ne " +
+        'crée aucune position, donc ne peut pas être défaite : elle est écartée du dénominateur.',
       `ADOPTÉE   — le modèle demande au moins autant que la position imposée : ${pct(adopted)}`,
       `DÉFAITE   — il demande moins : ${pct(undoRequested)}`,
       `  dont LUTTE — il descend plus bas que sa propre cible précédente : ${pct(undoIntensified)}`,

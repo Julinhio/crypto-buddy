@@ -97,6 +97,22 @@ export interface CorrectedLine {
   mayDecrease: boolean;
   /** The line's weight in the BOOK before the cycle — where it stays if its leg is dropped. */
   bookWeightPercent: number;
+  /**
+   * DID THE CORRECTION ACTUALLY CHANGE WHAT THIS LINE WOULD HOLD?
+   *
+   * `correctionPoints > 0` only proves the TARGET was lifted. It does not prove a single unit
+   * of anything moves: lifting a neutral target from 19 to 20 on a $1000 book produces a $10
+   * leg that the $20 floor deletes, and the line finishes exactly where it started.
+   *
+   * The difference matters wherever the correction's effect is counted. "How often would the
+   * model undo a position the corrector created" is meaningless on a position that was never
+   * created — those rows would inflate the denominator and drag every published rate toward
+   * whatever the inert cases happen to look like.
+   *
+   * So this compares the holdings of two EXECUTABLE plans, the corrected one and the
+   * uncorrected one, rather than their targets.
+   */
+  correctionMovesHolding: boolean;
 }
 
 export interface CorrectionOutcome {
@@ -146,33 +162,33 @@ export interface CorrectionOutcome {
   consolidationAttempts: number;
   lines: CorrectedLine[];
   /**
-   * The legs the plan would send.
+   * The legs the corrected target would produce — BEFORE THE TRANSITION GATE.
    *
-   * Under `gateEnforces`, a leg the transition layer forbids on its own line is NOT here: the
-   * gate would refuse it, and counting it would credit the correction with a movement that
-   * never leaves. Those legs are reported in `gated` instead.
+   * ── WHY THIS FUNCTION DOES NOT GATE, AND THAT IS THE FIX RATHER THAN THE GAP ──────────
+   *
+   * A previous round tried to filter these by the same `mayIncrease`/`mayDecrease` map the
+   * correction obeys, so that a leg the gate would refuse was not counted as sent. That was
+   * wrong in a way worth recording, because it is the shape every partial re-implementation
+   * of the gate takes:
+   *
+   *   - the map is about what the CORRECTION may create, and the gate's rule for a leg is a
+   *     different question — `judgeOrder` exempts DETERMINISTIC exits, so a `stop_exit` line's
+   *     full-exit sell is always executed while both its capabilities read false. The filter
+   *     therefore dropped the one leg that certainly leaves;
+   *   - and it dropped it AFTER `computeMovements` had already sized the buys from the cash
+   *     that exit was going to produce. The counterfactual then held buys funded by a sale it
+   *     had just deleted.
+   *
+   * The gate is one thing, in one place: `judgeVector` then `applyGate`, run by `decide()` on
+   * whatever vector it is about to execute — including this one, the day the correction feeds
+   * the engine. Modelling a second, weaker copy of it here to predict its own input is how the
+   * two silently diverge.
+   *
+   * So this is the plan as the EXECUTOR would receive it, and the gate's verdict on it is
+   * recorded per line (`gate`) rather than applied. Under `TRANSITION_MODE=observe` — the mode
+   * production has always run — the gate refuses nothing and the two coincide exactly.
    */
   movements: Movement[];
-  /**
-   * Legs the transition gate would refuse on their own account. Always empty while the gate
-   * only observes — there it blocks nothing, and the leg really would be sent.
-   *
-   * They are the MODEL's legs, never the correction's: the correction cannot create a movement
-   * on a line it may not touch. What they represent is the model's own target-versus-book gap
-   * on a frozen line.
-   */
-  gated: Movement[];
-  /**
-   * True when at least one strategic leg is individually forbidden.
-   *
-   * THE LIMIT OF THIS FUNCTION, stated rather than modelled: `vector.ts` refuses a portfolio
-   * target WHOLE or not at all, so one forbidden leg suppresses every strategic leg of the
-   * cycle. Reproducing that here would be a second implementation of the gate, which this
-   * codebase forbids for good reason — so the correction reports the RISK and leaves the
-   * decision to `applyGate`, downstream. While that flag is true, `realisedExposurePercent`
-   * is an upper bound rather than a prediction.
-   */
-  atomicRefusalRisk: boolean;
   /** §3.3 and §3.6.4 — the legs the floor deleted stay visible. */
   suppressed: SuppressedLeg[];
 }
@@ -189,16 +205,6 @@ export interface CorrectInput {
   priceOf: PriceLookup;
   feePercent: number;
   minMovementPercent: number;
-  /**
-   * Is the transition gate BLOCKING this run (`TRANSITION_MODE=enforce`)?
-   *
-   * It changes what "would be sent" means, and nothing else. Under `observe` the gate refuses
-   * nothing, so the model's leg on a frozen line really does execute and belongs in the plan;
-   * under `enforce` it is refused, and counting it would overstate what the correction
-   * achieves. Passed in rather than imported, like every other input here, so this file stays
-   * pure and the replay can set it from what the corpus actually ran under.
-   */
-  gateEnforces: boolean;
 }
 
 /** Percentages are not money — the same tolerance the risk wrapper uses, for the same reason. */
@@ -447,13 +453,7 @@ function planFor(
   input: CorrectInput,
   weights: Map<string, number>,
   totalPercent: number,
-  capability: ReadonlyMap<string, LineCapabilityView>,
-): {
-  allocation: Record<string, number>;
-  movements: Movement[];
-  gated: Movement[];
-  suppressed: SuppressedLeg[];
-} {
+): { allocation: Record<string, number>; movements: Movement[]; suppressed: SuppressedLeg[] } {
   const allocation = allocationFrom(weights, input.reserveAsset, totalPercent);
   const plan = planMovements(
     input.portfolio,
@@ -466,28 +466,7 @@ function planFor(
     // lines would be indistinguishable from the real cycle's own refusals in the logs.
     ':band',
   );
-  // WHAT THE GATE WOULD REFUSE ON ITS OWN ACCOUNT. Not a re-implementation of `applyGate`:
-  // it is the same capability map the correction already obeys, applied to the legs the plan
-  // produced. A leg is the MODEL's here — the correction never moves a line it may not touch —
-  // and it exists because the model's target and the book disagree on a frozen line.
-  if (!input.gateEnforces) {
-    return { allocation, movements: plan.movements, gated: [], suppressed: plan.suppressed };
-  }
-  const movements: Movement[] = [];
-  const gated: Movement[] = [];
-  for (const movement of plan.movements) {
-    const line = capability.get(movement.asset);
-    const allowed = movement.side === 'buy' ? line?.mayIncrease : line?.mayDecrease;
-    if (allowed === true) movements.push(movement);
-    else gated.push(movement);
-  }
-  return { allocation, movements, gated, suppressed: plan.suppressed };
-}
-
-/** The two permissions a line carries, as `planFor` needs them. */
-interface LineCapabilityView {
-  mayIncrease: boolean;
-  mayDecrease: boolean;
+  return { allocation, movements: plan.movements, suppressed: plan.suppressed };
 }
 
 /**
@@ -561,15 +540,38 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
 
   const baseWeights = new Map<string, number>(lines.map((l) => [l.asset, l.weightPercent]));
   const capOf = new Map(lines.map((l) => [l.asset, l.capPercent]));
-  const capability = new Map(
-    lines.map((l) => [l.asset, { mayIncrease: l.mayIncrease, mayDecrease: l.mayDecrease }]),
-  );
+
+  /**
+   * What each line would HOLD under a plan, in quote — the book plus whatever its leg moves.
+   *
+   * Compared between the corrected plan and the uncorrected one, this is the only honest test
+   * of "did the correction change anything here": both are executable plans through the same
+   * engine, so the difference is the correction's doing and nothing else's.
+   */
+  const holdingsUnder = (movements: readonly Movement[]): Map<string, Decimal> => {
+    const held = new Map<string, Decimal>();
+    for (const line of lines) {
+      held.set(line.asset, input.portfolio.equity.times(book.get(line.asset) ?? 0).div(100));
+    }
+    for (const movement of movements) {
+      const current = held.get(movement.asset) ?? ZERO;
+      held.set(
+        movement.asset,
+        movement.side === 'buy' ? current.plus(movement.notional) : current.minus(movement.notional),
+      );
+    }
+    return held;
+  };
+  // The UNCORRECTED plan, run once: what the cycle would have held with no band at all.
+  const uncorrectedHoldings = holdingsUnder(planFor(input, baseWeights, totalPercent).movements);
 
   const buildLines = (
     weights: Map<string, number>,
     origins: Map<string, LineOrigin>,
     suppressed: readonly SuppressedLeg[],
+    movements: readonly Movement[],
   ): CorrectedLine[] => {
+    const correctedHoldings = holdingsUnder(movements);
     const suppressedAssets = new Map(suppressed.map((s) => [s.asset, s]));
     return lines.map((line) => {
       const corrected = round(weights.get(line.asset) ?? line.weightPercent);
@@ -605,28 +607,50 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
         mayIncrease: line.mayIncrease,
         mayDecrease: line.mayDecrease,
         bookWeightPercent: round(book.get(line.asset) ?? 0),
+        correctionMovesHolding: !(correctedHoldings.get(line.asset) ?? ZERO).eq(
+          uncorrectedHoldings.get(line.asset) ?? ZERO,
+        ),
       };
     });
   };
 
   // ── NO CORRECTION DUE ──────────────────────────────────────────────────────────────
+  //
+  // "The band asked for nothing" does NOT mean "the book ends up inside the band". A target
+  // sitting comfortably in the band can still leave the book outside it: a neutral 20% target
+  // held against a 19% book produces a one-point buy, the 2% floor deletes it, and the cycle
+  // ends with 19% of exposure and a `aucune_correction` label.
+  //
+  // Reporting a zero gap there would hide exactly the failures this pilot is measuring — the
+  // ones where the plumbing, not the band, is what keeps the book out. So the gap is computed
+  // on this path too, against whichever bound the realised book falls outside of.
   if (assessment.direction === 'none') {
-    const plan = planFor(input, baseWeights, totalPercent, capability);
+    const plan = planFor(input, baseWeights, totalPercent);
+    const realised = realisedExposure(input.portfolio, book, plan.movements);
+    const drag = feeDrag(input.portfolio, plan.movements);
+    const gap = round(
+      Math.max(
+        assessment.band.lowPercent - realised - drag,
+        realised - assessment.band.highPercent - drag,
+        0,
+      ),
+    );
     return {
-      label: 'aucune_correction',
+      label: gap > 0 ? 'bande_partiellement_irrealisable' : 'aucune_correction',
       direction: 'none',
       correctedAllocation: { ...clampedAllocation },
       correctedExposurePercent: assessment.targetExposurePercent,
-      realisedExposurePercent: realisedExposure(input.portfolio, book, plan.movements),
-      unrealisablePoints: 0,
-      feeDragPoints: feeDrag(input.portfolio, plan.movements),
+      realisedExposurePercent: realised,
+      // NOT zero by construction any more. The label follows it: a cycle whose book lands
+      // outside the band is not a cycle where nothing happened, even when the band asked for
+      // nothing — and the four labels have no fifth to describe it.
+      unrealisablePoints: gap,
+      feeDragPoints: drag,
       consolidated: false,
       consolidationRounds: 0,
       consolidationAttempts: 0,
-      lines: buildLines(baseWeights, new Map(), plan.suppressed),
+      lines: buildLines(baseWeights, new Map(), plan.suppressed, plan.movements),
       movements: plan.movements,
-      gated: plan.gated,
-      atomicRefusalRisk: plan.gated.length > 0,
       suppressed: plan.suppressed,
     };
   }
@@ -637,7 +661,7 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
   // ── THE CEILING — one pass, no consolidation (see `distributeToCeiling`) ───────────
   if (assessment.direction === 'down') {
     const pass = distributeToCeiling(lines, bound);
-    const plan = planFor(input, pass.weights, totalPercent, capability);
+    const plan = planFor(input, pass.weights, totalPercent);
     const realised = realisedExposure(input.portfolio, book, plan.movements);
     // The overshoot that survives: what the frozen lines force (pass.shortfall) OR what the
     // floor left un-sold. Both are "still above the ceiling", and both are journaled.
@@ -656,10 +680,8 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
       consolidated: false,
       consolidationRounds: 0,
       consolidationAttempts: 0,
-      lines: buildLines(pass.weights, pass.origins, plan.suppressed),
+      lines: buildLines(pass.weights, pass.origins, plan.suppressed, plan.movements),
       movements: plan.movements,
-      gated: plan.gated,
-      atomicRefusalRisk: plan.gated.length > 0,
       suppressed: plan.suppressed,
     };
   }
@@ -700,7 +722,7 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
     attempts += 1;
     const excluded = new Set(priority.slice(keep));
     const pass = distributeToFloor(lines, deficit, excluded);
-    const plan = planFor(input, pass.weights, totalPercent, capability);
+    const plan = planFor(input, pass.weights, totalPercent);
     const realised = realisedExposure(input.portfolio, book, plan.movements);
 
     // KEEP THE BEST, not the last. Narrowing further can hit a cap and end up worse; taking
@@ -721,7 +743,7 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
   // whole deficit.
   if (best == null) {
     const pass = distributeToFloor(lines, deficit, new Set(priority));
-    const plan = planFor(input, pass.weights, totalPercent, capability);
+    const plan = planFor(input, pass.weights, totalPercent);
     best = { pass, plan, realised: realisedExposure(input.portfolio, book, plan.movements) };
   }
 
@@ -739,10 +761,8 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
     consolidated: rounds > 0,
     consolidationRounds: rounds,
     consolidationAttempts: attempts,
-    lines: buildLines(pass.weights, pass.origins, plan.suppressed),
+    lines: buildLines(pass.weights, pass.origins, plan.suppressed, plan.movements),
     movements: plan.movements,
-    gated: plan.gated,
-    atomicRefusalRisk: plan.gated.length > 0,
     suppressed: plan.suppressed,
   };
 }

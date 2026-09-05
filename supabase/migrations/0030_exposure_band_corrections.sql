@@ -82,6 +82,18 @@ create table if not exists public.exposure_band_corrections (
 
   -- ── FAIT 3 — la cible finale ──────────────────────────────────────────────────
   corrected_weight_percent numeric not null,
+  -- LA CORRECTION CHANGE-T-ELLE RÉELLEMENT L'AVOIR DE CETTE LIGNE ?
+  --
+  -- `correction_points > 0` ne prouve que le lift de la CIBLE. Lever une cible neutre de 19 à
+  -- 20 sur un livre de 1000 produit une jambe de 10, que le seuil de 20 efface : la ligne finit
+  -- exactement où elle était.
+  --
+  -- La distinction est ce qui rend le compteur « le modèle défait-il une position que le
+  -- correcteur a créée » lisible en SQL. Une position jamais créée ne peut pas être défaite, et
+  -- ces lignes inertes gonfleraient le dénominateur en tirant tous les taux publiés vers ce
+  -- qu'elles valent. Comparé entre DEUX PLANS EXÉCUTABLES — corrigé et non corrigé — jamais
+  -- entre deux cibles.
+  correction_moves_holding boolean not null,
 
   -- ── le contexte de la ligne ───────────────────────────────────────────────────
   -- Le poids dans le LIVRE avant la décision : là où la ligne reste si sa jambe est supprimée.
@@ -138,6 +150,9 @@ comment on column public.exposure_band_corrections.origin is
 
 comment on column public.exposure_band_corrections.cause is
   'Du plus specifique au moins : un gel est un gel quoi qu''il arrive, un plafond atteint l''est quoi que dise le seuil, la plomberie n''est blamee qu''en dernier. Les confondre laisserait le seuil de 2 % prendre le credit d''un gel.';
+
+comment on column public.exposure_band_corrections.correction_moves_holding is
+  'Vrai quand la correction change reellement l''avoir de la ligne, compare entre deux plans EXECUTABLES et non entre deux cibles. Une cible liftee dont la jambe passe sous le seuil ne cree aucune position : c''est le filtre qui rend le compteur « le modele defait-il une position imposee » lisible sans biais.';
 
 comment on column public.exposure_band_corrections.suppressed_reason is
   'La jambe que le seuil de mouvement a effacee. §3.3 et §3.6.4 : les mouvements supprimes par le seuil de 2 % doivent rester visibles, jamais absorbes dans un silence.';
