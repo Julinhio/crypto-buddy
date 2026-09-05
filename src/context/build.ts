@@ -13,6 +13,7 @@ import {
   toRegimeJournal,
   type AssetSeries,
   type RegimeJournal,
+  type RegimePoint,
 } from '../market/regime.js';
 import { stickyTimelines, type StickyPoint } from '../market/transition.js';
 import { fetchRelevantBalances, type AssetBalance } from '../account/balances.js';
@@ -129,6 +130,20 @@ export interface MarketContext {
    * Null when no asset returned both series (never a reason to fail a cycle).
    */
   regime: RegimeJournal | null;
+  /**
+   * THE SAME REGIME, as the `RegimePoint` the controller's own functions take.
+   *
+   * `regime` is the JOURNALED projection — what goes into `decisions.regime` and what a
+   * later replay rehydrates. This is the object it was projected FROM, carried in memory so
+   * the live cycle can call `readContext` on production's own point instead of round-tripping
+   * through its own journal to reach it.
+   *
+   * Deliberately kept OUT of `DecisionContext`, exactly like `regime`, `transition` and
+   * `dataHealth`: `decisions.market_context` stores the DecisionContext and must stay
+   * byte-identical. Null under exactly the same conditions as `regime` — they are built from
+   * the same point or not at all.
+   */
+  regimePoint: RegimePoint | null;
   /**
    * The TRANSITION LAYER's read for this cycle: per asset, whether its raw regime has
    * held long enough to be actionable (see src/market/transition.ts).
@@ -420,8 +435,12 @@ async function safeBuildPair(
  * are only read for the tradable ones, but the risk_off breadth is a market-wide
  * measure — SOL belongs in the breadth even though the bot never allocates to it.
  */
-function readRegime(pairs: BuiltPair[]): { regime: RegimeJournal | null; transition: TransitionRead | null } {
-  const nothing = { regime: null, transition: null };
+function readRegime(pairs: BuiltPair[]): {
+  regime: RegimeJournal | null;
+  regimePoint: RegimePoint | null;
+  transition: TransitionRead | null;
+} {
+  const nothing = { regime: null, regimePoint: null, transition: null };
   const universe: Record<string, AssetSeries> = {};
   for (const p of pairs) {
     const base = p.context.symbol.split('/')[0];
@@ -468,6 +487,7 @@ function readRegime(pairs: BuiltPair[]): { regime: RegimeJournal | null; transit
 
     return {
       regime: toRegimeJournal(point),
+      regimePoint: point,
       transition: { barAtMs: point.timestamp, perAsset },
     };
   } catch (err) {

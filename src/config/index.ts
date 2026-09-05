@@ -270,6 +270,36 @@ export interface TransitionConfig {
   peakStopPercent: number;
 }
 
+/**
+ * THE EXPOSURE BAND — band A, and the six numbers that define it.
+ *
+ * Repris du harnais de calibration (PR #36) : the DEFINITION of the context (`readContext`,
+ * imported and never reimplemented) and these six bounds. Nothing else. The harness's own
+ * allocator starts from a fixed basket and redistributes no shortfall, so it does not match
+ * the pilot's contract, and its measured performance is neither a promise, a reference nor a
+ * criterion.
+ *
+ * The bounds live HERE, in production configuration, rather than being read from `arms.ts`.
+ * Importing the arm would drag the whole calibration harness — its engine, its tape, its
+ * metrics — into the production module graph, for four numbers. `src/test/exposureBand.ts`
+ * asserts they are numerically identical to `ARMS.A`, so "reprises du harnais" is a proof
+ * rather than a claim, and the harness stays out of the bot.
+ *
+ * NOT env-overridable, exactly like the caps and the peak stop: it is the policy under
+ * measurement, not an ops knob. Changing it mid-window restarts the experiment, and a value
+ * that could be changed from a dashboard would make that impossible to detect afterwards.
+ */
+export interface ExposureBandConfig {
+  /**
+   * The band's identity, carried into every observation row and into the pilot's identity.
+   * A changed policy must be legible as a changed policy, not inferred from six numbers.
+   */
+  version: string;
+  defensive: { lowPercent: number; highPercent: number };
+  neutral: { lowPercent: number; highPercent: number };
+  constructive: { lowPercent: number; highPercent: number };
+}
+
 export interface AppConfig {
   tradablePairs: string[];
   referencePairs: string[];
@@ -281,6 +311,7 @@ export interface AppConfig {
   cache: CacheConfig;
   regime: RegimeConfig;
   transition: TransitionConfig;
+  exposureBand: ExposureBandConfig;
   decision: DecisionConfig;
   execution: ExecutionConfig;
   scheduler: SchedulerConfig;
@@ -436,6 +467,69 @@ export function resolveTransitionMode(
   );
 }
 
+/**
+ * How the EXPOSURE BAND behaves this run — the pilot's one switch.
+ *
+ *   `off`          — band A is not computed and nothing is written. The bot behaves exactly
+ *                    as it did before this brick existed, byte for byte.
+ *   `observation`  — the band is computed and journaled on every cycle. NO effect on any
+ *                    order, ever. This is the mode brick 1 ships.
+ *   `application`  — the correction becomes effective. NOT YET A LEGAL VALUE; it arrives
+ *                    with the last brick of the pilot.
+ */
+export type ExposureBandMode = 'off' | 'observation' | 'application';
+
+/**
+ * The modes this BUILD accepts. `application` is deliberately absent.
+ *
+ * The protocol makes the switch from `observation` to `application` the pilot's official
+ * start: its equity, its high-water mark and its eight-week clock all begin there, and the
+ * observation history counts in neither its performance nor its drawdown. That instant can
+ * therefore be spent exactly once.
+ *
+ * Bricks 2, 3 and 4 — the correction, the two witnesses, the identity and the circuit
+ * breaker — are not in this build. A bot that accepted `application` today would start the
+ * experiment with no witness to compare against and no persistent drawdown to stop it, and
+ * the only way back would be to admit the window was wasted. So the value is refused by the
+ * BINARY rather than by discipline, and it becomes legal in the same PR that makes it safe.
+ */
+const EXPOSURE_BAND_MODES_THIS_BUILD: ReadonlySet<string> = new Set(['off', 'observation']);
+
+/**
+ * Resolves `EXPOSURE_BAND_MODE`, and FAILS LOUD on anything it does not recognise.
+ *
+ * Same convention as STRATEGY_VERSION, COHERENCE_GUARD and TRANSITION_MODE, and the same
+ * reason: ABSENCE MEANS SAFE. `off` is the mode that changes nothing, so there is nothing to
+ * set on Railway to keep today's behaviour, and an environment that loses its variables comes
+ * back with the band switched off rather than half-armed.
+ *
+ * `application` gets its OWN message rather than the generic one. Someone typing it intends
+ * to start the pilot; telling them "unrecognised value" would read as a typo when the real
+ * answer is "this build cannot do that yet, and here is what is missing".
+ */
+export function resolveExposureBandMode(
+  raw: string | undefined = process.env.EXPOSURE_BAND_MODE,
+): ExposureBandMode {
+  if (raw == null || raw.trim() === '') return 'off';
+  const value = raw.trim();
+  if (value === 'application') {
+    throw new Error(
+      'EXPOSURE_BAND_MODE="application" is not a legal value in this build. The band correction, ' +
+        'the two witnesses and the pilot\'s circuit breaker ship in later bricks; arming the ' +
+        'application mode now would start the eight-week window with nothing to compare against ' +
+        'and no persistent drawdown to stop it. Use "observation" (compute and journal, no effect ' +
+        'on orders) or "off".',
+    );
+  }
+  if (EXPOSURE_BAND_MODES_THIS_BUILD.has(value)) return value as ExposureBandMode;
+  throw new Error(
+    `Invalid EXPOSURE_BAND_MODE="${raw}": expected exactly "off" or "observation" ` +
+      '(case-sensitive), or UNSET for the default "off". A present-but-unrecognised value is ' +
+      'refused rather than defaulted: it means someone intended to change how the exposure band ' +
+      'behaves, and silently running another mode would be worse than not booting.',
+  );
+}
+
 export const config: AppConfig = {
   // Pairs the bot may take positions on (subject to the risk caps). Add a tradable
   // pair by appending one line AND giving it a cap in execution.caps.perAsset.
@@ -505,6 +599,17 @@ export const config: AppConfig = {
 
   transition: {
     peakStopPercent: 10,
+  },
+
+  // Band A. The ceiling in `constructive` is 70, which is exactly what the 30% cash floor
+  // already imposes — a STRUCTURAL redundancy, published as such: no correction toward the
+  // ceiling can ever occur in a constructive context, and reading "zero" there proves
+  // nothing about the policy. The ceiling that actually bites is the neutral 45.
+  exposureBand: {
+    version: 'A',
+    defensive: { lowPercent: 0, highPercent: 20 },
+    neutral: { lowPercent: 20, highPercent: 45 },
+    constructive: { lowPercent: 45, highPercent: 70 },
   },
 
   decision: {
@@ -1032,6 +1137,51 @@ export function validateTransitionConfig(cfg: TransitionConfig): void {
 validateTransitionConfig(config.transition);
 
 /**
+ * Fails fast on a band that could not behave — the same three checks `validateBandPolicy`
+ * runs in the calibration harness, restated here so production bounds its own configuration
+ * at boot instead of trusting a harness it deliberately does not import.
+ *
+ * The FOURTH check is the one only production can make: a floor above what the cash floor
+ * allows to be deployed. `caps.minCashPercent` bounds total exposure at `100 − minCash`, so a
+ * band floor above that would be unreachable on EVERY cycle in that context — the correction
+ * would journal a shortfall forever and nobody would be able to tell a policy that cannot be
+ * satisfied from a market that never allowed it. Exported for the offline test.
+ */
+export function validateExposureBandConfig(cfg: ExposureBandConfig, policy: AppConfig = config): void {
+  const problems: string[] = [];
+  if (typeof cfg.version !== 'string' || cfg.version.trim() === '') {
+    problems.push('version must be a non-empty string');
+  }
+  const maxDeployable = 100 - policy.execution.caps.minCashPercent;
+  for (const state of ['defensive', 'neutral', 'constructive'] as const) {
+    const band = cfg[state];
+    for (const [label, value] of [
+      ['lowPercent', band.lowPercent],
+      ['highPercent', band.highPercent],
+    ] as const) {
+      if (!(Number.isFinite(value) && value >= 0 && value <= 100)) {
+        problems.push(`${state}.${label} must be in [0, 100] (got ${value})`);
+      }
+    }
+    if (band.lowPercent > band.highPercent) {
+      problems.push(`${state}: low (${band.lowPercent}) must not exceed high (${band.highPercent})`);
+    }
+    if (band.lowPercent > maxDeployable) {
+      problems.push(
+        `${state}.lowPercent (${band.lowPercent}) is above the ${maxDeployable}% the ` +
+          `${policy.execution.caps.minCashPercent}% cash floor allows to be deployed — the floor ` +
+          'could never be reached, on any cycle',
+      );
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(`Invalid exposure band config: ${problems.join('; ')}`);
+  }
+}
+
+validateExposureBandConfig(config.exposureBand);
+
+/**
  * The strategy in force for this process, resolved ONCE at startup so a malformed
  * value fails the boot rather than surfacing mid-cycle — and so the whole run cannot
  * change strategy under its own feet.
@@ -1051,6 +1201,14 @@ export const COHERENCE_GUARD: boolean = resolveCoherenceGuard();
  * the gate does, or what the model is shown, under its own feet.
  */
 export const TRANSITION_MODE: TransitionMode = resolveTransitionMode();
+
+/**
+ * The exposure band's mode for this process, resolved ONCE at startup so a malformed value
+ * fails the boot rather than surfacing mid-cycle — and so a run cannot arm or disarm the
+ * pilot under its own feet. `off` unless explicitly set; `application` is refused by this
+ * build (see `resolveExposureBandMode`).
+ */
+export const EXPOSURE_BAND_MODE: ExposureBandMode = resolveExposureBandMode();
 
 /**
  * Fails fast on `enforce` + `v4`, a combination that blocks in silence.
