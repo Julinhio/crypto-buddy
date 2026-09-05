@@ -607,6 +607,17 @@ export async function decide(): Promise<DecideResult> {
     targetAllocation: Record<string, number> | null,
     /** The model's raw proposal, for the published comparison. */
     rawAllocation: Record<string, number> | null,
+    /**
+     * The book's exposure before the decision — passed in rather than read from `portfolio`,
+     * because ONE path must not publish it.
+     *
+     * When the execution journal cannot be read, `derivePortfolio` returns a 100%-cash book
+     * that does not exist. That fallback is safe for the cycle (it refuses to trade on it) and
+     * it is NOT safe to journal: a fabricated 0% exposure is indistinguishable, to any later
+     * reader, from a book that really was flat. So that path passes null, and every other path
+     * passes what it actually measured.
+     */
+    bookExposurePercent: number | null,
   ): Promise<void> => {
     if (EXPOSURE_BAND_MODE === 'off') return;
     // No decision row means no foreign key to hang the observation on. Nothing is lost that
@@ -628,7 +639,7 @@ export async function decide(): Promise<DecideResult> {
       universe: tradableBaseAssets(config),
       targetAllocation,
       rawAllocation,
-      bookExposurePercent: portfolio.deployedPercent.toNumber(),
+      bookExposurePercent,
       reserveAsset: reserveStable,
       // The HOISTED verdicts — the very objects the payload and the gate used this cycle.
       // Recomputing them would risk journaling a second opinion about the freeze.
@@ -694,6 +705,14 @@ export async function decide(): Promise<DecideResult> {
     // thing being avoided. The market-data trace is NOT in that category: it records what
     // the exchange did, not what the book looks like, and this cycle may well have been
     // blind on top of failing its lifecycle read.
+    //
+    // The BAND OBSERVATION is not in that category either, and it is the one place this path
+    // differs from its neighbour `observeTransition`. The decision row IS persisted here, so a
+    // cycle missing from `exposure_band_observations` would be a hole in the population the
+    // closure protocol counts bars from — biasing the denominators of every rate published on
+    // it. It is recorded with no target (`gap='no_target'`) and, crucially, with a NULL book
+    // exposure: the fallback book is the very thing this branch exists to distrust.
+    await observeExposureBand(id, null, null, null);
     await observeMarketDataOutage(id);
     return emptyResult('skipped', persisted, id, row, portfolio, marketData);
   }
@@ -708,7 +727,7 @@ export async function decide(): Promise<DecideResult> {
     const { persisted, id } = await insertDecision(supabase, row);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
-    await observeExposureBand(id, null, null);
+    await observeExposureBand(id, null, null, portfolio.deployedPercent.toNumber());
     await observeMarketDataOutage(id);
     return emptyResult('skipped', persisted, id, row, portfolio, marketData);
   }
@@ -877,7 +896,7 @@ export async function decide(): Promise<DecideResult> {
     await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
-    await observeExposureBand(id, null, null);
+    await observeExposureBand(id, null, null, portfolio.deployedPercent.toNumber());
     await observeMarketDataOutage(id);
     // The stop may have been armed on this book. Nothing is placed here — the alert only
     // makes the gap visible. See alertArmedStopNotFired.
@@ -929,7 +948,7 @@ export async function decide(): Promise<DecideResult> {
     guardEvents.push(event);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
-    await observeExposureBand(id, null, null);
+    await observeExposureBand(id, null, null, portfolio.deployedPercent.toNumber());
     await observeMarketDataOutage(id);
     // After persistLifecycle, so anything it queued is written too. It cannot queue a
     // refusal here (it is called with no notes), but the ordering is the same on every
@@ -991,7 +1010,7 @@ export async function decide(): Promise<DecideResult> {
     await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
-    await observeExposureBand(id, null, null);
+    await observeExposureBand(id, null, null, portfolio.deployedPercent.toNumber());
     await observeMarketDataOutage(id);
     await alertArmedStopNotFired('parse_failed');
     return emptyResult('parse_failed', persisted, id, row, portfolio, marketData);
@@ -1377,7 +1396,7 @@ export async function decide(): Promise<DecideResult> {
   // placed, and its result is discarded — see the closure's header.
   await observeTransition(id, bookedLedger, proposedMovements);
   // The CLAMPED target — where the correction will sit when it becomes real. See the closure.
-  await observeExposureBand(id, clamp.applied, v.targetAllocation);
+  await observeExposureBand(id, clamp.applied, v.targetAllocation, portfolio.deployedPercent.toNumber());
 
   /**
    * THE REFUSED-INTENTION LEDGER — opened here, resolved here, read by nobody in this file.

@@ -60,6 +60,7 @@ interface DecisionRead {
   market_context: unknown;
   target_allocation: unknown;
   applied_allocation: unknown;
+  applied_divergence_cause: unknown;
 }
 
 interface GateRead {
@@ -126,7 +127,10 @@ async function loadDecisions(
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await supabase
       .from('decisions')
-      .select('id, created_at, status, regime, market_context, target_allocation, applied_allocation')
+      .select(
+        'id, created_at, status, regime, market_context, target_allocation, applied_allocation, ' +
+          'applied_divergence_cause',
+      )
       .eq('prompt_version', 'v5')
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
@@ -207,6 +211,26 @@ async function main(): Promise<void> {
   const statuses: Record<string, number> = {};
   const malformed: Array<{ id: number; detail: string }> = [];
   const cyclesWithGates: number[] = [];
+  /**
+   * CYCLES WHOSE `applied_allocation` IS NOT THE PRE-GATE TARGET.
+   *
+   * The live observer assesses `clamp.applied` — the risk-clamped proposal, before the
+   * transition gate has spoken. `applied_allocation` normally holds exactly that. It does NOT
+   * on a cycle the gate REFUSED under `enforce`: clause 3 of `applyGate` stores the PREVIOUS
+   * effective vector there instead, so the column describes last cycle's target.
+   *
+   * Feeding that to the assessment would report the wrong exposure, the wrong direction and
+   * the wrong amplitude for those cycles — silently. And the pre-gate target is not
+   * recoverable from the journal: re-running `clampAllocation` would apply TODAY's caps to a
+   * historical proposal, which is a guess that happens to be right only while the caps have
+   * not moved.
+   *
+   * So they are EXCLUDED and COUNTED, and C0 fails if there are any. Zero today — the corpus
+   * ran entirely under `TRANSITION_MODE=observe` and no row carries a divergence cause — but
+   * arming the gate is a planned step, and the day it happens this tool must stop rather than
+   * publish a bite over a corpus it can no longer read correctly.
+   */
+  const postGateOnly: number[] = [];
 
   for (const decision of decisions) {
     statuses[decision.status] = (statuses[decision.status] ?? 0) + 1;
@@ -220,6 +244,11 @@ async function main(): Promise<void> {
       // reads. It is named and it fails the run, never degraded to "no context" — that would
       // hide the very defect it should be shouting about.
       malformed.push({ id: decision.id, detail: err instanceof Error ? err.message : String(err) });
+      continue;
+    }
+
+    if (decision.applied_divergence_cause != null) {
+      postGateOnly.push(decision.id);
       continue;
     }
 
@@ -258,7 +287,8 @@ async function main(): Promise<void> {
   // ── C0 — the corpus is what we think it is ────────────────────────────────────────
   {
     const withRegime = rows.filter((r) => r.bar_at != null).length;
-    const ok = malformed.length === 0 && rows.length === decisions.length;
+    const ok =
+      malformed.length === 0 && postGateOnly.length === 0 && rows.length === decisions.length;
     record('C0', 'le corpus est exploitable et aucun journal de régime n\'est corrompu', ok, [
       `${decisions.length} cycles v5 · ${Object.entries(statuses).map(([s, n]) => `${s}=${n}`).join(' · ')}.`,
       `${withRegime} portent un régime · ${rows.length - withRegime} n'en portent aucun (compté à part, jamais neutre).`,
@@ -266,6 +296,15 @@ async function main(): Promise<void> {
       malformed.length === 0
         ? 'Aucun journal de régime malformé.'
         : `MALFORMÉS : ${malformed.map((m) => `#${m.id} (${m.detail})`).join(' | ')}`,
+      postGateOnly.length === 0
+        ? "Aucun cycle ne porte d'applied_divergence_cause : sur tout le corpus, " +
+          "applied_allocation EST la cible pré-porte que l'observateur vivant évalue."
+        : `EXCLUS — ${postGateOnly.length} cycle(s) refusés par la porte ` +
+          `(${postGateOnly.join(', ')}) : leur applied_allocation porte le vecteur du cycle ` +
+          "PRÉCÉDENT, pas la cible pré-porte. La cible réelle n'est pas récupérable (rejouer le " +
+          "clamp appliquerait les plafonds D'AUJOURD'HUI à une proposition historique), donc ils " +
+          "sont écartés et ce critère ÉCHOUE : mieux vaut pas de morsure qu'une morsure sur un " +
+          'corpus mal lu.',
     ]);
   }
 

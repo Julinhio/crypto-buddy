@@ -624,7 +624,34 @@ console.log('\nProof 13 — the band cannot change what the bot does:');
   const callSites = [...decide.matchAll(/^.*observeExposureBand\(.*$/gm)].map((m) => m[0]!.trim());
   ok(`every call site is a bare await (${callSites.length} sites)`, callSites.filter((l) => l.startsWith('await ') || l.startsWith('const observeExposureBand')).length === callSites.length);
 
-  // (d) IT RUNS AFTER THE ORDERS. On the decided path the observation sits after
+  // (d) EVERY PERSISTED TERMINAL PATH OBSERVES. This is the invariant the first review round
+  // caught me breaking: the lifecycle-read-failure skip persisted a `decisions` row and
+  // returned WITHOUT observing, so those cycles vanished from the band population — biasing
+  // the denominator of every rate the closure protocol computes from it.
+  //
+  // `observeMarketDataOutage` is the reference set: it is called from every path that reaches
+  // a persisted decision, deliberately and for the same reason. Counting against it turns "did
+  // I remember all six" into arithmetic instead of a re-read.
+  const outageCalls = [...decide.matchAll(/await observeMarketDataOutage\(/g)].length;
+  const bandCalls = [...decide.matchAll(/await observeExposureBand\(/g)].length;
+  ok(
+    `the band observes on all ${outageCalls} persisted terminal paths, like the outage trace`,
+    bandCalls === outageCalls && outageCalls >= 6,
+  );
+
+  // And the ONE path that must not publish a book exposure does not: when the execution
+  // journal cannot be read, `derivePortfolio` returns a 100%-cash book that does not exist,
+  // and a fabricated 0% would be indistinguishable from a book that really was flat.
+  ok(
+    'the lifecycle-read-failure skip passes a NULL book exposure',
+    decide.includes('await observeExposureBand(id, null, null, null);'),
+  );
+  ok(
+    'and it is the only call site that does',
+    [...decide.matchAll(/await observeExposureBand\(id, null, null, null\);/g)].length === 1,
+  );
+
+  // (e) IT RUNS AFTER THE ORDERS. On the decided path the observation sits after
   // `executeMovements` — the same tier as the transition observation and the equity snapshot
   // — so a stalled insert cannot burn the cycle budget and let the watchdog force-exit.
   ok(
@@ -636,7 +663,7 @@ console.log('\nProof 13 — the band cannot change what the bot does:');
     decide.lastIndexOf('await observeTransition(') < decide.lastIndexOf('await observeExposureBand('),
   );
 
-  // (e) NO PRODUCTION PATH READS THE BAND'S OUTPUT. The band writes; nothing reads back.
+  // (f) NO PRODUCTION PATH READS THE BAND'S OUTPUT. The band writes; nothing reads back.
   const production = sourceFiles(path.join(ROOT, 'src')).filter(
     (file) =>
       !file.includes(`${path.sep}test${path.sep}`) &&
@@ -644,13 +671,18 @@ console.log('\nProof 13 — the band cannot change what the bot does:');
       !file.includes(`${path.sep}exposure${path.sep}`) &&
       !file.endsWith(path.join('persistence', 'exposureBandObservations.ts')),
   );
-  const readers = production.filter((file) => /exposure_band_observations/.test(readFileSync(file, 'utf8')));
+  // The QUERY, not the name. A table can only be reached through `.from('<table>')`, so that
+  // is the tight check; grepping the bare name would flag a comment that merely mentions it,
+  // which is how this assertion first fired — on a comment explaining why the band writes.
+  const readers = production.filter((file) =>
+    /\.from\(\s*'exposure_band_observations'/.test(readFileSync(file, 'utf8')),
+  );
   ok(
     `no production file outside the band reads its table (${readers.map((f) => path.basename(f)).join(', ') || 'none'})`,
     readers.length === 0,
   );
 
-  // (f) THE BAND'S OWN MODULE GRAPH NAMES NO WRITE. `band.ts` and `observe.ts` are pure: the
+  // (g) THE BAND'S OWN MODULE GRAPH NAMES NO WRITE. `band.ts` and `observe.ts` are pure: the
   // only file allowed to touch the database is the writer, and it is not in their graph.
   const bandGraph = new Set([
     ...moduleGraph(path.join(ROOT, 'src/exposure/band.ts')),
