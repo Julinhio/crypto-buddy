@@ -600,9 +600,23 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
       if (delta === 0 && !line.mayIncrease && !line.mayDecrease) cause = 'gel';
       else if (delta > 0 && Math.abs(corrected - (capOf.get(line.asset) ?? corrected)) <= EPS) {
         cause = 'plafond_individuel';
-      } else if (dropped != null) {
-        cause = dropped.reason === 'no_price' ? 'autre_impossibilite' : 'seuil_de_mouvement';
+      } else if (dropped?.reason === 'movement_floor') {
+        cause = 'seuil_de_mouvement';
+      } else if (dropped?.reason === 'no_price') {
+        cause = 'autre_impossibilite';
       } else if (delta === 0 && !line.mayIncrease) cause = 'gel';
+      // DUST IS NOT A BLOCKAGE, and it deliberately leaves the cause at `aucune`.
+      //
+      // A zero-notional leg means the corrected weight is where the book already is. When the
+      // band LIFTS a line to a weight the book happens to hold — target 10, floor 20, book
+      // already at 20 — the correction is fully realised: it prevented a sell that would
+      // otherwise have executed. Calling that `seuil_de_mouvement` says the plumbing stopped a
+      // correction that in fact succeeded, and contradicts the same outcome's own label and its
+      // zero gap.
+      //
+      // Nothing is lost by staying silent here: the dust entry is journaled on its own, in
+      // `suppressed_reason`, where "there was nothing to move" reads as itself rather than as a
+      // threshold refusing something.
 
       return {
         asset: line.asset,

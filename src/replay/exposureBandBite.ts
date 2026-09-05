@@ -296,7 +296,20 @@ async function main(): Promise<void> {
      * coherence replay. A second one built here would eventually disagree with it about the
      * very quantity every leg is sized against.
      */
-    if (observation.assessment != null) {
+    // ONLY WHERE THE FEASIBILITY IS KNOWN, and that condition is the whole point of the flag.
+    //
+    // On the fortnight of v5 predating the transition layer there are no per-asset verdicts, so
+    // `observeBand` sets `feasibility_known` to false — it is the field that says "nobody can
+    // answer this". Running the redistribution anyway made every line fail closed for want of a
+    // verdict, and the outcome then ASSERTED an unchanged allocation, a fabricated realised gap
+    // and a `bande_partiellement_irrealisable` label, overwriting the deliberately non-committal
+    // one. None of the seven criteria read those values, but `bite.json` carried them on 185
+    // cycles — and that artefact is precisely what brick 3 will reconstruct from.
+    //
+    // So the correction facts stay INDETERMINATE where they are indeterminate. The observation
+    // facts the cycle really does carry — its context, its bar, its exposures, its feasibility
+    // flag — are published as before.
+    if (observation.assessment != null && observation.assessment.feasibility.known) {
       const ctx = decision.market_context as StoredContext;
       const correction = correctToBand({
         assessment: observation.assessment,

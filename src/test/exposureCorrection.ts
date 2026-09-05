@@ -1034,6 +1034,88 @@ console.log('Proof 20 — every suppressed leg says why, including the ones wort
   );
 }
 
+// ── PROOF 21 — two attributions that were saying the wrong thing ─────────────
+console.log('\nProof 21 — a cause is only claimed by whoever actually caused it:');
+{
+  // (a) DUST IS NOT A BLOCKAGE BY THE 2% FLOOR.
+  //
+  // The band lifts a 10% target to the 20% floor while the book ALREADY holds 20%. The
+  // correction is fully realised — it prevented a sell that would otherwise have executed —
+  // and the resulting zero-notional leg is recorded as `dust`. Reading that as
+  // `seuil_de_mouvement` said the plumbing stopped a correction that in fact succeeded, and
+  // contradicted the same outcome's own label and its zero gap.
+  const alreadyThere = correct({
+    state: 'neutral',
+    target: { BTC: 10, ETH: 0, BNB: 0, XRP: 0 },
+    book: { BTC: 20 },
+  });
+  const btc = lineOf(alreadyThere, 'BTC');
+  ok('[poussière] the band lifts the target to the floor', near(btc.correctedWeightPercent, 20));
+  ok('the book already holds it, so nothing needs to move', alreadyThere.movements.length === 0);
+  ok('and the correction is fully realised', near(alreadyThere.realisedExposurePercent, 20) && alreadyThere.unrealisablePoints === 0);
+  ok('the label says so', alreadyThere.label === 'hausse_vers_plancher');
+  ok('the line claims NO cause — nothing blocked it', btc.cause === 'aucune');
+  ok(
+    'while the dust entry is still journaled on its own',
+    alreadyThere.suppressed.some((leg) => leg.asset === 'BTC' && leg.reason === 'dust'),
+  );
+
+  // The two causes that ARE blockages keep theirs, so the fix did not simply mute the branch.
+  const belowFloor = correct({
+    state: 'neutral',
+    target: { BTC: 19, ETH: 0, BNB: 0, XRP: 0 },
+    book: { BTC: 19 },
+  });
+  ok(
+    'a leg the 2% floor really deletes still names the threshold',
+    lineOf(belowFloor, 'BTC').cause === 'seuil_de_mouvement',
+  );
+  ok(
+    'and it is a movement_floor suppression, not a dust one',
+    belowFloor.suppressed.some((leg) => leg.asset === 'BTC' && leg.reason === 'movement_floor'),
+  );
+
+  // (b) THE REPLAY DOES NOT REDISTRIBUTE WHERE FEASIBILITY IS UNKNOWABLE.
+  //
+  // `feasibility_known` is the field that says "nobody can answer this". Running the
+  // redistribution anyway made every line fail closed for want of a verdict, and the outcome
+  // then asserted a fabricated gap and overwrote the deliberately non-committal label — into
+  // `bite.json`, which is what brick 3 will reconstruct from.
+  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandBite.ts'), 'utf8');
+  ok(
+    'the replay guards the redistribution on the feasibility flag',
+    /if \(observation\.assessment != null && observation\.assessment\.feasibility\.known\) \{/.test(replay),
+  );
+  ok(
+    'and there is exactly one call to correctToBand behind it',
+    [...replay.matchAll(/correctToBand\(\{/g)].length === 1,
+  );
+
+  // The assessment really does report the flag as false when no verdict exists — the condition
+  // above is only worth anything if the flag it reads is the one that means it.
+  const noVerdicts = assessBand({
+    policyVersion: 'A',
+    policy: config.exposureBand,
+    state: 'constructive',
+    targetAllocation: { BTC: 10, ETH: 10, BNB: 0, XRP: 0, USDT: 80 },
+    rawAllocation: null,
+    bookExposurePercent: 20,
+    reserveAsset: RESERVE,
+    gateByAsset: new Map(),
+    capOf,
+    maxDeployablePercent: 70,
+    equityQuote: 1000,
+    movementFloorQuote: 20,
+    stoppedWeightSurvives: true,
+  });
+  ok('an assessment with no verdict reports its feasibility unknown', noVerdicts.feasibility.known === false);
+  ok(
+    'and every feasibility number is null rather than a fabricated zero',
+    noVerdicts.feasibility.attainableExposurePercent === null &&
+      noVerdicts.feasibility.unrealisablePoints === null,
+  );
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────────
 
 /**
