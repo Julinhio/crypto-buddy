@@ -1,3 +1,4 @@
+import { Decimal, ZERO } from '../money.js';
 import type { PriceLookup, VirtualPortfolio } from '../portfolio/derive.js';
 import { planMovements, type Movement, type SuppressedLeg } from '../execution/movements.js';
 import type { BandAssessment, BandCorrectionLabel, BandLineView } from './band.js';
@@ -68,8 +69,23 @@ export interface CorrectedLine {
   asset: string;
   /** FACT 1, per line — the model's raw weight, before the risk clamp. */
   rawWeightPercent: number | null;
-  /** The risk-clamped weight the correction started from. */
+  /** The model's weight after the risk clamp — what it asked for, bounded. */
   clampedWeightPercent: number;
+  /**
+   * THE WEIGHT THE CORRECTION ACTUALLY STARTED FROM, and it is not always the clamped one.
+   *
+   * On a peak-stopped line under `enforce`, `applyGate` is about to take the line to zero, so
+   * the chain will pursue 0 whatever the model asked. The correction sizes itself against that
+   * zero — and `correctionPoints` is therefore measured from HERE, not from the clamped
+   * weight.
+   *
+   * The distinction is not cosmetic. Publishing the clamped weight while computing the delta
+   * from this one produced rows like (clamped 20, correction 0, corrected 0), which violate the
+   * migration's `base + correction = corrected` CHECK — and because the rows are upserted as
+   * one batch, a single such line would have silently destroyed the whole cycle's correction
+   * journal. Two columns, one arithmetic.
+   */
+  baseWeightPercent: number;
   /** FACT 2, per line — signed points the band added or removed. */
   correctionPoints: number;
   /** FACT 3, per line — the weight handed to the execution engine. */
@@ -97,8 +113,23 @@ export interface CorrectionOutcome {
    * does not. This is the number the band is really judged on, and it is not the target.
    */
   realisedExposurePercent: number;
-  /** Points still outside the band after the maximum feasible correction. §3.4.4 / §3.5.6. */
+  /**
+   * Points still outside the band after the maximum feasible correction. §3.4.4 / §3.5.6.
+   *
+   * NET OF THE FEE. Moving costs money, and the cost lands on the exposure itself: a buy is
+   * sized from the cash budget and then divided by `(1 + fee)`, so a correction that asks for
+   * 25 points delivers about 24.985 of them. The protocol's projection is "the smallest move
+   * that satisfies the constraint" — it cannot ask for more than the constraint to pay for its
+   * own execution, so a residual no larger than `feeDragPoints` is the price of the move, not
+   * a band that could not be reached.
+   *
+   * Without that subtraction EVERY upward correction would be labelled
+   * `bande_partiellement_irrealisable` over a hundredth of a point, and the label would stop
+   * meaning "something blocked this" — which is the only thing it is for.
+   */
   unrealisablePoints: number;
+  /** The fee this plan would pay, in points of equity. The tolerance above, made explicit. */
+  feeDragPoints: number;
   /**
    * Did §3.5.5 actually CHANGE the outcome — is the retained plan a narrowed one?
    *
@@ -114,8 +145,34 @@ export interface CorrectionOutcome {
   /** How many narrowings were evaluated. Published so a silent early exit would be visible. */
   consolidationAttempts: number;
   lines: CorrectedLine[];
-  /** The legs the plan would send. Empty in observation mode's counterfactual sense. */
+  /**
+   * The legs the plan would send.
+   *
+   * Under `gateEnforces`, a leg the transition layer forbids on its own line is NOT here: the
+   * gate would refuse it, and counting it would credit the correction with a movement that
+   * never leaves. Those legs are reported in `gated` instead.
+   */
   movements: Movement[];
+  /**
+   * Legs the transition gate would refuse on their own account. Always empty while the gate
+   * only observes — there it blocks nothing, and the leg really would be sent.
+   *
+   * They are the MODEL's legs, never the correction's: the correction cannot create a movement
+   * on a line it may not touch. What they represent is the model's own target-versus-book gap
+   * on a frozen line.
+   */
+  gated: Movement[];
+  /**
+   * True when at least one strategic leg is individually forbidden.
+   *
+   * THE LIMIT OF THIS FUNCTION, stated rather than modelled: `vector.ts` refuses a portfolio
+   * target WHOLE or not at all, so one forbidden leg suppresses every strategic leg of the
+   * cycle. Reproducing that here would be a second implementation of the gate, which this
+   * codebase forbids for good reason — so the correction reports the RISK and leaves the
+   * decision to `applyGate`, downstream. While that flag is true, `realisedExposurePercent`
+   * is an upper bound rather than a prediction.
+   */
+  atomicRefusalRisk: boolean;
   /** §3.3 and §3.6.4 — the legs the floor deleted stay visible. */
   suppressed: SuppressedLeg[];
 }
@@ -132,6 +189,16 @@ export interface CorrectInput {
   priceOf: PriceLookup;
   feePercent: number;
   minMovementPercent: number;
+  /**
+   * Is the transition gate BLOCKING this run (`TRANSITION_MODE=enforce`)?
+   *
+   * It changes what "would be sent" means, and nothing else. Under `observe` the gate refuses
+   * nothing, so the model's leg on a frozen line really does execute and belongs in the plan;
+   * under `enforce` it is refused, and counting it would overstate what the correction
+   * achieves. Passed in rather than imported, like every other input here, so this file stays
+   * pure and the replay can set it from what the corpus actually ran under.
+   */
+  gateEnforces: boolean;
 }
 
 /** Percentages are not money — the same tolerance the risk wrapper uses, for the same reason. */
@@ -380,7 +447,13 @@ function planFor(
   input: CorrectInput,
   weights: Map<string, number>,
   totalPercent: number,
-): { allocation: Record<string, number>; movements: Movement[]; suppressed: SuppressedLeg[] } {
+  capability: ReadonlyMap<string, LineCapabilityView>,
+): {
+  allocation: Record<string, number>;
+  movements: Movement[];
+  gated: Movement[];
+  suppressed: SuppressedLeg[];
+} {
   const allocation = allocationFrom(weights, input.reserveAsset, totalPercent);
   const plan = planMovements(
     input.portfolio,
@@ -393,27 +466,85 @@ function planFor(
     // lines would be indistinguishable from the real cycle's own refusals in the logs.
     ':band',
   );
-  return { allocation, movements: plan.movements, suppressed: plan.suppressed };
+  // WHAT THE GATE WOULD REFUSE ON ITS OWN ACCOUNT. Not a re-implementation of `applyGate`:
+  // it is the same capability map the correction already obeys, applied to the legs the plan
+  // produced. A leg is the MODEL's here — the correction never moves a line it may not touch —
+  // and it exists because the model's target and the book disagree on a frozen line.
+  if (!input.gateEnforces) {
+    return { allocation, movements: plan.movements, gated: [], suppressed: plan.suppressed };
+  }
+  const movements: Movement[] = [];
+  const gated: Movement[] = [];
+  for (const movement of plan.movements) {
+    const line = capability.get(movement.asset);
+    const allowed = movement.side === 'buy' ? line?.mayIncrease : line?.mayDecrease;
+    if (allowed === true) movements.push(movement);
+    else gated.push(movement);
+  }
+  return { allocation, movements, gated, suppressed: plan.suppressed };
+}
+
+/** The two permissions a line carries, as `planFor` needs them. */
+interface LineCapabilityView {
+  mayIncrease: boolean;
+  mayDecrease: boolean;
 }
 
 /**
  * WHAT THE BOOK WOULD REALLY HOLD after a plan — the number the band is judged on.
  *
- * A line whose leg survives lands on its corrected weight. A line whose leg the floor deleted
- * does NOT: it stays exactly where the book already had it. Summing the target instead would
- * report an exposure the cycle never reached, which is the precise failure §3.3 exists to
- * prevent by separating fact 3 from fact 4.
+ * REPLAYED FROM THE MOVEMENTS THEMSELVES, never from the target. The first version of this
+ * assumed that any line carrying a surviving leg lands exactly on its corrected weight, and
+ * that is false in two ways the review caught:
+ *
+ *   - a BUY is sized from the cash budget and then divided by `(1 + fee)`, so it lands short
+ *     of the requested delta by the fee;
+ *   - every leg's fee comes out of equity, so the DENOMINATOR moves too — a plan that traded
+ *     nothing but fees would still shift every weight.
+ *
+ * Assuming the target would have let an upward correction report "floor reached, zero gap"
+ * while the planned fills leave the book under it. That is exactly the confusion §3.3 exists
+ * to prevent, so the arithmetic is done on the notionals: value in, value out, fees off equity.
  */
+/** The fee a plan would pay, in points of equity — the exposure it costs to move. */
+function feeDrag(portfolio: VirtualPortfolio, movements: readonly Movement[]): number {
+  const equity = portfolio.equity;
+  if (!equity.gt(0)) return 0;
+  let fees = ZERO;
+  for (const movement of movements) fees = fees.plus(movement.fee);
+  return round(fees.div(equity).times(100).toNumber());
+}
+
 function realisedExposure(
-  weights: Map<string, number>,
+  portfolio: VirtualPortfolio,
   book: Map<string, number>,
-  movedAssets: ReadonlySet<string>,
+  movements: readonly Movement[],
 ): number {
-  let total = 0;
-  for (const [asset, weight] of weights) {
-    total += movedAssets.has(asset) ? weight : (book.get(asset) ?? 0);
+  const equity = portfolio.equity;
+  if (!equity.gt(0)) return round(0);
+
+  const valueOf = new Map<string, Decimal>();
+  for (const [asset, weight] of book) valueOf.set(asset, equity.times(weight).div(100));
+
+  let fees = ZERO;
+  for (const movement of movements) {
+    const current = valueOf.get(movement.asset) ?? ZERO;
+    valueOf.set(
+      movement.asset,
+      movement.side === 'buy' ? current.plus(movement.notional) : current.minus(movement.notional),
+    );
+    fees = fees.plus(movement.fee);
   }
-  return round(total);
+
+  // Both legs pay their fee out of equity: a buy spends notional + fee of cash for notional of
+  // coin, a sell gives up notional of coin for notional − fee of cash. Either way the book is
+  // smaller by the fee afterwards, and the weights are read against THAT equity.
+  const after = equity.minus(fees);
+  if (!after.gt(0)) return round(0);
+
+  let exposure = ZERO;
+  for (const value of valueOf.values()) exposure = exposure.plus(Decimal.max(value, ZERO));
+  return round(exposure.div(after).times(100).toNumber());
 }
 
 /**
@@ -430,6 +561,9 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
 
   const baseWeights = new Map<string, number>(lines.map((l) => [l.asset, l.weightPercent]));
   const capOf = new Map(lines.map((l) => [l.asset, l.capPercent]));
+  const capability = new Map(
+    lines.map((l) => [l.asset, { mayIncrease: l.mayIncrease, mayDecrease: l.mayDecrease }]),
+  );
 
   const buildLines = (
     weights: Map<string, number>,
@@ -459,6 +593,10 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
         asset: line.asset,
         rawWeightPercent: rawAllocation?.[line.asset] ?? null,
         clampedWeightPercent: line.targetWeightPercent,
+        // THE BASE OF THE ARITHMETIC, which is what `delta` was measured from. On a stopped
+        // line under `enforce` it is 0 while the clamped weight is whatever the model asked —
+        // and publishing only the latter is what broke the migration's CHECK.
+        baseWeightPercent: line.weightPercent,
         correctionPoints: delta,
         correctedWeightPercent: corrected,
         origin,
@@ -473,20 +611,22 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
 
   // ── NO CORRECTION DUE ──────────────────────────────────────────────────────────────
   if (assessment.direction === 'none') {
-    const plan = planFor(input, baseWeights, totalPercent);
-    const moved = new Set(plan.movements.map((m) => m.asset));
+    const plan = planFor(input, baseWeights, totalPercent, capability);
     return {
       label: 'aucune_correction',
       direction: 'none',
       correctedAllocation: { ...clampedAllocation },
       correctedExposurePercent: assessment.targetExposurePercent,
-      realisedExposurePercent: realisedExposure(baseWeights, book, moved),
+      realisedExposurePercent: realisedExposure(input.portfolio, book, plan.movements),
       unrealisablePoints: 0,
+      feeDragPoints: feeDrag(input.portfolio, plan.movements),
       consolidated: false,
       consolidationRounds: 0,
       consolidationAttempts: 0,
       lines: buildLines(baseWeights, new Map(), plan.suppressed),
       movements: plan.movements,
+      gated: plan.gated,
+      atomicRefusalRisk: plan.gated.length > 0,
       suppressed: plan.suppressed,
     };
   }
@@ -497,12 +637,14 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
   // ── THE CEILING — one pass, no consolidation (see `distributeToCeiling`) ───────────
   if (assessment.direction === 'down') {
     const pass = distributeToCeiling(lines, bound);
-    const plan = planFor(input, pass.weights, totalPercent);
-    const moved = new Set(plan.movements.map((m) => m.asset));
-    const realised = realisedExposure(pass.weights, book, moved);
+    const plan = planFor(input, pass.weights, totalPercent, capability);
+    const realised = realisedExposure(input.portfolio, book, plan.movements);
     // The overshoot that survives: what the frozen lines force (pass.shortfall) OR what the
     // floor left un-sold. Both are "still above the ceiling", and both are journaled.
-    const unrealisable = round(Math.max(pass.shortfall, realised - bound, 0));
+    const drag = feeDrag(input.portfolio, plan.movements);
+    // The frozen shortfall is structural and owes nothing to the fee; only the realised
+    // overshoot gets the tolerance.
+    const unrealisable = round(Math.max(pass.shortfall, realised - bound - drag, 0));
     return {
       label: unrealisable > 0 ? 'bande_partiellement_irrealisable' : 'baisse_vers_plafond',
       direction: 'down',
@@ -510,11 +652,14 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
       correctedExposurePercent: exposureOf(plan.allocation, reserveAsset),
       realisedExposurePercent: realised,
       unrealisablePoints: unrealisable,
+      feeDragPoints: drag,
       consolidated: false,
       consolidationRounds: 0,
       consolidationAttempts: 0,
       lines: buildLines(pass.weights, pass.origins, plan.suppressed),
       movements: plan.movements,
+      gated: plan.gated,
+      atomicRefusalRisk: plan.gated.length > 0,
       suppressed: plan.suppressed,
     };
   }
@@ -555,9 +700,8 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
     attempts += 1;
     const excluded = new Set(priority.slice(keep));
     const pass = distributeToFloor(lines, deficit, excluded);
-    const plan = planFor(input, pass.weights, totalPercent);
-    const moved = new Set(plan.movements.map((m) => m.asset));
-    const realised = realisedExposure(pass.weights, book, moved);
+    const plan = planFor(input, pass.weights, totalPercent, capability);
+    const realised = realisedExposure(input.portfolio, book, plan.movements);
 
     // KEEP THE BEST, not the last. Narrowing further can hit a cap and end up worse; taking
     // the last attempt would then publish a correction weaker than one already found. Strict
@@ -566,7 +710,10 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
       best = { pass, plan, realised };
       rounds = priority.length - keep;
     }
-    if (realised >= bound - EPS) break;
+    // Net of the fee, for the same reason the gap is: a plan cannot both reach the bound and
+    // pay for itself out of the same points, and narrowing further would chase a hundredth of
+    // a point it can never recover.
+    if (realised >= bound - feeDrag(input.portfolio, plan.movements) - EPS) break;
   }
 
   // No eligible line at all: the correction is entirely infeasible, and that is a fact rather
@@ -574,13 +721,13 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
   // whole deficit.
   if (best == null) {
     const pass = distributeToFloor(lines, deficit, new Set(priority));
-    const plan = planFor(input, pass.weights, totalPercent);
-    const moved = new Set(plan.movements.map((m) => m.asset));
-    best = { pass, plan, realised: realisedExposure(pass.weights, book, moved) };
+    const plan = planFor(input, pass.weights, totalPercent, capability);
+    best = { pass, plan, realised: realisedExposure(input.portfolio, book, plan.movements) };
   }
 
   const { pass, plan, realised } = best;
-  const unrealisable = round(Math.max(bound - realised, 0));
+  const drag = feeDrag(input.portfolio, plan.movements);
+  const unrealisable = round(Math.max(bound - realised - drag, 0));
   return {
     label: unrealisable > 0 ? 'bande_partiellement_irrealisable' : 'hausse_vers_plancher',
     direction: 'up',
@@ -588,11 +735,14 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
     correctedExposurePercent: exposureOf(plan.allocation, reserveAsset),
     realisedExposurePercent: realised,
     unrealisablePoints: unrealisable,
+    feeDragPoints: drag,
     consolidated: rounds > 0,
     consolidationRounds: rounds,
     consolidationAttempts: attempts,
     lines: buildLines(pass.weights, pass.origins, plan.suppressed),
     movements: plan.movements,
+    gated: plan.gated,
+    atomicRefusalRisk: plan.gated.length > 0,
     suppressed: plan.suppressed,
   };
 }

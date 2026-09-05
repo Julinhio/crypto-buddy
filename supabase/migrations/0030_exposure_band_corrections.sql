@@ -56,10 +56,19 @@ create table if not exists public.exposure_band_corrections (
   -- ── FAIT 1 — ce que le modèle a proposé ───────────────────────────────────────
   -- Null sur une ligne dont le cycle n'a pas journalisé de proposition brute.
   raw_weight_percent      numeric,
-  -- La proposition APRÈS le plafonnement de risque : le point de départ de la correction.
-  -- C'est là que la correction se placera quand elle deviendra effective — le garde a déjà
-  -- jugé l'intention brute à ce moment, et la porte de transition n'a pas encore parlé.
+  -- La proposition APRÈS le plafonnement de risque : ce que le modèle a demandé, borné.
   clamped_weight_percent  numeric not null,
+  -- LE POIDS DONT LA CORRECTION EST RÉELLEMENT PARTIE, et ce n'est pas toujours le précédent.
+  --
+  -- Sur une ligne sortie par le peak stop en mode `enforce`, `applyGate` s'apprête à la mettre
+  -- à zéro : la chaîne poursuivra 0 quoi que le modèle ait demandé, et la correction se
+  -- dimensionne contre ce zéro. `correction_points` se mesure donc À PARTIR D'ICI.
+  --
+  -- La distinction n'est pas cosmétique. Publier le poids plafonné tout en calculant l'écart
+  -- depuis celui-ci produisait des lignes (plafonné 20, correction 0, corrigé 0) qui violent la
+  -- contrainte ci-dessous — et comme les lignes sont écrites en un seul batch, une seule ligne
+  -- de ce type détruisait silencieusement TOUT le journal de correction du cycle.
+  base_weight_percent     numeric not null,
 
   -- ── FAIT 2 — ce que la bande a imposé ─────────────────────────────────────────
   -- Signé : positif vers le plancher, négatif vers le plafond, zéro si rien n'a bougé.
@@ -109,9 +118,10 @@ create table if not exists public.exposure_band_corrections (
   constraint exposure_band_corrections_suppressed_known
     check (suppressed_reason is null or suppressed_reason in ('movement_floor', 'no_price', 'dust')),
   -- Les faits 2 et 3 doivent se reconstruire l'un l'autre : une correction dont les trois
-  -- nombres ne s'additionnent pas n'est pas une correction, c'est trois colonnes.
+  -- nombres ne s'additionnent pas n'est pas une correction, c'est trois colonnes. Sur la BASE,
+  -- jamais sur le poids plafonné — voir base_weight_percent.
   constraint exposure_band_corrections_facts_reconcile
-    check (abs((clamped_weight_percent + correction_points) - corrected_weight_percent) < 0.000001),
+    check (abs((base_weight_percent + correction_points) - corrected_weight_percent) < 0.000001),
   -- Une ligne que la bande n'a pas touchée porte l'origine du modèle, et réciproquement.
   constraint exposure_band_corrections_origin_matches_move
     check ((correction_points = 0) = (origin = 'modele'))
@@ -119,6 +129,9 @@ create table if not exists public.exposure_band_corrections (
 
 comment on table public.exposure_band_corrections is
   'Le journal en quatre faits du pilote d''exposition contrainte, une ligne par (cycle, actif) : ce que le modele a propose, ce que la bande a impose, la cible finale, et ce qui a reellement bouge. En mode observation le fait 4 decrit le cycle reel du bot, qui n''est pas corrige — l''ecart avec le fait 3 EST la non-application de la correction.';
+
+comment on column public.exposure_band_corrections.base_weight_percent is
+  'Le poids dont la correction est reellement partie. Egal au poids plafonne, SAUF sur une ligne sortie par le peak stop en mode enforce, ou la chaine poursuit zero quoi que le modele ait demande. correction_points se mesure a partir d''ici, et la contrainte de reconciliation aussi.';
 
 comment on column public.exposure_band_corrections.origin is
   'modele / correction_de_bande / allocation_de_secours. Le troisieme n''exprime AUCUNE conviction du modele (§3.5.4) et est nomme a part pour que personne ne le relise plus tard comme s''il en exprimait une.';

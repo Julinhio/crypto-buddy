@@ -309,6 +309,10 @@ async function main(): Promise<void> {
         priceOf: pricesOf(ctx),
         feePercent: config.execution.feePercent,
         minMovementPercent: config.execution.minMovementPercent,
+        // The corpus ran entirely under `TRANSITION_MODE=observe`: zero rows carry an
+        // `applied_divergence_cause`, and C0 fails the run if one ever appears. So the gate
+        // refused nothing, and a leg on a frozen line really would have been sent.
+        gateEnforces: false,
       });
       observation.row.corrected_exposure_percent = correction.correctedExposurePercent;
       observation.row.realised_exposure_percent = correction.realisedExposurePercent;

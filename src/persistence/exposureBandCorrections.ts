@@ -25,6 +25,14 @@ export interface BandCorrectionInsert {
 
   raw_weight_percent: number | null;
   clamped_weight_percent: number;
+  /**
+   * The weight the correction started from — see `CorrectedLine.baseWeightPercent`.
+   *
+   * It is the one the migration's reconciliation CHECK is written on, because it is the one
+   * `correction_points` was measured from. Writing the clamped weight there instead broke
+   * every stop-exit cycle's whole batch, silently.
+   */
+  base_weight_percent: number;
   correction_points: number;
   origin: LineOrigin;
   cause: LineCause;
@@ -109,6 +117,7 @@ export function toCorrectionRows(input: ToCorrectionRowsInput): BandCorrectionIn
       asset: line.asset,
       raw_weight_percent: line.rawWeightPercent,
       clamped_weight_percent: line.clampedWeightPercent,
+      base_weight_percent: line.baseWeightPercent,
       correction_points: line.correctionPoints,
       origin: line.origin,
       cause: line.cause,

@@ -91,6 +91,8 @@ function correct(opts: {
   gates?: Map<string, TransitionGate>;
   equity?: number;
   raw?: Record<string, number> | null;
+  /** Defaults to today's production mode: the gate observes and refuses nothing. */
+  gateEnforces?: boolean;
 }): CorrectionOutcome {
   const equity = opts.equity ?? 1000;
   const portfolio = bookOf(opts.book ?? {}, equity);
@@ -127,6 +129,7 @@ function correct(opts: {
     priceOf,
     feePercent: config.execution.feePercent,
     minMovementPercent: config.execution.minMovementPercent,
+    gateEnforces: opts.gateEnforces ?? false,
   };
   return correctToBand(input);
 }
@@ -148,6 +151,18 @@ function lineOf(outcome: CorrectionOutcome, asset: string) {
  */
 function near(a: number, b: number, tol = 1e-5): boolean {
   return Math.abs(a - b) <= tol;
+}
+
+/**
+ * The same comparison, widened by what the plan's own fee costs in exposure points.
+ *
+ * Any number computed from what the book would REALLY hold carries the fee: the buy budget is
+ * divided by (1 + fee) and every leg's fee comes off equity. Asserting those to the sixth
+ * decimal would be asserting that trading is free. `feeDragPoints` publishes the amount, so
+ * the tolerance is a number the outcome itself declares rather than one chosen here.
+ */
+function nearNetOfFee(actual: number, expected: number, outcome: CorrectionOutcome): boolean {
+  return Math.abs(actual - expected) <= outcome.feeDragPoints + 1e-5;
 }
 
 // ── PROOF 1 — the cases that must pass ──────────────────────────────────────────────
@@ -193,7 +208,20 @@ console.log('\nProof 2 — §3.5.1: the deficit goes first to the model\'s posit
   ok('both moved lines are labelled correction_de_bande', lineOf(out, 'BTC').origin === 'correction_de_bande' && lineOf(out, 'ETH').origin === 'correction_de_bande');
   ok('NO line is labelled allocation_de_secours — the model\'s conviction sufficed', out.lines.every((l) => l.origin !== 'allocation_de_secours'));
   ok('the label is hausse_vers_plancher', out.label === 'hausse_vers_plancher');
-  ok('and the whole thing is realisable', out.unrealisablePoints === 0 && near(out.realisedExposurePercent, 45));
+  // THE BOOK LANDS JUST UNDER THE FLOOR, AND THAT IS NOT A SHORTFALL.
+  //
+  // Moving costs money and the cost lands on the exposure itself: the buy budget is divided by
+  // (1 + fee), so a 25-point correction delivers about 24.99 of them. A projection of least
+  // change cannot ask for more than the bound to pay for its own execution, so a residual no
+  // larger than the fee is the price of the move — not a band that could not be reached.
+  ok('nothing is journaled as unrealisable', out.unrealisablePoints === 0);
+  ok('the label stays a clean correction', out.label === 'hausse_vers_plancher');
+  ok('but the BOOK lands a shade under the floor', out.realisedExposurePercent < 45);
+  ok(
+    'and the whole shortfall is the fee, to the point',
+    45 - out.realisedExposurePercent <= out.feeDragPoints + 1e-9,
+  );
+  ok('which is published rather than absorbed', out.feeDragPoints > 0);
 }
 
 // ── PROOF 3 — §3.5.2, caps bound the pass and the excess is re-poured ─────────────
@@ -310,7 +338,7 @@ console.log('\nProof 6 — §3.4.4: the maximum feasible runs, the gap is journa
   ok('XRP is taken to its cap — the maximum feasible really runs', near(weightOf(out, 'XRP'), 15));
   ok('the frozen lines are untouched', weightOf(out, 'BTC') === 10 && weightOf(out, 'ETH') === 10);
   ok('the corrected exposure is 35, not 45', near(out.correctedExposurePercent, 35));
-  ok('the 10-point gap is journaled', near(out.unrealisablePoints, 10));
+  ok('the 10-point gap is journaled', nearNetOfFee(out.unrealisablePoints, 10, out));
   ok('and the label says so', out.label === 'bande_partiellement_irrealisable');
 
   // §3.6.3 — the frozen lines exceed the ceiling on their own. Every authorised reduction
@@ -323,7 +351,7 @@ console.log('\nProof 6 — §3.4.4: the maximum feasible runs, the gap is journa
   });
   ok('[lignes gelées au-dessus du plafond] the reducible line goes to ZERO, not part-way', weightOf(overCeiling, 'BNB') === 0);
   ok('the frozen 55 stands', near(overCeiling.correctedExposurePercent, 55));
-  ok('the 10-point overshoot is journaled', near(overCeiling.unrealisablePoints, 10));
+  ok('the 10-point overshoot is journaled', nearNetOfFee(overCeiling.unrealisablePoints, 10, overCeiling));
   ok('labelled irrealisable', overCeiling.label === 'bande_partiellement_irrealisable');
 }
 
@@ -343,7 +371,7 @@ console.log('\nProof 7 — §3.5.5: a distribution the 2% floor would delete is 
   ok('and it landed on ONE line rather than three', out.lines.filter((l) => l.correctionPoints > 0).length === 1);
   ok('it kept the highest-conviction line, BTC', lineOf(out, 'BTC').correctionPoints > 0);
   ok('that line clears the floor', out.movements.length === 1 && out.movements[0]!.notional.gt(dec(20)));
-  ok('so the book really reaches the floor', near(out.realisedExposurePercent, 20));
+  ok('so the book really reaches the floor, net of the fee it paid to get there', nearNetOfFee(out.realisedExposurePercent, 20, out));
   ok('with nothing left unrealisable', out.unrealisablePoints === 0);
 
   // THE PROOF THAT THIS IS NOT COSMETIC: without consolidation the same deficit spread over
@@ -378,6 +406,7 @@ console.log('\nProof 7 — §3.5.5: a distribution the 2% floor would delete is 
   ok('none of them helped, so none is claimed', !atTheFloor.consolidated);
   ok('no movement is sent', atTheFloor.movements.length === 0);
   ok('and the 2-point gap is journaled rather than hidden', near(atTheFloor.unrealisablePoints, 2) && near(atTheFloor.realisedExposurePercent, 18));
+  ok('with no fee to blame — nothing moved at all', atTheFloor.feeDragPoints === 0);
   ok('the label reports it', atTheFloor.label === 'bande_partiellement_irrealisable');
 
   // NARROWING SHEDS THE RESCUE LINES FIRST. The model's convictions are the last thing given
@@ -404,7 +433,7 @@ console.log('\nProof 8 — §3.3: the target and what the book really holds are 
   ok('FACT 3 — the corrected target reaches the floor', near(out.correctedExposurePercent, 20));
   ok('FACT 4 — the book does NOT: the leg is under the floor', near(out.realisedExposurePercent, 19));
   ok('the two are published separately, never collapsed', out.correctedExposurePercent !== out.realisedExposurePercent);
-  ok('the shortfall is measured on the BOOK, not on the target', near(out.unrealisablePoints, 1));
+  ok('the shortfall is measured on the BOOK, not on the target', nearNetOfFee(out.unrealisablePoints, 1, out));
   ok('the deleted leg stays visible', out.suppressed.length === 1 && out.suppressed[0]!.asset === 'BTC');
   ok('and it names the floor as its reason', out.suppressed[0]!.reason === 'movement_floor');
   ok('the line names the plumbing as its cause', lineOf(out, 'BTC').cause === 'seuil_de_mouvement');
@@ -640,6 +669,128 @@ console.log('\nProof 14 — every row satisfies the constraints the migration de
   });
   ok('with a post-trade book, a line it does not mention is a real zero', withExecution.find((r) => r.asset === 'ETH')?.post_cycle_weight_percent === 0);
   ok('and one it does mention carries its weight', withExecution.find((r) => r.asset === 'BTC')?.post_cycle_weight_percent === 12);
+}
+
+// ── PROOF 15 — the three defects the first review round found ────────────────
+//
+// Each was unreachable while `TRANSITION_MODE=observe`, and each became reachable the moment
+// the gate is armed — which is a planned step. They are grouped here so the regression is one
+// block rather than three scattered assertions.
+console.log('\nProof 15 — the three enforce-mode defects, and their fixes:');
+{
+  // (a) A STOPPED LINE MUST STILL RECONCILE.
+  //
+  // Under `enforce`, `applyGate` takes a peak-stopped line to zero, so the correction sizes
+  // itself against that zero while the model's clamped weight is still 20. Publishing the
+  // clamped weight as the base produced (20, +0, 0) — which violates the migration's CHECK,
+  // and because the rows go up as ONE batch, that single line silently destroyed the whole
+  // cycle's correction journal.
+  const equity = 1000;
+  const portfolio = bookOf({ BTC: 20, ETH: 10 }, equity);
+  const target = { BTC: 20, ETH: 10, BNB: 0, XRP: 0, USDT: 70 };
+  const stopped = gates({ BTC: 'stop_exit', ETH: 'actionable', BNB: 'actionable', XRP: 'actionable' });
+  const assessment = assessBand({
+    policyVersion: 'A',
+    policy: config.exposureBand,
+    state: 'constructive',
+    targetAllocation: target,
+    rawAllocation: null,
+    bookExposurePercent: 30,
+    reserveAsset: RESERVE,
+    gateByAsset: stopped,
+    capOf,
+    maxDeployablePercent: 70,
+    equityQuote: equity,
+    movementFloorQuote: (equity * config.execution.minMovementPercent) / 100,
+    // ENFORCE: the stop is about to flatten BTC, so the chain will pursue 0 there.
+    stoppedWeightSurvives: false,
+  });
+  const outcome = correctToBand({
+    assessment,
+    clampedAllocation: target,
+    rawAllocation: null,
+    reserveAsset: RESERVE,
+    portfolio,
+    priceOf,
+    feePercent: config.execution.feePercent,
+    minMovementPercent: config.execution.minMovementPercent,
+    gateEnforces: true,
+  });
+  const btc = outcome.lines.find((l) => l.asset === 'BTC')!;
+  ok('[stop_exit] the clamped weight is still the model\'s 20', btc.clampedWeightPercent === 20);
+  ok('but the correction started from the 0 the stop imposes', btc.baseWeightPercent === 0);
+  ok('and the two are published apart, never collapsed', btc.clampedWeightPercent !== btc.baseWeightPercent);
+
+  const rows = toCorrectionRows({
+    decisionId: 1,
+    correction: outcome,
+    gateByAsset: stopped,
+    bookedLedger: [],
+    portfolioAfter: null,
+  });
+  ok(
+    'every row satisfies the migration CHECK, on the BASE',
+    rows.every((r) => Math.abs(r.base_weight_percent + r.correction_points - r.corrected_weight_percent) < 1e-6),
+  );
+  ok(
+    'and the same rows would have FAILED it on the clamped weight — the defect, restated',
+    rows.some((r) => Math.abs(r.clamped_weight_percent + r.correction_points - r.corrected_weight_percent) >= 1e-6),
+  );
+
+  // (b) A LEG THE GATE WOULD REFUSE IS NOT COUNTED AS SENT.
+  //
+  // The model wants BTC at 20 while the book holds 10, and BTC is frozen. The correction never
+  // touches that line — but the PLAN still emits the model's own buy, and under `enforce` the
+  // gate would refuse it. Counting it would credit the correction with a movement that never
+  // leaves, and would inflate the exposure the book is said to reach.
+  const frozenLeg = {
+    state: 'constructive' as const,
+    target: { BTC: 20, ETH: 10, BNB: 0, XRP: 0 },
+    book: { BTC: 10, ETH: 10 },
+    gates: gates({ BTC: 'frozen', ETH: 'actionable', BNB: 'actionable', XRP: 'actionable' }),
+  };
+  const observing = correct({ ...frozenLeg, gateEnforces: false });
+  const enforcing = correct({ ...frozenLeg, gateEnforces: true });
+
+  ok(
+    '[gel] under observe the gate refuses nothing, so the model\'s BTC leg is in the plan',
+    observing.movements.some((m) => m.asset === 'BTC'),
+  );
+  ok('and nothing is reported as gated', observing.gated.length === 0 && !observing.atomicRefusalRisk);
+  ok(
+    'under enforce the same leg is NOT counted as sent',
+    !enforcing.movements.some((m) => m.asset === 'BTC'),
+  );
+  ok('it is reported apart, as gated', enforcing.gated.some((m) => m.asset === 'BTC'));
+  ok(
+    'and the atomic-refusal risk is raised — vector.ts refuses a target WHOLE or not at all',
+    enforcing.atomicRefusalRisk,
+  );
+  ok(
+    'so the enforcing plan claims LESS realised exposure than the observing one',
+    enforcing.realisedExposurePercent < observing.realisedExposurePercent,
+  );
+
+  // (c) THE REALISED EXPOSURE IS REPLAYED FROM THE NOTIONALS, not assumed from the target.
+  //
+  // A buy is sized from the cash budget and then divided by (1 + fee), and every leg's fee
+  // comes off equity — so "this line moved" never means "this line reached its target".
+  const lifted = correct({
+    state: 'constructive',
+    target: { BTC: 15, ETH: 5, BNB: 0, XRP: 0 },
+    book: { BTC: 15, ETH: 5 },
+  });
+  ok('[frais] the corrected TARGET is exactly the floor', near(lifted.correctedExposurePercent, 45));
+  ok('the realised book is strictly under it', lifted.realisedExposurePercent < 45);
+  ok(
+    'by exactly what the plan pays in fees, to the point',
+    45 - lifted.realisedExposurePercent <= lifted.feeDragPoints + 1e-9,
+  );
+  ok('and the fee is published, not absorbed into the gap', lifted.feeDragPoints > 0);
+  ok(
+    'so no shortfall is claimed for a cost the projection cannot avoid',
+    lifted.unrealisablePoints === 0 && lifted.label === 'hausse_vers_plancher',
+  );
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────────
