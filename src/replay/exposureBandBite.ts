@@ -601,8 +601,18 @@ async function main(): Promise<void> {
   // sufficient". A correction whose total clears one movement floor can still be deleted
   // entirely once it is split into legs, and only §3.5's redistribution knows which.
   {
+    // ON THE DIRECTION, NOT ON THE LABEL — the same predicate C4 uses.
+    //
+    // Since the band started measuring the gap on in-band targets too, a cycle where the band
+    // corrected NOTHING can carry `bande_partiellement_irrealisable`: the model's own
+    // target-to-book move fell under the floor and left the book outside the band. That is a
+    // real fact and it belongs in the journal — but it is not a band correction, and counting
+    // it here would put ordinary model movements in "what the correction would send". Those
+    // rows also carry a null `unrealisable_points` (the assessment computes none when no
+    // correction is due), which the subtraction below would read as zero and charge the whole
+    // gap to the plumbing.
     const withCorrection = rows
-      .filter((r) => r.label != null && r.label !== 'aucune_correction')
+      .filter((r) => r.direction != null && r.direction !== 'none')
       .map((r) => ({ row: r, correction: corrections.get(r.decision_id)! }))
       .filter((entry) => entry.correction != null);
 
@@ -695,10 +705,15 @@ async function main(): Promise<void> {
         const raw = nextRaw.get(line.asset);
         if (raw == null) continue;
         observedPairs += 1;
-        if (raw >= line.correctedWeightPercent - 0.000001) adopted += 1;
+        // AGAINST THE POSITION REALLY CREATED, not the one asked for. The buy is sized from
+        // the cash budget and divided by (1 + fee), so the holding lands under the corrected
+        // target — and a following model target sitting between the two is MAINTAINING the
+        // imposed position, not undoing it. Comparing against the target would count it as an
+        // undo and quietly inflate the very rate this criterion publishes.
+        if (raw >= line.realisedWeightPercent - 0.000001) adopted += 1;
         else {
           undoRequested += 1;
-          if (raw < line.clampedWeightPercent - 0.000001) undoIntensified += 1;
+          if (raw < line.baseWeightPercent - 0.000001) undoIntensified += 1;
         }
       }
     }

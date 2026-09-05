@@ -862,6 +862,59 @@ console.log('\nProof 16 — a quiet cycle can still fail, and a lifted target is
   );
 }
 
+// ── PROOF 17 — the two defects the third review round found ──────────────────
+//
+// Both were introduced by the SECOND round's own fixes, which is the ordinary shape of this:
+// measuring a gap on in-band cycles gave those cycles a non-quiet label, and filtering C8 by
+// holdings left its threshold still reading a target.
+console.log('\nProof 17 — a created position is smaller than the one asked for:');
+{
+  // (a) THE REALISED WEIGHT, PER LINE. The buy is sized from the cash budget and divided by
+  // (1 + fee), so the position created is under the position asked for. Anything reasoning
+  // about "did the model keep the imposed position" must compare against this, or a following
+  // target sitting between the two reads as an undo while it is in fact maintaining it.
+  const lifted = correct({
+    state: 'constructive',
+    target: { BTC: 15, ETH: 5, BNB: 0, XRP: 0 },
+    book: { BTC: 15, ETH: 5 },
+  });
+  const btc = lineOf(lifted, 'BTC');
+  ok('[poids réalisé] the corrected target is 33.75', near(btc.correctedWeightPercent, 33.75));
+  ok('but the position really created is smaller', btc.realisedWeightPercent < btc.correctedWeightPercent);
+  ok(
+    'and the difference is the fee, not a rounding artefact',
+    btc.correctedWeightPercent - btc.realisedWeightPercent <= lifted.feeDragPoints + 1e-5,
+  );
+  ok(
+    'a line the correction never touched reports the book it keeps',
+    near(lineOf(lifted, 'BNB').realisedWeightPercent, 0),
+  );
+  // The sum of the per-line realised weights IS the realised exposure — one arithmetic, two
+  // granularities, so a reader can never find them disagreeing.
+  const sum = lifted.lines.reduce((total, l) => total + l.realisedWeightPercent, 0);
+  ok('the per-line realised weights sum to the realised exposure', near(sum, lifted.realisedExposurePercent));
+
+  // (b) THE REPLAY FILTERS ITS CORRECTIONS ON THE DIRECTION, NOT ON THE LABEL.
+  //
+  // Since an in-band cycle can now carry `bande_partiellement_irrealisable` — its own
+  // target-to-book move fell under the floor — a label filter would count ordinary model
+  // movements as band corrections, and would read their null `unrealisable_points` as a zero,
+  // charging the whole gap to the plumbing.
+  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandBite.ts'), 'utf8');
+  ok(
+    "C7 selects its population on direction, as C4 already does",
+    /const withCorrection = rows\s*\n\s*\.filter\(\(r\) => r\.direction != null && r\.direction !== 'none'\)/.test(replay),
+  );
+  ok(
+    'and no criterion selects corrections by label any more',
+    !/\.filter\(\(r\) => r\.label != null && r\.label !== 'aucune_correction'\)/.test(replay),
+  );
+  ok(
+    'C8 splits adopted from defeated on the REALISED weight',
+    /raw >= line\.realisedWeightPercent/.test(replay),
+  );
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────────
 
 /**

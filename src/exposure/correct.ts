@@ -113,6 +113,16 @@ export interface CorrectedLine {
    * uncorrected one, rather than their targets.
    */
   correctionMovesHolding: boolean;
+  /**
+   * What this line would REALLY hold after the plan, in percent of the post-trade equity.
+   *
+   * Not `correctedWeightPercent`: a buy is sized from the cash budget and then divided by
+   * (1 + fee), and every leg's fee comes off equity, so the position created is smaller than
+   * the position asked for. Anything that reasons about the imposed position — "did the model
+   * keep it, or undo it" — has to compare against THIS, or a following target sitting between
+   * the two counts as an undo while it is in fact maintaining the position.
+   */
+  realisedWeightPercent: number;
 }
 
 export interface CorrectionOutcome {
@@ -572,6 +582,9 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
     movements: readonly Movement[],
   ): CorrectedLine[] => {
     const correctedHoldings = holdingsUnder(movements);
+    // The same denominator `realisedExposure` uses: equity net of the fees the plan pays.
+    // Reading a weight against the pre-trade equity would put the whole book slightly light.
+    const postEquity = movements.reduce((eq, m) => eq.minus(m.fee), input.portfolio.equity);
     const suppressedAssets = new Map(suppressed.map((s) => [s.asset, s]));
     return lines.map((line) => {
       const corrected = round(weights.get(line.asset) ?? line.weightPercent);
@@ -610,6 +623,14 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
         correctionMovesHolding: !(correctedHoldings.get(line.asset) ?? ZERO).eq(
           uncorrectedHoldings.get(line.asset) ?? ZERO,
         ),
+        realisedWeightPercent: postEquity.gt(0)
+          ? round(
+              Decimal.max(correctedHoldings.get(line.asset) ?? ZERO, ZERO)
+                .div(postEquity)
+                .times(100)
+                .toNumber(),
+            )
+          : 0,
       };
     });
   };
