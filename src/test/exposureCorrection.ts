@@ -1116,6 +1116,70 @@ console.log('\nProof 21 — a cause is only claimed by whoever actually caused i
   );
 }
 
+// ── PROOF 22 — two notions of "unrealisable", and only one answers C4 ────────
+console.log('\nProof 22 — the feasibility criterion reads the gap, not the enriched label:');
+{
+  // THE TWO NOTIONS REALLY DIFFER, and this is the case that separates them: a target the
+  // freezes and the caps allow in full, whose one-point leg the 2% floor then deletes. The
+  // CORRECTION calls that `bande_partiellement_irrealisable` — correctly, the book lands
+  // outside the band — while the ASSESSMENT's gap is zero, because nothing about the gates or
+  // the caps stood in the way.
+  const plumbingOnly = correct({
+    state: 'neutral',
+    target: { BTC: 19, ETH: 0, BNB: 0, XRP: 0 },
+    book: { BTC: 19 },
+  });
+  ok(
+    '[plomberie seule] the correction labels it partially unrealisable',
+    plumbingOnly.label === 'bande_partiellement_irrealisable',
+  );
+  ok('because the book lands outside the band', plumbingOnly.realisedExposurePercent < 20);
+
+  const assessed = assessBand({
+    policyVersion: 'A',
+    policy: config.exposureBand,
+    state: 'neutral',
+    targetAllocation: { BTC: 19, ETH: 0, BNB: 0, XRP: 0, USDT: 81 },
+    rawAllocation: null,
+    bookExposurePercent: 19,
+    reserveAsset: RESERVE,
+    gateByAsset: ALL_ACTIONABLE,
+    capOf,
+    maxDeployablePercent: 70,
+    equityQuote: 1000,
+    movementFloorQuote: 20,
+    stoppedWeightSurvives: true,
+  });
+  ok(
+    'while the gates and the caps allowed the whole thing',
+    assessed.feasibility.unrealisablePoints === 0,
+  );
+  ok(
+    'so the label and the gap disagree — by design, and that is the trap',
+    plumbingOnly.label === 'bande_partiellement_irrealisable' &&
+      assessed.feasibility.unrealisablePoints === 0,
+  );
+
+  // C4's question is the narrow one — what do the FREEZES and the CAPS allow — so it must read
+  // the gap. Filtering on the enriched label counted plumbing-only failures as gate
+  // infeasibility and averaged their zero shortfalls in: 46 partials at 8.93 pt became 124 at
+  // 3.31 pt with a median of zero, and the tool stopped agreeing with the checkpoint report it
+  // had itself produced.
+  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandBite.ts'), 'utf8');
+  ok(
+    'C4 selects its partials on the gap',
+    /const partial = corrections\.filter\(\(r\) => \(r\.unrealisable_points \?\? 0\) > 0\);/.test(replay),
+  );
+  ok(
+    'and no criterion uses the enriched label as a predicate any more',
+    !/filter\(\(r\) => r\.label === 'bande_partiellement_irrealisable'\)/.test(replay),
+  );
+  ok(
+    'the published shortfall is averaged over that same population',
+    /const shortfalls = partial\.map\(\(r\) => r\.unrealisable_points!\);/.test(replay),
+  );
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────────
 
 /**

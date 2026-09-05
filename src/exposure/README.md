@@ -305,6 +305,47 @@ Trois lectures, parce qu'une seule serait trompeuse. « Le modèle demande moins
 imposée » est presque automatique — il ré-émet sa propre préférence. Ce qui distingue
 l'indifférence de la **lutte**, c'est qu'il descende plus bas qu'il n'était descendu lui-même.
 
+## Limite connue — à lever AVANT l'activation du pilote
+
+**Un achat abandonné faute de budget n'apparaît nulle part.**
+
+Quand le cash est déjà au niveau de la réserve cible et que les ventes censées le financer
+sont toutes supprimées sous le seuil de 2 %, le budget d'achat est nul et `planMovements` saute
+la boucle d'achat entière. Les achats en attente ne figurent alors **ni** dans `movements`,
+**ni** dans `suppressed` : leur `suppressed_reason` reste nul et le compte de jambes supprimées
+les ignore.
+
+C'est la même famille que le défaut de poussière corrigé dans cette brique — une sortie
+anticipée qui ne déclare pas ce qu'elle abandonne, dans une comptabilité que tous ses
+consommateurs croient exhaustive.
+
+Portée mesurée : **aucun ordre n'est modifié et aucun chiffre publié n'est affecté**. La
+condition est étroite et sa fréquence n'a pas été mesurée. C'est pourquoi elle n'a pas été
+corrigée dans la brique 2, sur arbitrage.
+
+**Critère obligatoire avant de passer le pilote en `application`** : un achat abandonné pour
+budget insuffisant doit porter une raison **distincte et durable**, jamais confondue avec le
+seuil de 2 %, la poussière ou un prix absent. Tant que ce n'est pas fait, la comptabilité des
+suppressions n'est pas exhaustive, et le journal du pilote hériterait de trous silencieux sur
+exactement les lignes qu'il est censé expliquer.
+
+## Passage de relais vers la brique 3
+
+Ce que la brique 3 hérite, et ce qu'elle doit apporter :
+
+| | |
+|---|---|
+| **Hérite** | les faits par cycle : `base_weight_percent`, `correction_moves_holding`, `realised_*`, les deux écarts, `suppressed_reason` par ligne, l'origine et la cause |
+| **Hérite** | l'artefact du rejeu, où les cycles sans faisabilité connue n'affirment **rien** plutôt que d'affirmer un écart fabriqué |
+| **Doit apporter** | le contrefactuel **chaîné** — les témoins E et P — qui seul permet une lecture entre cycles |
+| **Doit lever** | la limite ci-dessus, avant activation |
+
+Deux conclusions ont été retirées de la brique 2 et lui reviennent : ce que la répartition
+enverrait réellement, et si le modèle utilise ou combat l'exposition imposée. Toutes deux
+posent des questions **entre cycles** — à qui appartient cette jambe, dans quel cadre de
+valorisation — et y répondre avec un ré-ancrage à un pas produisait des attributions
+approximatives. Les témoins sont l'outil adapté ; les faits durables sont déjà là pour eux.
+
 ## Ce que ces briques ne peuvent pas conclure
 
 Elle ne conclut pas que la bande A est bonne, ni qu'elle est déployable. Elle ne produit aucun

@@ -483,7 +483,18 @@ async function main(): Promise<void> {
     // the same function the live cycle uses.
     const withGates = assessed.filter((r) => r.feasibility_known === true);
     const corrections = withGates.filter((r) => r.direction !== 'none');
-    const partial = corrections.filter((r) => r.label === 'bande_partiellement_irrealisable');
+    // ON THE GAP, NEVER ON THE LABEL — and the distinction is this criterion's whole subject.
+    //
+    // Brick 2 enriched `label`: it now says `bande_partiellement_irrealisable` whenever the
+    // REALISED book lands outside the band, movement floor included. That is a better label and
+    // it stays. But C4 asks a narrower question — what do the FREEZES and the CAPS allow — and
+    // `unrealisable_points` is the column that answers it.
+    //
+    // Filtering on the enriched label counted plumbing-only failures as gate infeasibility and
+    // averaged their zero shortfalls into the published gap: 46 partials at 8.93 pt became 124
+    // at 3.31 pt with a median of zero. Two notions of "unrealisable" collapsed into one
+    // predicate, and the tool stopped agreeing with the checkpoint report it had produced.
+    const partial = corrections.filter((r) => (r.unrealisable_points ?? 0) > 0);
     const totallyBlocked = corrections.filter((r) => r.unrealisable_points === r.required_points);
     const noActionable = withGates.filter((r) => r.increasable_assets.length === 0);
     // TWO DIFFERENT REASONS a correction produces nothing, deliberately not merged. A
