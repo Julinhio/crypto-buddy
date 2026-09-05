@@ -151,7 +151,21 @@ export function planMovements(
     const targetValue = equity.times(pct).div(100);
     const current = currentValue.get(asset) ?? ZERO;
     const deltaValue = targetValue.minus(current);
-    if (deltaValue.abs().lt(DUST_NOTIONAL)) continue;
+    if (deltaValue.abs().lt(DUST_NOTIONAL)) {
+      // RECORDED, not merely skipped. `dust` is part of the vocabulary this function
+      // advertises — the result type carries it, the journal has a column for it, the band's
+      // report counts it — so a branch that returns early without appending makes the
+      // accounting incomplete while every consumer believes it is exhaustive.
+      suppressed.push({
+        asset,
+        side: deltaValue.gt(0) ? 'buy' : 'sell',
+        notional: deltaValue.abs(),
+        reason: 'dust',
+        floor,
+        detail: `${deltaValue.abs().toFixed(4)} is below the ${DUST_NOTIONAL.toFixed(2)} dust threshold — there is nothing to do`,
+      });
+      continue;
+    }
 
     const price = priceOf(asset);
     if (price == null || price.lte(0)) {
@@ -227,7 +241,19 @@ export function planMovements(
   if (totalBuyGross.gt(0) && buyBudget.gt(0)) {
     for (const b of buys) {
       const cashOutlay = buyBudget.times(b.grossDelta).div(totalBuyGross); // share incl. fee
-      if (cashOutlay.lt(DUST_NOTIONAL)) continue;
+      if (cashOutlay.lt(DUST_NOTIONAL)) {
+        suppressed.push({
+          asset: b.asset,
+          side: 'buy',
+          notional: cashOutlay,
+          reason: 'dust',
+          floor,
+          detail:
+            `the pro-rata share of the buy budget is ${cashOutlay.toFixed(4)}, below the ` +
+            `${DUST_NOTIONAL.toFixed(2)} dust threshold`,
+        });
+        continue;
+      }
       const notional = cashOutlay.div(ONE.plus(feeRate)); // coin value bought
       // The pro-rata split can land a buy under the floor even though its raw gap was
       // above it (a short cash budget shared across several buys). Checked again on the

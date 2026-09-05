@@ -186,7 +186,13 @@ console.log('Proof 1 — a target inside its band is not touched, and neither ar
     book: { BTC: 20, ETH: 10 },
   });
   ok('a neutral target the book already holds generates NO movement', quiet.movements.length === 0);
-  ok('and nothing is suppressed either — there was nothing to suppress', quiet.suppressed.length === 0);
+  // Nothing is REFUSED either. The lines whose target already equals their book are recorded
+  // as `dust` — there was nothing to do, and saying so is what makes the suppression
+  // accounting exhaustive rather than merely mostly-populated.
+  ok(
+    'and nothing is refused by the floor or by a missing price',
+    quiet.suppressed.every((leg) => leg.reason === 'dust'),
+  );
 }
 
 // ── PROOF 2 — §3.5.1, proportional to the model's own convictions ──────────────────
@@ -431,8 +437,12 @@ console.log('\nProof 8 — §3.3: the target and what the book really holds are 
   ok('FACT 4 — the book does NOT: the leg is under the floor', near(out.realisedExposurePercent, 19));
   ok('the two are published separately, never collapsed', out.correctedExposurePercent !== out.realisedExposurePercent);
   ok('the shortfall is measured on the BOOK, not on the target', nearNetOfFee(out.unrealisablePoints, 1, out));
-  ok('the deleted leg stays visible', out.suppressed.length === 1 && out.suppressed[0]!.asset === 'BTC');
-  ok('and it names the floor as its reason', out.suppressed[0]!.reason === 'movement_floor');
+  // The floor-deleted leg is picked out by its REASON, not by its position in the list: the
+  // lines that had nothing to do are recorded too, as `dust`, so the list is no longer a
+  // singleton and an index would be reading whichever line happened to sort first.
+  const deleted = out.suppressed.filter((leg) => leg.reason === 'movement_floor');
+  ok('the deleted leg stays visible', deleted.length === 1 && deleted[0]!.asset === 'BTC');
+  ok('and it names the floor as its reason', deleted[0]!.reason === 'movement_floor');
   ok('the line names the plumbing as its cause', lineOf(out, 'BTC').cause === 'seuil_de_mouvement');
   ok('while the label reports the band as partially unrealisable', out.label === 'bande_partiellement_irrealisable');
 
@@ -1084,6 +1094,86 @@ console.log('\nProof 19 — an outcome may not contradict itself, and a cause ma
   ok(
     'and reported on its own line instead',
     /priceLossShare/.test(replay),
+  );
+}
+
+// ── PROOF 20 — the last round: whose leg, whose frame, whose silence ─────────
+console.log('\nProof 20 — the band is credited only with what the band caused:');
+{
+  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandBite.ts'), 'utf8');
+
+  // (a) A LEG OF THE CORRECTED PLAN IS NOT NECESSARILY A LEG OF THE BAND.
+  //
+  // `correction.movements` is the COMPLETE plan: the model's own target-to-book legs travel in
+  // it alongside the band's. Counting it whole credited the correction with an unrelated exit
+  // that survived while the band's own lift was deleted.
+  const mixed = correct({
+    state: 'constructive',
+    // ETH is a pure model move — it wants out of a line the band never touches.
+    target: { BTC: 15, ETH: 0, BNB: 5, XRP: 0 },
+    book: { BTC: 15, ETH: 20, BNB: 5 },
+  });
+  const ethLeg = mixed.movements.find((mv) => mv.asset === 'ETH');
+  ok('[jambe du modèle] the model sells ETH out entirely', ethLeg != null && ethLeg.side === 'sell');
+  ok(
+    "and the band never touched that line, so it moves no holding of the band's",
+    lineOf(mixed, 'ETH').correctionPoints === 0,
+  );
+  ok(
+    'the lines the band DID lift report a holding change',
+    mixed.lines.filter((l) => l.correctionPoints > 0).some((l) => l.correctionMovesHolding),
+  );
+  ok(
+    'C7 counts a leg as the band\'s only where the correction moved that holding',
+    /const moved = new Set\(e\.correction\.lines\.filter\(\(l\) => l\.correctionMovesHolding\)\.map\(\(l\) => l\.asset\)\);/.test(replay),
+  );
+  ok(
+    'and counts a SUPPRESSION as the band\'s on a different test — the line was corrected at all',
+    /const touched = new Set\(e\.correction\.lines\.filter\(\(l\) => l\.correctionPoints !== 0\)\.map\(\(l\) => l\.asset\)\);/.test(replay),
+  );
+  ok(
+    'the model\'s own legs are reported apart rather than hidden',
+    /autre\(s\) jambe\(s\) du plan corrigé appartiennent au modèle/.test(replay),
+  );
+
+  // (b) EVERY PROPOSAL CARRIES ITS FRAME. Recording it inside the assessment block undid the
+  // previous round's fix in silence: C8 would find an unassessed cycle as the following
+  // proposal and then call every one of its lines unrevaluable, for want of a frame sitting in
+  // the very `market_context` it had just read.
+  ok(
+    'the frame is stored with the proposal, not with the assessment',
+    /proposals\.push\(\{ id: decision\.id, raw: rawProposal \}\);[\s\S]{0,600}?frames\.set\(decision\.id,/.test(replay),
+  );
+  ok(
+    'and the assessment block no longer sets it a second time',
+    [...replay.matchAll(/frames\.set\(/g)].length === 1,
+  );
+
+  // (c) THE DUST BRANCHES RECORD WHAT THEY SUPPRESS.
+  //
+  // `dust` was in the result type, in the journal's constraint and in C7's report, while both
+  // early exits returned without appending — so the category could never be produced and the
+  // accounting was incomplete while every consumer believed it exhaustive.
+  const nothingToDo = planMovements(
+    bookOf({ BTC: 20, ETH: 10 }),
+    { BTC: 20, ETH: 10, USDT: 70 },
+    priceOf,
+    config.execution.feePercent,
+    config.execution.minMovementPercent,
+  );
+  ok('[poussière] a target the book already holds sends nothing', nothingToDo.movements.length === 0);
+  ok(
+    'and each untouched line is recorded as dust rather than passed over',
+    nothingToDo.suppressed.length === 2 && nothingToDo.suppressed.every((leg) => leg.reason === 'dust'),
+  );
+  const movements = readFileSync(path.join(ROOT, 'src/execution/movements.ts'), 'utf8');
+  ok(
+    'both dust branches append before they continue',
+    [...movements.matchAll(/reason: 'dust',/g)].length === 2,
+  );
+  ok(
+    'and no dust branch returns silently any more',
+    !/lt\(DUST_NOTIONAL\)\) continue;/.test(movements),
   );
 }
 

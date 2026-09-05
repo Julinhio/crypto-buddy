@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { config, tradableBaseAssets } from '../config/index.js';
 import type { Decimal } from '../money.js';
+import type { Movement, SuppressedLeg } from '../execution/movements.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
 import { parseRegimeJournal, regimePointFromJournal } from '../market/regimeJournal.js';
 import type { TransitionGate } from '../transition/gate.js';
@@ -275,10 +276,19 @@ async function main(): Promise<void> {
       continue;
     }
 
-    const rawProposal = allocationOf(decision.target_allocation);
-    if (rawProposal != null) proposals.push({ id: decision.id, raw: rawProposal });
-
     const book = bookOf(decision.market_context);
+
+    const rawProposal = allocationOf(decision.target_allocation);
+    if (rawProposal != null) {
+      proposals.push({ id: decision.id, raw: rawProposal });
+      // THE FRAME TRAVELS WITH THE PROPOSAL, not with the assessment.
+      //
+      // Recording it only inside the assessment block undid the previous fix in silence: C8
+      // would find an unassessed cycle as the following proposal — exactly the case that fix
+      // recovered — and then classify every one of its lines `unrevaluable` for want of a
+      // frame it could have read from the same `market_context`.
+      frames.set(decision.id, { equity: book.equity, priceOf: pricesOf(decision.market_context as StoredContext) });
+    }
     const gates = gatesByDecision.get(decision.id) ?? new Map<string, TransitionGate>();
     if (gates.size > 0) cyclesWithGates.push(decision.id);
 
@@ -342,7 +352,6 @@ async function main(): Promise<void> {
       observation.row.suppressed_movements = correction.suppressed.length;
       observation.row.label = correction.label;
       corrections.set(decision.id, correction);
-      frames.set(decision.id, { equity: book.equity, priceOf: pricesOf(ctx) });
     }
     rows.push(observation.row);
   }
@@ -648,22 +657,44 @@ async function main(): Promise<void> {
     const comparable = withCorrection.filter((e) => e.row.feasibility_known === true);
     const excluded = withCorrection.length - comparable.length;
 
-    const moves = comparable.filter((e) => e.correction.movements.length > 0);
-    const inert = comparable.filter((e) => e.correction.movements.length === 0);
+    // ── WHAT THE BAND CAUSED, SEPARATED FROM WHAT THE MODEL WOULD HAVE DONE ANYWAY ──
+    //
+    // `correction.movements` is the COMPLETE corrected plan: it carries the model's own
+    // target-to-book legs alongside the band's. Counting it whole would credit the correction
+    // with an unrelated full exit that survived while the band's own one-point lift was
+    // deleted — and the comments here already claimed to be counting only band corrections.
+    //
+    // A leg belongs to the band when the correction changed that line's HOLDING, which is the
+    // same test `correctionMovesHolding` runs: corrected plan against uncorrected plan.
+    // A SUPPRESSION belongs to the band on a different test — a leg the band asked for and the
+    // plumbing deleted moves no holding by construction, so the holding test would discard
+    // exactly the cases worth counting. There it is the line having been corrected at all.
+    const bandMoves = (e: (typeof comparable)[number]): Movement[] => {
+      const moved = new Set(e.correction.lines.filter((l) => l.correctionMovesHolding).map((l) => l.asset));
+      return e.correction.movements.filter((mv) => moved.has(mv.asset));
+    };
+    const bandSuppressed = (e: (typeof comparable)[number]): SuppressedLeg[] => {
+      const touched = new Set(e.correction.lines.filter((l) => l.correctionPoints !== 0).map((l) => l.asset));
+      return e.correction.suppressed.filter((leg) => touched.has(leg.asset));
+    };
+
+    const moves = comparable.filter((e) => bandMoves(e).length > 0);
+    const inert = comparable.filter((e) => bandMoves(e).length === 0);
     const consolidated = comparable.filter((e) => e.correction.consolidated);
     const rescued = comparable.filter((e) =>
       e.correction.lines.some((l) => l.origin === 'allocation_de_secours'),
     );
-    const legs = comparable.reduce((sum, e) => sum + e.correction.movements.length, 0);
+    const legs = comparable.reduce((sum, e) => sum + bandMoves(e).length, 0);
+    const modelLegs = comparable.reduce(
+      (sum, e) => sum + e.correction.movements.length - bandMoves(e).length,
+      0,
+    );
     // BY REASON, never as one number. `planMovements` suppresses a leg for the 2% floor, for a
     // MISSING PRICE, or for dust — and only the first is the plumbing floor. Publishing the
     // total as "effacées par le seuil" would report a partial market-data outage as damage done
     // by a threshold, which is the wrong thing to go and fix.
     const countSuppressed = (reason: string): number =>
-      comparable.reduce(
-        (sum, e) => sum + e.correction.suppressed.filter((leg) => leg.reason === reason).length,
-        0,
-      );
+      comparable.reduce((sum, e) => sum + bandSuppressed(e).filter((leg) => leg.reason === reason).length, 0);
     const floorLegs = countSuppressed('movement_floor');
     const noPriceLegs = countSuppressed('no_price');
     const dustLegs = countSuppressed('dust');
@@ -671,7 +702,7 @@ async function main(): Promise<void> {
     // are mixed inside one number there, and nothing separates them after the fact. Those
     // cycles are reported apart rather than attributed.
     const lostAPrice = (e: (typeof comparable)[number]): boolean =>
-      e.correction.suppressed.some((leg) => leg.reason === 'no_price');
+      bandSuppressed(e).some((leg) => leg.reason === 'no_price');
 
     // THE TWO GAPS. `unrealisable_points` counts only the freezes and the caps; the
     // correction's own counts the plumbing too. Their difference is the movement floor's share,
@@ -694,8 +725,10 @@ async function main(): Promise<void> {
       `${moves.length} produisent au moins un mouvement ` +
         `(${((moves.length / Math.max(comparable.length, 1)) * 100).toFixed(1)} %), ` +
         `${inert.length} n'en produisent AUCUN une fois le seuil passé.`,
-      `${legs} jambes envoyées · ${floorLegs} effacées par le SEUIL de mouvement · ` +
+      `${legs} jambes DE LA BANDE envoyées · ${floorLegs} effacées par le SEUIL de mouvement · ` +
         `${noPriceLegs} par un PRIX MANQUANT · ${dustLegs} par la poussière.`,
+      `${modelLegs} autre(s) jambe(s) du plan corrigé appartiennent au modèle — son propre écart ` +
+        "cible-vers-livre, que la bande n'a pas causé et qui ne lui est donc pas compté.",
       `Consolidation (§3.5.5) : elle change le résultat sur ${consolidated.length} cycle(s).`,
       `Allocation de secours (§3.5.4) : ${rescued.length} cycle(s) posent du poids sur une ligne où le ` +
         'modèle n\'avait RIEN dit — sa conviction ne suffisait pas à atteindre le plancher.',
