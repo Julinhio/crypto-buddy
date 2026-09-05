@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { config, tradableBaseAssets } from '../config/index.js';
+import type { Decimal } from '../money.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
 import { parseRegimeJournal, regimePointFromJournal } from '../market/regimeJournal.js';
 import type { TransitionGate } from '../transition/gate.js';
@@ -235,6 +236,14 @@ async function main(): Promise<void> {
   const postGateOnly: number[] = [];
   /** The redistribution, per cycle — keyed by decision so later criteria can walk it in order. */
   const corrections = new Map<number, CorrectionOutcome>();
+  /**
+   * THE VALUATION FRAME of each assessed cycle: its equity and its prices.
+   *
+   * A weight is only comparable to another weight measured against the same equity and the
+   * same prices. C8 compares a holding created at one wake-up with a target proposed at the
+   * next, and those are two different frames — so the frame travels with the cycle.
+   */
+  const frames = new Map<number, { equity: number; priceOf: (asset: string) => Decimal | null }>();
 
   for (const decision of decisions) {
     statuses[decision.status] = (statuses[decision.status] ?? 0) + 1;
@@ -320,6 +329,7 @@ async function main(): Promise<void> {
       observation.row.suppressed_movements = correction.suppressed.length;
       observation.row.label = correction.label;
       corrections.set(decision.id, correction);
+      frames.set(decision.id, { equity: book.equity, priceOf: pricesOf(ctx) });
     }
     rows.push(observation.row);
   }
@@ -684,10 +694,13 @@ async function main(): Promise<void> {
     let adopted = 0;
     let observedPairs = 0;
 
+    let unrevaluable = 0;
     for (let i = 0; i < ordered.length - 1; i += 1) {
-      const [, current] = ordered[i]!;
-      const [, next] = ordered[i + 1]!;
+      const [currentId, current] = ordered[i]!;
+      const [nextId, next] = ordered[i + 1]!;
       const nextRaw = new Map(next.lines.map((l) => [l.asset, l.rawWeightPercent ?? l.clampedWeightPercent]));
+      const here = frames.get(currentId);
+      const there = frames.get(nextId);
       for (const line of current.lines) {
         // Only lines the corrector actually LIFTED — a trim or an untouched line is not a
         // position the correction created.
@@ -704,13 +717,41 @@ async function main(): Promise<void> {
         if (!line.correctionMovesHolding) continue;
         const raw = nextRaw.get(line.asset);
         if (raw == null) continue;
+
+        // ── ONE FRAME, OR NO COMPARISON ────────────────────────────────────────────────
+        //
+        // `realisedWeightPercent` is the imposed holding as a percentage of the equity at THIS
+        // wake-up, valued at THIS wake-up's prices. `raw` is a percentage at the NEXT one.
+        // Comparing them directly inverts the verdict whenever the asset moves: a 20% imposed
+        // holding that appreciates to 25% would read as "adopted" against a next target of 24%,
+        // which is in fact a trim.
+        //
+        // So the holding is carried as a QUANTITY and revalued in the next cycle's frame. The
+        // equity used there is the REAL bot's, not a corrected bot's — the same one-step
+        // re-anchoring the whole replay rests on, and the same approximation PR #37's snapshot
+        // documents. A cycle whose frame cannot be read is COUNTED APART rather than compared
+        // in a frame nobody can vouch for.
+        const priceHere = here?.priceOf(line.asset) ?? null;
+        const priceThere = there?.priceOf(line.asset) ?? null;
+        if (
+          here == null ||
+          there == null ||
+          priceHere == null ||
+          priceThere == null ||
+          !priceHere.gt(0) ||
+          !(there.equity > 0)
+        ) {
+          unrevaluable += 1;
+          continue;
+        }
+        // The quantity the correction would have created, then what it is worth next time.
+        const postEquityHere = here.equity * (1 - current.feeDragPoints / 100);
+        const valueHere = (line.realisedWeightPercent / 100) * postEquityHere;
+        const quantity = valueHere / priceHere.toNumber();
+        const imposedThere = ((quantity * priceThere.toNumber()) / there.equity) * 100;
+
         observedPairs += 1;
-        // AGAINST THE POSITION REALLY CREATED, not the one asked for. The buy is sized from
-        // the cash budget and divided by (1 + fee), so the holding lands under the corrected
-        // target — and a following model target sitting between the two is MAINTAINING the
-        // imposed position, not undoing it. Comparing against the target would count it as an
-        // undo and quietly inflate the very rate this criterion publishes.
-        if (raw >= line.realisedWeightPercent - 0.000001) adopted += 1;
+        if (raw >= imposedThere - 0.000001) adopted += 1;
         else {
           undoRequested += 1;
           if (raw < line.baseWeightPercent - 0.000001) undoIntensified += 1;
@@ -727,6 +768,10 @@ async function main(): Promise<void> {
       `${observedPairs} paires observées — une ligne dont la correction change RÉELLEMENT ` +
         "l'avoir, et le réveil suivant. Une cible liftée dont la jambe passe sous le seuil ne " +
         'crée aucune position, donc ne peut pas être défaite : elle est écartée du dénominateur.',
+      `La position imposée est portée comme une QUANTITÉ et revalorisée aux prix et à l'équité du ` +
+        `réveil suivant : un poids d'un cycle et une cible du suivant ne sont pas dans le même ` +
+        `cadre, et les comparer inverse le verdict dès que l'actif bouge. ${unrevaluable} paire(s) ` +
+        `dont le cadre est illisible sont comptées à part plutôt que comparées.`,
       `ADOPTÉE   — le modèle demande au moins autant que la position imposée : ${pct(adopted)}`,
       `DÉFAITE   — il demande moins : ${pct(undoRequested)}`,
       `  dont LUTTE — il descend plus bas que sa propre cible précédente : ${pct(undoIntensified)}`,

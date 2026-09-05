@@ -909,9 +909,67 @@ console.log('\nProof 17 — a created position is smaller than the one asked for
     'and no criterion selects corrections by label any more',
     !/\.filter\(\(r\) => r\.label != null && r\.label !== 'aucune_correction'\)/.test(replay),
   );
+  // The threshold is built FROM the realised weight — never from the corrected target. Proof 18
+  // covers the other half: that realised weight is then revalued into the next cycle's frame
+  // before anything is compared to it.
   ok(
-    'C8 splits adopted from defeated on the REALISED weight',
-    /raw >= line\.realisedWeightPercent/.test(replay),
+    'C8 builds its threshold from the REALISED holding, not the target',
+    /line\.realisedWeightPercent \/ 100\) \* postEquityHere/.test(replay),
+  );
+  ok(
+    'and the corrected target is never a threshold there',
+    !/raw >= line\.correctedWeightPercent/.test(replay),
+  );
+}
+
+// ── PROOF 18 — a weight from one cycle is not comparable to a target from the next ──
+//
+// The imposed position is a QUANTITY. Its percentage moves with prices and with equity, so
+// comparing the weight it had at one wake-up against a target proposed at the next inverts the
+// verdict whenever the asset moves — and it inverts it in the direction that flatters the
+// policy, which is the worst way for a measurement to be wrong.
+console.log('\nProof 18 — the imposed position is revalued before it is compared:');
+{
+  // The inversion, in arithmetic. A 20% imposed holding on a 1000 book is 200 of value. If the
+  // asset then appreciates 25% and nothing else moves, the same quantity is worth 250 against
+  // an equity of 1050 — 23.8%. A next-cycle target of 24% is therefore an INCREASE, while the
+  // stale 20% would have read it as an increase too… but a target of 22% is a TRIM that the
+  // stale comparison would call adoption.
+  const equityHere = 1000;
+  const priceHere = 100;
+  const imposedWeightHere = 20;
+  const quantity = ((imposedWeightHere / 100) * equityHere) / priceHere;
+  const priceThere = 125;
+  const equityThere = equityHere + quantity * (priceThere - priceHere);
+  const imposedThere = ((quantity * priceThere) / equityThere) * 100;
+
+  ok('the imposed holding is 2 units at 100', near(quantity, 2));
+  ok('worth 23.81% of the book once the asset gains 25%', near(imposedThere, 23.809524, 1e-4));
+
+  const nextTarget = 22;
+  ok(
+    'a next target of 22% is a TRIM of the imposed position',
+    nextTarget < imposedThere,
+  );
+  ok(
+    'while the stale weight would have called it adoption — the inversion, exactly',
+    nextTarget >= imposedWeightHere,
+  );
+
+  // And the replay does the revaluation rather than the stale comparison.
+  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandBite.ts'), 'utf8');
+  ok(
+    'C8 carries the holding as a quantity',
+    /const quantity = valueHere \/ priceHere\.toNumber\(\);/.test(replay),
+  );
+  ok(
+    'revalues it at the NEXT cycle prices and equity',
+    /const imposedThere = \(\(quantity \* priceThere\.toNumber\(\)\) \/ there\.equity\) \* 100;/.test(replay),
+  );
+  ok('and classifies against that, never against the stale weight', /raw >= imposedThere/.test(replay));
+  ok(
+    'a pair whose frame cannot be read is counted apart, not compared',
+    /unrevaluable \+= 1;\s*\n\s*continue;/.test(replay),
   );
 }
 
