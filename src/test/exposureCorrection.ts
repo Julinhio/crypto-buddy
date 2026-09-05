@@ -973,6 +973,120 @@ console.log('\nProof 18 — the imposed position is revalued before it is compar
   );
 }
 
+// ── PROOF 19 — the last three findings ───────────────────────────────────────
+console.log('\nProof 19 — an outcome may not contradict itself, and a cause may not be borrowed:');
+{
+  // (a) THE IN-BAND PATH RETURNS THE PLAN'S ALLOCATION, not the clamped input.
+  //
+  // Under `enforce` a peak-stopped line is already flat in the base weights — the chain will
+  // pursue zero there whatever the model asked — so the plan builds an allocation with the line
+  // at zero. Returning the clamped input instead handed back a vector still carrying the
+  // stopped weight, contradicting the same outcome's movements, lines and exposure.
+  const equity = 1000;
+  const portfolio = bookOf({ BTC: 20, ETH: 35, BNB: 20 }, equity);
+  const target = { BTC: 20, ETH: 35, BNB: 20, XRP: 0, USDT: 25 };
+  const stopped = gates({ BTC: 'stop_exit', ETH: 'actionable', BNB: 'actionable', XRP: 'actionable' });
+  const assessment = assessBand({
+    policyVersion: 'A',
+    policy: config.exposureBand,
+    state: 'constructive',
+    targetAllocation: target,
+    rawAllocation: null,
+    bookExposurePercent: 75,
+    reserveAsset: RESERVE,
+    gateByAsset: stopped,
+    capOf,
+    maxDeployablePercent: 70,
+    equityQuote: equity,
+    movementFloorQuote: (equity * config.execution.minMovementPercent) / 100,
+    // ENFORCE: the stop is about to flatten BTC.
+    stoppedWeightSurvives: false,
+  });
+  const out = correctToBand({
+    assessment,
+    clampedAllocation: target,
+    rawAllocation: null,
+    reserveAsset: RESERVE,
+    portfolio,
+    priceOf,
+    feePercent: config.execution.feePercent,
+    minMovementPercent: config.execution.minMovementPercent,
+  });
+
+  ok('[cible dans la bande + stop] the remaining 55% is inside [45, 70]', out.direction === 'none');
+  ok(
+    'the stopped line is FLAT in the returned allocation',
+    out.correctedAllocation.BTC === 0,
+  );
+  ok(
+    'and the allocation agrees with the exposure the outcome publishes',
+    near(
+      Object.entries(out.correctedAllocation)
+        .filter(([a]) => a !== RESERVE)
+        .reduce((sum, [, w]) => sum + w, 0),
+      out.correctedExposurePercent,
+    ),
+  );
+  ok(
+    'it still sums to 100 — the stopped weight went to the reserve',
+    near(Object.values(out.correctedAllocation).reduce((a, b) => a + b, 0), 100),
+  );
+  ok(
+    'and the exit is in the movements, not contradicted by the allocation',
+    out.movements.some((m) => m.asset === 'BTC' && m.side === 'sell'),
+  );
+
+  // (b) C8 COMPARES WITH THE NEXT ACTUAL PROPOSAL, not the next assessed cycle.
+  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandBite.ts'), 'utf8');
+  ok(
+    'the replay collects every cycle carrying a raw proposal',
+    /const proposals: Array<\{ id: number; raw: Record<string, number> \}> = \[\];/.test(replay),
+  );
+  ok(
+    'and C8 takes the next one by decision order',
+    /const following = proposals\.find\(\(p\) => p\.id > currentId\);/.test(replay),
+  );
+  ok(
+    'a cycle with no following proposal is counted apart, not silently skipped',
+    /withoutFollowingProposal \+= 1;/.test(replay),
+  );
+
+  // (c) A SUPPRESSED LEG IS ATTRIBUTED TO ITS OWN REASON.
+  //
+  // `planMovements` suppresses for the 2% floor, for a MISSING PRICE, or for dust. Reporting
+  // the total as "deleted by the floor" would publish a partial market-data outage as damage
+  // done by a threshold — and send whoever reads it to fix the wrong thing.
+  const noPricePlan = planMovements(
+    bookOf({ BTC: 20 }, equity),
+    { BTC: 40, ETH: 10, USDT: 50 },
+    // ETH has no price this cycle: the leg cannot be sized at all.
+    (asset) => (asset === 'ETH' ? null : asset === RESERVE ? dec(1) : dec(100)),
+    config.execution.feePercent,
+    config.execution.minMovementPercent,
+  );
+  ok(
+    'a missing price is recorded as its own reason',
+    noPricePlan.suppressed.some((leg) => leg.asset === 'ETH' && leg.reason === 'no_price'),
+  );
+  ok(
+    'never as a movement-floor deletion',
+    !noPricePlan.suppressed.some((leg) => leg.asset === 'ETH' && leg.reason === 'movement_floor'),
+  );
+  ok(
+    'and the replay counts the two apart',
+    /const floorLegs = countSuppressed\('movement_floor'\);/.test(replay) &&
+      /const noPriceLegs = countSuppressed\('no_price'\);/.test(replay),
+  );
+  ok(
+    'while a cycle that lost a price is excluded from the floor attribution',
+    /\.filter\(\(e\) => !lostAPrice\(e\)\)/.test(replay),
+  );
+  ok(
+    'and reported on its own line instead',
+    /priceLossShare/.test(replay),
+  );
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────────
 
 /**

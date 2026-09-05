@@ -237,6 +237,16 @@ async function main(): Promise<void> {
   /** The redistribution, per cycle — keyed by decision so later criteria can walk it in order. */
   const corrections = new Map<number, CorrectionOutcome>();
   /**
+   * EVERY CYCLE'S RAW PROPOSAL, in decision order — not only the assessed ones.
+   *
+   * C8 says "the following wake-up", and it has to mean it. `corrections` holds only the
+   * cycles `observeBand` could assess (a regime AND a retained target); a decided cycle that
+   * journaled no regime carries a perfectly usable raw allocation and is absent from it.
+   * Walking `corrections` pairwise would then skip that wake-up and compare the imposed
+   * position with a LATER proposal, while the report still calls it the next one.
+   */
+  const proposals: Array<{ id: number; raw: Record<string, number> }> = [];
+  /**
    * THE VALUATION FRAME of each assessed cycle: its equity and its prices.
    *
    * A weight is only comparable to another weight measured against the same equity and the
@@ -264,6 +274,9 @@ async function main(): Promise<void> {
       postGateOnly.push(decision.id);
       continue;
     }
+
+    const rawProposal = allocationOf(decision.target_allocation);
+    if (rawProposal != null) proposals.push({ id: decision.id, raw: rawProposal });
 
     const book = bookOf(decision.market_context);
     const gates = gatesByDecision.get(decision.id) ?? new Map<string, TransitionGate>();
@@ -642,7 +655,23 @@ async function main(): Promise<void> {
       e.correction.lines.some((l) => l.origin === 'allocation_de_secours'),
     );
     const legs = comparable.reduce((sum, e) => sum + e.correction.movements.length, 0);
-    const suppressedLegs = comparable.reduce((sum, e) => sum + e.correction.suppressed.length, 0);
+    // BY REASON, never as one number. `planMovements` suppresses a leg for the 2% floor, for a
+    // MISSING PRICE, or for dust — and only the first is the plumbing floor. Publishing the
+    // total as "effacées par le seuil" would report a partial market-data outage as damage done
+    // by a threshold, which is the wrong thing to go and fix.
+    const countSuppressed = (reason: string): number =>
+      comparable.reduce(
+        (sum, e) => sum + e.correction.suppressed.filter((leg) => leg.reason === reason).length,
+        0,
+      );
+    const floorLegs = countSuppressed('movement_floor');
+    const noPriceLegs = countSuppressed('no_price');
+    const dustLegs = countSuppressed('dust');
+    // A cycle that lost a price cannot have its residual charged to the floor: the two causes
+    // are mixed inside one number there, and nothing separates them after the fact. Those
+    // cycles are reported apart rather than attributed.
+    const lostAPrice = (e: (typeof comparable)[number]): boolean =>
+      e.correction.suppressed.some((leg) => leg.reason === 'no_price');
 
     // THE TWO GAPS. `unrealisable_points` counts only the freezes and the caps; the
     // correction's own counts the plumbing too. Their difference is the movement floor's share,
@@ -650,6 +679,11 @@ async function main(): Promise<void> {
     const freezeGap = comparable.map((e) => e.row.unrealisable_points!);
     const realisedGap = comparable.map((e) => e.correction.unrealisablePoints);
     const plumbingShare = comparable
+      .filter((e) => !lostAPrice(e))
+      .map((e) => e.correction.unrealisablePoints - e.row.unrealisable_points!)
+      .filter((v) => v > 0.000001);
+    const priceLossShare = comparable
+      .filter(lostAPrice)
       .map((e) => e.correction.unrealisablePoints - e.row.unrealisable_points!)
       .filter((v) => v > 0.000001);
 
@@ -660,7 +694,8 @@ async function main(): Promise<void> {
       `${moves.length} produisent au moins un mouvement ` +
         `(${((moves.length / Math.max(comparable.length, 1)) * 100).toFixed(1)} %), ` +
         `${inert.length} n'en produisent AUCUN une fois le seuil passé.`,
-      `${legs} jambes envoyées, ${suppressedLegs} effacées par le seuil.`,
+      `${legs} jambes envoyées · ${floorLegs} effacées par le SEUIL de mouvement · ` +
+        `${noPriceLegs} par un PRIX MANQUANT · ${dustLegs} par la poussière.`,
       `Consolidation (§3.5.5) : elle change le résultat sur ${consolidated.length} cycle(s).`,
       `Allocation de secours (§3.5.4) : ${rescued.length} cycle(s) posent du poids sur une ligne où le ` +
         'modèle n\'avait RIEN dit — sa conviction ne suffisait pas à atteindre le plancher.',
@@ -668,8 +703,13 @@ async function main(): Promise<void> {
       'Décomposition de l\'écart :',
       `  écart dû aux GELS et PLAFONDS  : moyenne ${mean(freezeGap)} pt`,
       `  écart après la PLOMBERIE aussi : moyenne ${mean(realisedGap)} pt`,
-      `  ${plumbingShare.length} cycle(s) où le seuil de mouvement AGGRAVE l'écart, de ` +
-        `${mean(plumbingShare)} pt en moyenne.`,
+      `  ${plumbingShare.length} cycle(s) où le SEUIL aggrave l'écart, de ${mean(plumbingShare)} pt ` +
+        'en moyenne.',
+      priceLossShare.length === 0
+        ? "  Aucun cycle n'a perdu de prix : tout le résidu est imputable au seuil."
+        : `  ${priceLossShare.length} cycle(s) ont AUSSI perdu un prix (${mean(priceLossShare)} pt de ` +
+          "résidu) : leurs deux causes sont mêlées et rien ne les sépare après coup, donc ils sont " +
+          "rapportés à part plutôt qu'imputés au seuil.",
       '',
       'C\'est la réponse à la réserve de la brique 1 : « au-dessus du seuil » ne garantissait rien, ' +
         'et voici ce que la répartition en fait réellement.',
@@ -695,12 +735,19 @@ async function main(): Promise<void> {
     let observedPairs = 0;
 
     let unrevaluable = 0;
-    for (let i = 0; i < ordered.length - 1; i += 1) {
+    let withoutFollowingProposal = 0;
+    for (let i = 0; i < ordered.length; i += 1) {
       const [currentId, current] = ordered[i]!;
-      const [nextId, next] = ordered[i + 1]!;
-      const nextRaw = new Map(next.lines.map((l) => [l.asset, l.rawWeightPercent ?? l.clampedWeightPercent]));
+      // THE NEXT WAKE-UP THAT ACTUALLY PROPOSED SOMETHING, by decision order — not the next
+      // entry in `corrections`. See `proposals`.
+      const following = proposals.find((p) => p.id > currentId);
+      if (following == null) {
+        withoutFollowingProposal += 1;
+        continue;
+      }
+      const nextRaw = new Map(Object.entries(following.raw));
       const here = frames.get(currentId);
-      const there = frames.get(nextId);
+      const there = frames.get(following.id);
       for (const line of current.lines) {
         // Only lines the corrector actually LIFTED — a trim or an untouched line is not a
         // position the correction created.
@@ -765,7 +812,8 @@ async function main(): Promise<void> {
       'CONTREFACTUEL. Rien n\'a jamais été corrigé sur cet historique, donc le modèle n\'a jamais ' +
         'vu ces positions. Le compteur lit ce qu\'il a RÉELLEMENT proposé au réveil suivant, face ' +
         'à une position que le correcteur aurait créée au précédent.',
-      `${observedPairs} paires observées — une ligne dont la correction change RÉELLEMENT ` +
+      `${observedPairs} paires observées (${withoutFollowingProposal} cycle(s) sans réveil ` +
+        `suivant portant une proposition) — une ligne dont la correction change RÉELLEMENT ` +
         "l'avoir, et le réveil suivant. Une cible liftée dont la jambe passe sous le seuil ne " +
         'crée aucune position, donc ne peut pas être défaite : elle est écartée du dénominateur.',
       `La position imposée est portée comme une QUANTITÉ et revalorisée aux prix et à l'équité du ` +

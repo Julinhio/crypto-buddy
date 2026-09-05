@@ -543,7 +543,7 @@ function realisedExposure(
  * would let an observational component kill a wake-up.
  */
 export function correctToBand(input: CorrectInput): CorrectionOutcome {
-  const { assessment, clampedAllocation, rawAllocation, reserveAsset } = input;
+  const { assessment, rawAllocation, reserveAsset } = input;
   const lines = assessment.lines;
   const book = bookWeights(input.portfolio);
   const totalPercent = assessment.targetSumPercent;
@@ -659,7 +659,18 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
     return {
       label: gap > 0 ? 'bande_partiellement_irrealisable' : 'aucune_correction',
       direction: 'none',
-      correctedAllocation: { ...clampedAllocation },
+      // THE PLAN'S OWN ALLOCATION, not the clamped input.
+      //
+      // They differ on exactly one case, and it is the one that matters: under `enforce` a
+      // peak-stopped line is already flat in `baseWeights` — the chain will pursue zero there
+      // whatever the model asked — so `planFor` builds an allocation with the line at zero and
+      // sizes the exit accordingly. Returning the clamped input instead would hand back a
+      // vector still carrying the stopped weight, contradicting this outcome's own
+      // `movements`, its `lines` and its `correctedExposurePercent` (which is the stop-adjusted
+      // sum), and breaking the field's contract: it is what the ENGINE would receive.
+      //
+      // Everywhere else the two are identical, because nothing moved them apart.
+      correctedAllocation: plan.allocation,
       correctedExposurePercent: assessment.targetExposurePercent,
       realisedExposurePercent: realised,
       // NOT zero by construction any more. The label follows it: a cycle whose book lands
