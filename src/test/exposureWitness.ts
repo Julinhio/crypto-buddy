@@ -589,8 +589,10 @@ console.log('\nProof 11 — the replay reads its bounds from the identity, or sa
       replay.includes('window_closed_decision_id'),
   );
   ok(
-    'and it never runs past the settled point either',
-    replay.includes('Math.min(pilotWindow.toDecisionId, cutoffId)'),
+    'and an endpoint past the settled point is REFUSED, never truncated',
+    replay.includes('resolved.toDecisionId > cutoffId') &&
+      replay.includes('le rejeu refuse plutot que de tronquer') &&
+      !replay.includes('Math.min(pilotWindow.toDecisionId, cutoffId)'),
   );
   ok(
     'the books open on the equity recorded at the activation',

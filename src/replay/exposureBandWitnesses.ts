@@ -318,6 +318,9 @@ interface PilotRow {
   activated_at: string | null;
   activated_decision_id: number | null;
   opening_equity_usd: string | number | null;
+  alert_drawdown_at: string | null;
+  stopped_at: string | null;
+  window_closed_at: string | null;
   alert_drawdown_decision_id: number | null;
   stopped_decision_id: number | null;
   window_closed_decision_id: number | null;
@@ -331,6 +334,7 @@ async function loadPilotWindow(
     .from('exposure_pilot')
     .select(
       'status, activated_at, activated_decision_id, opening_equity_usd, ' +
+        'alert_drawdown_at, stopped_at, window_closed_at, ' +
         'alert_drawdown_decision_id, stopped_decision_id, window_closed_decision_id',
     )
     .limit(1);
@@ -344,6 +348,9 @@ async function loadPilotWindow(
       activatedAt: row.activated_at,
       activatedDecisionId: row.activated_decision_id,
       openingEquityQuote: opening,
+      alertAt: row.alert_drawdown_at,
+      stoppedAt: row.stopped_at,
+      closedAt: row.window_closed_at,
       alertDecisionId: row.alert_drawdown_decision_id,
       stoppedDecisionId: row.stopped_decision_id,
       closedDecisionId: row.window_closed_decision_id,
@@ -650,11 +657,24 @@ async function main(): Promise<void> {
   // means someone asked for one and named nothing, which is a refusal like any other bad value.
   const instantFlag = process.argv.find((arg) => arg.startsWith('--at='));
   const requestedInstant = instantFlag == null ? null : instantFlag.slice('--at='.length);
-  const pilotWindow = await loadPilotWindow(supabase, requestedInstant);
+  const resolved = await loadPilotWindow(supabase, requestedInstant);
+  // AN OFFICIAL BOUND BEYOND THE SETTLED POINT IS A REFUSAL, not a truncation.
+  //
+  // `Math.min` used to clip the window to the settled cutoff while the banner went on printing
+  // the requested pointer as the closing cycle — publishing a PARTIAL replay as though it had
+  // been valued at the alert, the stop or the closure. The honest answer is to wait until that
+  // exact cycle is provably complete.
+  const pilotWindow: PilotWindowResolution =
+    resolved.official && resolved.toDecisionId != null && resolved.toDecisionId > cutoffId
+      ? {
+          official: false,
+          reason:
+            `l'instant "${resolved.instant}" tombe au cycle ${resolved.toDecisionId}, au-dela du point ` +
+            `d'arret prouve complet (${cutoffId}) — le rejeu refuse plutot que de tronquer`,
+        }
+      : resolved;
   const upperBound =
-    pilotWindow.official && pilotWindow.toDecisionId != null
-      ? Math.min(pilotWindow.toDecisionId, cutoffId)
-      : cutoffId;
+    pilotWindow.official && pilotWindow.toDecisionId != null ? pilotWindow.toDecisionId : cutoffId;
 
   const [decisions, ledgerByDecision] = await Promise.all([
     loadDecisions(supabase, upperBound),

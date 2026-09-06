@@ -34,7 +34,7 @@ function ok(label: string, cond: boolean): void {
 }
 
 const ROOT = process.cwd();
-const CONTRACT = pilotContractOf(config, ['BTC', 'ETH', 'BNB', 'XRP']);
+const CONTRACT = pilotContractOf(config, ['BTC', 'ETH', 'BNB', 'XRP'], 'USDT');
 const SHA = contractDigest(CONTRACT);
 const DRAWDOWN = {
   alertPercent: config.exposurePilot.alertDrawdownPercent,
@@ -52,6 +52,8 @@ function identity(over: Partial<PilotIdentity> = {}): PilotIdentity {
     peakEquityQuote: 1000,
     alertDrawdownAt: null,
     lastSeenDecisionId: 1000,
+    activationBaselineDecisionId: 999,
+    windowClosedAt: null,
     ...over,
   };
 }
@@ -484,6 +486,9 @@ console.log('\nProof 11 — the official window refuses on every doubt, and says
     activatedAt: '2026-09-06T00:00:00.000Z',
     activatedDecisionId: 1500,
     openingEquityQuote: 1026.26,
+    alertAt: null,
+    stoppedAt: null,
+    closedAt: null,
     alertDecisionId: null,
     stoppedDecisionId: null,
     closedDecisionId: null,
@@ -515,10 +520,10 @@ console.log('\nProof 11 — the official window refuses on every doubt, and says
   ok('[--at= vide] REFUSED too — asking for nothing is asking badly', !empty.official);
   for (const asked of ['alerte_40', 'arret_50', 'cloture']) {
     const missing = resolvePilotWindow(row(), asked);
-    ok(`[--at=${asked} sans pointeur] REFUSED rather than extended`, !missing.official);
+    ok(`[--at=${asked} jamais survenu] REFUSED rather than extended`, !missing.official);
     ok(`and it says the instant never happened (${asked})`, !missing.official && missing.reason.includes("n'a pas eu lieu"));
   }
-  const stopped = resolvePilotWindow(row({ stoppedDecisionId: 1700 }), 'arret_50');
+  const stopped = resolvePilotWindow(row({ stoppedAt: '2026-09-06T06:00:00.000Z', stoppedDecisionId: 1700 }), 'arret_50');
   ok('[--at=arret_50 avec pointeur] accepted', stopped.official);
   ok('bounded exactly on it', stopped.official && stopped.toDecisionId === 1700);
   ok('with its own label, not the raw flag', stopped.official && stopped.instant === 'arret_50');
@@ -527,15 +532,18 @@ console.log('\nProof 11 — the official window refuses on every doubt, and says
   const bare = resolvePilotWindow(row(), null);
   ok('[sans --at, rien de fermé] the current settled point', bare.official && bare.instant === 'point_courant');
   ok('and no upper cycle is invented', bare.official && bare.toDecisionId === null);
-  const withStop = resolvePilotWindow(row({ stoppedDecisionId: 1700 }), null);
+  const withStop = resolvePilotWindow(row({ stoppedAt: '2026-09-06T06:00:00.000Z', stoppedDecisionId: 1700 }), null);
   ok('[sans --at, un arrêt] takes the stop', withStop.official && withStop.instant === 'arret_50' && withStop.toDecisionId === 1700);
-  const withBoth = resolvePilotWindow(row({ stoppedDecisionId: 1700, closedDecisionId: 1800 }), null);
+  const withBoth = resolvePilotWindow(
+    row({ stoppedAt: '2026-09-06T06:00:00.000Z', stoppedDecisionId: 1700, closedAt: '2026-09-06T06:00:00.000Z', closedDecisionId: 1800 }),
+    null,
+  );
   ok('[sans --at, arrêt ET clôture] the closure wins', withBoth.official && withBoth.instant === 'cloture' && withBoth.toDecisionId === 1800);
 
   // (e) NO CAST, EVER. The label is one of four known values, never a string from the CLI.
   const labels = ['alerte_40', 'arret_50', 'cloture', 'point_courant'];
   const produced = [
-    resolvePilotWindow(row({ alertDecisionId: 1600 }), 'alerte_40'),
+    resolvePilotWindow(row({ alertAt: '2026-09-06T06:00:00.000Z', alertDecisionId: 1600 }), 'alerte_40'),
     withStop,
     withBoth,
     bare,
@@ -559,6 +567,207 @@ console.log('\nProof 11 — the official window refuses on every doubt, and says
   ok(
     'and a refused window prints the reason instead of the pilot\'s name',
     replaySrc.includes('PAS DE RÉSULTAT OFFICIEL'),
+  );
+}
+
+// ── PROOF 12 — an event that happened is never stepped over ─────────────────────────
+//
+// THE DEFECT THIS REPLACES, and it was the worst of the six. Every mandatory write is made
+// before the decision row exists — that row has to carry the corrected target — so none of them
+// could name its own cycle, and only the activation was ever repaired. After a 50% stop the
+// pointer stayed null, the default cascade read that as "no stop", fell through to
+// `point_courant` and valued the witnesses PAST the stop: the silent extension of an official
+// window, reintroduced by another door.
+//
+// The cascade is now driven by whether the event HAPPENED, which its instant records durably,
+// and never by whether its cycle has been resolved.
+console.log('\nProof 12 — an unresolved pointer refuses; it never lets the window run past:');
+{
+  const T = '2026-09-06T06:00:00.000Z';
+  const row = (over: Partial<PilotWindowRow> = {}): PilotWindowRow => ({
+    status: 'active',
+    activatedAt: '2026-09-06T00:00:00.000Z',
+    activatedDecisionId: 1500,
+    openingEquityQuote: 1026.26,
+    alertAt: null,
+    stoppedAt: null,
+    closedAt: null,
+    alertDecisionId: null,
+    stoppedDecisionId: null,
+    closedDecisionId: null,
+    ...over,
+  });
+
+  // (a) THE EXACT DEFECT: a stop that happened, with no cycle resolved yet.
+  const stopUnresolved = resolvePilotWindow(row({ stoppedAt: T }), null);
+  ok('[arrêt survenu, pointeur nul, sans --at] REFUSED', !stopUnresolved.official);
+  ok(
+    'it never falls through to the current point',
+    !stopUnresolved.official && !stopUnresolved.reason.includes('point_courant'),
+  );
+  ok(
+    'and it says the instant happened but its cycle is unresolved',
+    !stopUnresolved.official && stopUnresolved.reason.includes('irresolu'),
+  );
+  ok(
+    'the same holds when the instant is asked for by name',
+    !resolvePilotWindow(row({ stoppedAt: T }), 'arret_50').official,
+  );
+  const closureUnresolved = resolvePilotWindow(row({ closedAt: T }), null);
+  ok('[clôture survenue, pointeur nul] REFUSED too', !closureUnresolved.official);
+  const alertUnresolved = resolvePilotWindow(row({ alertAt: T }), 'alerte_40');
+  ok('[alerte survenue, pointeur nul] REFUSED too', !alertUnresolved.official);
+
+  // AND THE 40% ALERT DOES NOT BOUND THE DEFAULT. It is a warning, not an end: the correction
+  // keeps applying, so an unresolved alert must not refuse a run nobody asked to bound there.
+  const alertOnly = resolvePilotWindow(row({ alertAt: T }), null);
+  ok('[alerte seule, sans --at] the run is still official', alertOnly.official);
+  ok('at the current point, because nothing ended', alertOnly.official && alertOnly.instant === 'point_courant');
+
+  // (b) THE REPAIR. Once the cycle is resolved the same window is accepted, bounded exactly on
+  // it — which is what makes the recovery observable rather than asserted.
+  const repaired = resolvePilotWindow(row({ stoppedAt: T, stoppedDecisionId: 1700 }), null);
+  ok('[après réparation] the window is official again', repaired.official);
+  ok('bounded exactly on the stop', repaired.official && repaired.toDecisionId === 1700);
+  ok('and labelled as the stop', repaired.official && repaired.instant === 'arret_50');
+  for (const [instantColumn, idColumn, asked] of [
+    ['alertAt', 'alertDecisionId', 'alerte_40'],
+    ['stoppedAt', 'stoppedDecisionId', 'arret_50'],
+    ['closedAt', 'closedDecisionId', 'cloture'],
+  ] as const) {
+    const before = resolvePilotWindow(row({ [instantColumn]: T } as Partial<PilotWindowRow>), asked);
+    const after = resolvePilotWindow(
+      row({ [instantColumn]: T, [idColumn]: 1700 } as Partial<PilotWindowRow>),
+      asked,
+    );
+    ok(`[${asked}] refused before the repair, accepted after`, !before.official && after.official);
+  }
+
+  // (c) THE REPAIR IS IDEMPOTENT AND FINDS THE CYCLE FROM THE INSTANT. It never invents an id
+  // it did not have, and it only ever fills a hole.
+  const persistence = readFileSync(path.join(ROOT, 'src/persistence/exposurePilot.ts'), 'utf8');
+  ok(
+    'the three pointers are repaired by one pass',
+    persistence.includes("instantColumn: 'activated_at'") &&
+      persistence.includes("instantColumn: 'alert_drawdown_at'") &&
+      persistence.includes("instantColumn: 'stopped_at'"),
+  );
+  ok(
+    'each is found as the first DECIDED cycle at or after its own instant',
+    persistence.includes(".eq('status', 'decided')") && persistence.includes(".gte('created_at', instant)"),
+  );
+  ok(
+    'and the update only ever touches a pointer that is still null',
+    persistence.includes('.is(pointer.idColumn, null)'),
+  );
+  const decide = readFileSync(path.join(ROOT, 'src/decision/decide.ts'), 'utf8');
+  ok(
+    'the pass runs on every application cycle, not only on the activation',
+    /EXPOSURE_BAND_MODE === 'application'\) \{\s*\n\s*await resolvePilotEventCycles\(supabase\);/.test(decide),
+  );
+  ok('and the old one-shot backfill is gone', !decide.includes('backfillActivationDecision'));
+}
+
+// ── PROOF 13 — a null heartbeat is read, never waived ───────────────────────────────
+//
+// The guard used to be `lastSeen != null && latest > lastSeen`, so a null heartbeat skipped the
+// interruption check entirely — the one hole the check exists to close. A null now falls back on
+// the activation baseline, which the activation cycle freezes precisely so that "nothing has
+// happened yet" and "something happened unseen" stop being the same value.
+console.log('\nProof 13 — a pilot with no receipt yet still has to prove its continuity:');
+{
+  // (a) CRASH BEFORE ANY DECISION. The activation row landed, the cycle died before its own
+  // decision row was written. Nothing has been decided since: resumption stays possible.
+  const bornOnly = judge({
+    identity: identity({ lastSeenDecisionId: null, activationBaselineDecisionId: 1500 }),
+    latestDecidedDecisionId: 1500,
+  });
+  ok('[crash avant décision] the pilot may resume', bornOnly.mayCorrect);
+  ok('and nothing is invalidated', bornOnly.statusAfter === 'active');
+
+  // (b) CRASH AFTER THE DECISION, BEFORE THE RECEIPT. A decided cycle exists that the pilot
+  // never marked — a hole in the high-water history, and the identity ends.
+  const orphaned = judge({
+    identity: identity({ lastSeenDecisionId: null, activationBaselineDecisionId: 1500 }),
+    latestDecidedDecisionId: 1501,
+  });
+  ok('[crash après décision, avant battement] the interruption is detected', orphaned.hold === 'pilote_interrompu');
+  ok('the correction stands down', !orphaned.mayCorrect);
+  ok('and the identity is invalidated durably', orphaned.statusAfter === 'interrupted_mode');
+  ok(
+    'the recorded hole starts at the baseline, which is what it really knew',
+    orphaned.write?.kind === 'interrupt_mode' && orphaned.write.lastSeenDecisionId === 1500,
+  );
+
+  // (c) NEITHER MARK. A pilot that can prove nothing about its own continuity does not resume.
+  ok(
+    '[ni battement ni référence] the check is not skippable',
+    judge({
+      identity: identity({ lastSeenDecisionId: null, activationBaselineDecisionId: null }),
+      latestDecidedDecisionId: 1501,
+    }).hold === 'pilote_interrompu',
+  );
+
+  // (d) THE BASELINE IS WRITTEN BY THE ACTIVATION ITSELF, from the read the same cycle made.
+  const persistence = readFileSync(path.join(ROOT, 'src/persistence/exposurePilot.ts'), 'utf8');
+  ok(
+    'the activation freezes the journal state it observed',
+    persistence.includes('activation_baseline_decision_id: ctx.latestDecidedDecisionId'),
+  );
+  const pilotSrc = readFileSync(path.join(ROOT, 'src/exposure/pilot.ts'), 'utf8');
+  ok(
+    'and a null receipt falls back on it rather than exempting the cycle',
+    pilotSrc.includes('identity.lastSeenDecisionId ?? identity.activationBaselineDecisionId'),
+  );
+}
+
+// ── PROOF 14 — the four remaining findings ──────────────────────────────────────────
+console.log('\nProof 14 — the reserve, the persisted status, the settled bound, the closed window:');
+{
+  // (D) THE RESERVE IS PART OF THE CONTRACT. Same four base assets, different quote: every order
+  // symbol and the reserved line change, and the pilot must not survive it.
+  const usdc = pilotContractOf(config, ['BTC', 'ETH', 'BNB', 'XRP'], 'USDC');
+  ok('[réserve] USDT and USDC are different contracts', contractDigest(usdc) !== SHA);
+  ok('and the same reserve keeps the same digest', contractDigest(pilotContractOf(config, ['BTC', 'ETH', 'BNB', 'XRP'], 'USDT')) === SHA);
+
+  // (E) THE PERSISTED STATUS IS A STATUS. It used to persist correctly and be rejected on the
+  // way back, so every cycle after an interruption reported an unreadable identity instead.
+  const persistence = readFileSync(path.join(ROOT, 'src/persistence/exposurePilot.ts'), 'utf8');
+  const known = persistence.slice(persistence.indexOf('const KNOWN_STATUS'), persistence.indexOf('export async function readPilotIdentity'));
+  ok('[statut] the reader accepts every status the migration allows', ['active', 'stopped_drawdown', 'invalidated_contract', 'interrupted_mode'].every((st) => known.includes(`'${st}'`)));
+  const migration = readFileSync(path.join(ROOT, 'supabase/migrations/0035_exposure_pilot_interruption.sql'), 'utf8');
+  ok(
+    'and the two vocabularies are the same four',
+    ['active', 'stopped_drawdown', 'invalidated_contract', 'interrupted_mode'].every((st) => migration.includes(`'${st}'`)),
+  );
+  ok(
+    'so the journaled cause stays pilote_interrompu',
+    judge({ identity: identity({ status: 'interrupted_mode' }) }).hold === 'pilote_interrompu',
+  );
+
+  // (C) A BOUND BEYOND THE SETTLED POINT REFUSES, and never prints the requested pointer as
+  // reached.
+  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandWitnesses.ts'), 'utf8');
+  ok(
+    '[borne] an official endpoint past the settled cutoff is refused',
+    replay.includes('resolved.toDecisionId > cutoffId') && replay.includes('le rejeu refuse plutot que de tronquer'),
+  );
+  ok('and nothing is truncated with Math.min any more', !replay.includes('Math.min(pilotWindow.toDecisionId, cutoffId)'));
+
+  // (F) A CLOSED WINDOW IS NOT RE-EVALUATED. It used to rescan every coverage row, re-log the
+  // closure and issue an update matching nothing, on every cycle for the rest of the pilot.
+  const decide = readFileSync(path.join(ROOT, 'src/decision/decide.ts'), 'utf8');
+  ok(
+    '[fenêtre] the closure state is read and short-circuits the work',
+    decide.includes('if (identity.windowClosedAt != null) return;'),
+  );
+  ok(
+    'and it is actually read back from the row',
+    persistence.includes('window_closed_at') && persistence.includes('windowClosedAt: row.window_closed_at'),
+  );
+  ok(
+    'closing still leaves the correction running — the status is untouched',
+    !/closeMeasurementWindow[\s\S]*?status:/.test(persistence),
   );
 }
 

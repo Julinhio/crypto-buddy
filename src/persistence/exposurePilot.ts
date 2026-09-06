@@ -26,7 +26,7 @@ export const PILOT_DEADLINE_MS = 5000;
 const COLUMNS =
   'id, contract_sha256, contract_version, band_version, status, activated_at, ' +
   'activated_decision_id, opening_equity_usd, peak_equity_usd, alert_drawdown_at, ' +
-  'last_seen_decision_id';
+  'last_seen_decision_id, activation_baseline_decision_id, window_closed_at';
 
 interface PilotRow {
   id: number;
@@ -40,6 +40,8 @@ interface PilotRow {
   peak_equity_usd: string | number;
   alert_drawdown_at: string | null;
   last_seen_decision_id: number | null;
+  activation_baseline_decision_id: number | null;
+  window_closed_at: string | null;
 }
 
 /**
@@ -57,6 +59,12 @@ const KNOWN_STATUS: ReadonlySet<string> = new Set<PilotStatus>([
   'active',
   'stopped_drawdown',
   'invalidated_contract',
+  // ADDED LATE, AND THE OMISSION WAS ITS OWN DEFECT: the status persisted fine and was then
+  // rejected on the way back in, so every cycle after an interruption reported an unreadable
+  // identity instead of the terminal state. Fail-closed either way, but the journal named the
+  // wrong cause forever after — in a brick whose whole discipline is that a cause is named
+  // correctly.
+  'interrupted_mode',
 ]);
 
 export async function readPilotIdentity(supabase: SupabaseClient | null): Promise<PilotRead> {
@@ -100,12 +108,16 @@ export async function readPilotIdentity(supabase: SupabaseClient | null): Promis
       peakEquityQuote: peak,
       alertDrawdownAt: row.alert_drawdown_at,
       lastSeenDecisionId: row.last_seen_decision_id,
+      activationBaselineDecisionId: row.activation_baseline_decision_id,
+      windowClosedAt: row.window_closed_at,
     },
   };
 }
 
 export interface PilotWriteContext {
   decisionId: number | null;
+  /** The journal's last decided cycle at this instant — frozen into the activation row. */
+  latestDecidedDecisionId: number | null;
   equityQuote: number;
   contractSha256: string;
   contractVersion: string;
@@ -144,6 +156,7 @@ export async function applyPilotWrite(
             opening_equity_usd: write.openingEquityQuote,
             peak_equity_usd: write.peakEquityQuote,
             peak_decision_id: ctx.decisionId,
+            activation_baseline_decision_id: ctx.latestDecidedDecisionId,
             status: 'active',
           })
           .abortSignal(signal);
@@ -306,29 +319,83 @@ export async function markPilotSawDecision(
 }
 
 /**
- * Fills in the decision the activation happened on.
+ * THE THREE EVENT POINTERS, RESOLVED AND REPAIRED — activation, the 40% alert, the 50% stop.
  *
- * The identity is written BEFORE the decision row exists — that row has to carry the corrected
- * target, so it cannot come first — which leaves the pointer null for the length of one cycle.
- * The INSTANT is durable from the start and is what the window is defined on; this is a
- * convenience for the replay, so it is best-effort and it only ever fills a hole.
+ * None of them can name its own cycle when it is written: all three happen before the decision
+ * row exists, because that row has to carry the corrected target. So each records its INSTANT,
+ * durably, and this pass fills in the cycle afterwards.
+ *
+ * That makes it recoverable rather than one-shot. A cycle that dies between its event and this
+ * call leaves a pointer null, and the NEXT cycle repairs it from the same durable instant —
+ * where the old single-purpose backfill filled only the activation, only once, and a single
+ * transient failure left an official window nobody could ever bound.
+ *
+ * Idempotent by construction: each update only touches a row whose pointer is still null.
+ *
+ * The cycle is found as the FIRST decided decision at or after the event's instant. The pilot's
+ * writes happen inside a cycle whose decision row is inserted a moment later, and the scheduler
+ * runs one cycle at a time, so that row is the one — and asking the journal is exact where
+ * remembering an id we did not have would have been a guess.
  */
-export async function backfillActivationDecision(
-  supabase: SupabaseClient | null,
-  decisionId: number,
-): Promise<void> {
+export async function resolvePilotEventCycles(supabase: SupabaseClient | null): Promise<void> {
   if (!supabase) return;
+  const pointers: Array<{ instantColumn: string; idColumn: string; extra?: Record<string, unknown> }> = [
+    { instantColumn: 'activated_at', idColumn: 'activated_decision_id', extra: { peak_decision_id: null } },
+    { instantColumn: 'alert_drawdown_at', idColumn: 'alert_drawdown_decision_id' },
+    { instantColumn: 'stopped_at', idColumn: 'stopped_decision_id' },
+  ];
   try {
-    await runBoundedWrite(
-      (signal) =>
-        supabase
-          .from(TABLE)
-          .update({ activated_decision_id: decisionId, peak_decision_id: decisionId, last_seen_decision_id: decisionId })
-          .is('activated_decision_id', null)
-          .abortSignal(signal),
-      PILOT_DEADLINE_MS,
-    );
+    let row: Record<string, string | number | null> | null = null;
+    await runBoundedWrite(async (signal) => {
+      const res = await supabase
+        .from(TABLE)
+        .select(
+          'activated_at, activated_decision_id, alert_drawdown_at, alert_drawdown_decision_id, ' +
+            'stopped_at, stopped_decision_id',
+        )
+        .limit(1)
+        .abortSignal(signal);
+      row = ((res.data ?? []) as unknown as Array<Record<string, string | number | null>>)[0] ?? null;
+      return { error: res.error };
+    }, PILOT_DEADLINE_MS);
+    if (row == null) return;
+
+    for (const pointer of pointers) {
+      const instant = (row as Record<string, string | number | null>)[pointer.instantColumn];
+      const already = (row as Record<string, string | number | null>)[pointer.idColumn];
+      if (typeof instant !== 'string' || instant === '' || already != null) continue;
+
+      let cycleId: number | null = null;
+      await runBoundedWrite(async (signal) => {
+        const res = await supabase
+          .from('decisions')
+          .select('id')
+          .eq('status', 'decided')
+          .gte('created_at', instant)
+          .order('id', { ascending: true })
+          .limit(1)
+          .abortSignal(signal);
+        cycleId = ((res.data ?? []) as Array<{ id: number }>)[0]?.id ?? null;
+        return { error: res.error };
+      }, PILOT_DEADLINE_MS);
+      if (cycleId == null) continue;
+
+      const patch: Record<string, unknown> = { [pointer.idColumn]: cycleId };
+      // The activation also seeds the peak's pointer and the continuity receipt, which start
+      // life on the very same cycle.
+      if (pointer.idColumn === 'activated_decision_id') {
+        patch.peak_decision_id = cycleId;
+        patch.last_seen_decision_id = cycleId;
+      }
+      await runBoundedWrite(
+        (signal) =>
+          supabase.from(TABLE).update(patch).is(pointer.idColumn, null).abortSignal(signal),
+        PILOT_DEADLINE_MS,
+      );
+    }
   } catch (err) {
-    console.warn(`[warn] could not backfill the pilot's activation decision — ${String(err)}`);
+    // Best-effort: a miss leaves the pointer null, the official replay refuses that instant
+    // rather than guessing, and the next cycle tries again.
+    console.warn(`[warn] could not resolve the pilot's event cycles — ${String(err)}`);
   }
 }

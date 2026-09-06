@@ -41,6 +41,16 @@ export interface PilotContract {
     constructive: { lowPercent: number; highPercent: number };
   };
   universe: readonly string[];
+  /**
+   * THE QUOTE THE WHOLE PILOT IS DENOMINATED IN.
+   *
+   * Not a detail beside the universe: it is the asset the clamp reserves, the corrector leaves
+   * in cash, the executor quotes every pair in and every order symbol ends with. Moving from
+   * USDT to USDC leaves the four base assets identical while changing what is actually held and
+   * what is actually traded — a material change to the contract that a digest without it would
+   * wave through.
+   */
+  reserveAsset: string;
   caps: {
     perAsset: Readonly<Record<string, number>>;
     defaultPerAsset: number;
@@ -66,6 +76,7 @@ export function contractDigest(contract: PilotContract): string {
       constructive: [contract.band.constructive.lowPercent, contract.band.constructive.highPercent],
     },
     universe: [...contract.universe].sort(),
+    reserve_asset: contract.reserveAsset,
     caps: {
       per_asset: Object.entries(contract.caps.perAsset)
         .map(([asset, cap]) => [asset, cap] as const)
@@ -112,6 +123,15 @@ export interface PilotIdentity {
   /** Null until the 40% alert has fired. It fires once for the life of the pilot. */
   alertDrawdownAt: string | null;
   /**
+   * THE JOURNAL'S STATE AT THE INSTANT OF ACTIVATION — the last decided cycle that existed
+   * before this pilot did.
+   *
+   * It is what makes a null heartbeat readable. Without it, "no cycle has been seen" and "a
+   * cycle ran unseen" are the same value, and the ambiguity would resolve in the wrong
+   * direction: a pilot that had lost sight of its own cycles would be allowed to resume.
+   */
+  activationBaselineDecisionId: number | null;
+  /**
    * The last DECIDED cycle this pilot actually saw.
    *
    * Its whole job is to make an interruption provable from the journal rather than from a flag
@@ -119,6 +139,8 @@ export interface PilotIdentity {
    * one exists if and only if the pilot missed it.
    */
   lastSeenDecisionId: number | null;
+  /** Set once the MEASUREMENT window has closed. The correction keeps running regardless. */
+  windowClosedAt: string | null;
 }
 
 /** Why the correction is not touching the orders this cycle. Never a silence. */
@@ -236,16 +258,26 @@ export function judgePilot(input: PilotJudgeInput): PilotJudgement {
   // A plain restart leaves no hole: the decided cycles follow one another and the pilot resumes
   // from its persisted state. Only a cycle that ran WITHOUT this code does.
   if (input.latestDecidedDecisionId == null) return hold('identite_illisible');
-  if (
-    identity.lastSeenDecisionId != null &&
-    input.latestDecidedDecisionId > identity.lastSeenDecisionId
-  ) {
+  // A NULL HEARTBEAT IS NEVER AN EXEMPTION. It falls back on the activation baseline, which is
+  // the only other durable answer to "where was the journal when this pilot started":
+  //
+  //   * nothing decided since the activation  → the pilot has simply not had a cycle to name
+  //     yet, and resumption stays possible (a crash BEFORE any decision lands here);
+  //   * something decided since the activation → a cycle ran with no receipt, which is a hole
+  //     in the high-water mark (a crash AFTER the decision but before the receipt lands here).
+  const seenMark = identity.lastSeenDecisionId ?? identity.activationBaselineDecisionId;
+  if (seenMark == null) {
+    // Neither mark exists: the pilot cannot prove anything about its own continuity, and the
+    // whole point of this check is that it is not skippable.
+    return hold('pilote_interrompu');
+  }
+  if (input.latestDecidedDecisionId > seenMark) {
     return {
       mayCorrect: false,
       hold: 'pilote_interrompu',
       write: {
         kind: 'interrupt_mode',
-        lastSeenDecisionId: identity.lastSeenDecisionId,
+        lastSeenDecisionId: seenMark,
         latestDecidedDecisionId: input.latestDecidedDecisionId,
       },
       alert: 'mode_interrupted',
@@ -416,7 +448,11 @@ export interface PilotContractSource {
   };
 }
 
-export function pilotContractOf(source: PilotContractSource, universe: readonly string[]): PilotContract {
+export function pilotContractOf(
+  source: PilotContractSource,
+  universe: readonly string[],
+  reserveAsset: string,
+): PilotContract {
   return {
     contractVersion: source.exposurePilot.contractVersion,
     bandVersion: source.exposureBand.version,
@@ -426,6 +462,7 @@ export function pilotContractOf(source: PilotContractSource, universe: readonly 
       constructive: source.exposureBand.constructive,
     },
     universe,
+    reserveAsset,
     caps: source.execution.caps,
     execution: {
       feePercent: source.execution.feePercent,
@@ -504,6 +541,18 @@ export interface PilotWindowRow {
   activatedAt: string | null;
   activatedDecisionId: number | null;
   openingEquityQuote: number | null;
+  /**
+   * WHETHER THE EVENT HAPPENED, apart from whether its cycle has been resolved.
+   *
+   * The two used to be the same question, and conflating them produced the worst answer
+   * available: after a 50% stop whose pointer had not been filled in, the default cascade fell
+   * through to `point_courant` and quietly valued the witnesses PAST the stop. An event that
+   * happened must never be stepped over — if its cycle is unresolved the answer is a refusal,
+   * never a later instant.
+   */
+  alertAt: string | null;
+  stoppedAt: string | null;
+  closedAt: string | null;
   alertDecisionId: number | null;
   stoppedDecisionId: number | null;
   closedDecisionId: number | null;
@@ -541,6 +590,16 @@ export type PilotWindowResolution =
  * it chooses explicitly — the closure, then the stop, then the current point — publishing the
  * label of what it really used.
  */
+/** An event that HAPPENED but whose cycle is not yet known. A refusal, never a later instant. */
+function unresolved(instant: string): PilotWindowResolution {
+  return {
+    official: false,
+    reason:
+      `l'instant "${instant}" a eu lieu mais son cycle reste irresolu — la fenetre ne peut etre ` +
+      'ni bornee dessus ni prolongee au-dela',
+  };
+}
+
 export function resolvePilotWindow(
   row: PilotWindowRow | null,
   requested: string | null,
@@ -559,22 +618,26 @@ export function resolvePilotWindow(
     return { official: false, reason: "l'equity d'ouverture du pilote est inutilisable" };
   }
 
-  const known: Record<string, number | null> = {
-    alerte_40: row.alertDecisionId,
-    arret_50: row.stoppedDecisionId,
-    cloture: row.closedDecisionId,
+  const known: Record<string, { happened: boolean; decisionId: number | null }> = {
+    alerte_40: { happened: row.alertAt != null, decisionId: row.alertDecisionId },
+    arret_50: { happened: row.stoppedAt != null, decisionId: row.stoppedDecisionId },
+    cloture: { happened: row.closedAt != null, decisionId: row.closedDecisionId },
   };
 
   let instant: PilotInstant;
   let toDecisionId: number | null;
   if (requested == null) {
-    // NO FLAG: take what really exists, and say which one it was.
-    if (row.closedDecisionId != null) {
+    // NO FLAG: take the latest instant that REALLY HAPPENED, and say which one it was. The
+    // cascade is driven by the event, not by its pointer — an event that happened with an
+    // unresolved cycle refuses, and never lets the window run past it.
+    if (known.cloture!.happened) {
+      if (known.cloture!.decisionId == null) return unresolved('cloture');
       instant = 'cloture';
-      toDecisionId = row.closedDecisionId;
-    } else if (row.stoppedDecisionId != null) {
+      toDecisionId = known.cloture!.decisionId;
+    } else if (known.arret_50!.happened) {
+      if (known.arret_50!.decisionId == null) return unresolved('arret_50');
       instant = 'arret_50';
-      toDecisionId = row.stoppedDecisionId;
+      toDecisionId = known.arret_50!.decisionId;
     } else {
       instant = 'point_courant';
       toDecisionId = null;
@@ -584,14 +647,16 @@ export function resolvePilotWindow(
       official: false,
       reason: `instant "${requested}" inconnu — attendus : alerte_40, arret_50, cloture`,
     };
-  } else if (known[requested] == null) {
+  } else if (!known[requested]!.happened) {
     return {
       official: false,
-      reason: `l'instant "${requested}" n'a pas eu lieu pour ce pilote — aucun cycle ne lui correspond`,
+      reason: `l'instant "${requested}" n'a pas eu lieu pour ce pilote`,
     };
+  } else if (known[requested]!.decisionId == null) {
+    return unresolved(requested);
   } else {
     instant = requested as PilotInstant;
-    toDecisionId = known[requested]!;
+    toDecisionId = known[requested]!.decisionId;
   }
 
   return {

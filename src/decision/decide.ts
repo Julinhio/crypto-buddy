@@ -34,12 +34,12 @@ import {
 } from '../exposure/pilot.js';
 import {
   applyPilotWrite,
-  backfillActivationDecision,
   closeMeasurementWindow,
   markDrawdownAlertDelivered,
   markPilotSawDecision,
   readLatestDecidedDecisionId,
   readPilotIdentity,
+  resolvePilotEventCycles,
 } from '../persistence/exposurePilot.js';
 import { saveBandObservation, readWindowCoverage } from '../persistence/exposureBandObservations.js';
 import { saveBandCorrections, toCorrectionRows } from '../persistence/exposureBandCorrections.js';
@@ -635,6 +635,11 @@ export async function decide(): Promise<DecideResult> {
     decisionId: number | null,
   ): Promise<void> => {
     if (identity == null || identity.status !== 'active') return;
+    // ALREADY CLOSED — nothing left to decide. Without this the coverage scan ran on every
+    // cycle for the rest of the pilot, re-logged a closure that had already happened and issued
+    // an update that matched no row. The state is persisted; reading it is the point of
+    // persisting it.
+    if (identity.windowClosedAt != null) return;
     const now = new Date();
     const elapsedWeeks = (now.getTime() - Date.parse(identity.activatedAt)) / (7 * 24 * 3600 * 1000);
     if (!Number.isFinite(elapsedWeeks) || elapsedWeeks < config.exposurePilot.minWeeks) return;
@@ -1427,7 +1432,7 @@ export async function decide(): Promise<DecideResult> {
    * already judged the model's RAW proposal (§3.4.5), the correction does not re-enter it
    * (§3.4.7), and the transition gate speaks AFTER it, on the corrected movements (§3.4.2).
    */
-  const pilotContract = pilotContractOf(config, tradableBaseAssets(config));
+  const pilotContract = pilotContractOf(config, tradableBaseAssets(config), reserveStable);
   const pilotContractSha256 = contractDigest(pilotContract);
   // The read only happens in `application`. In every other mode `judgePilot` answers
   // `mode_inactif` without looking at anything, so observation adds no query to the cycle.
@@ -1464,7 +1469,11 @@ export async function decide(): Promise<DecideResult> {
   // drawdown nobody recorded.
   if (pilotJudgement.write != null) {
     const landed = await applyPilotWrite(supabase, pilotJudgement.write, {
+      // NULL, AND NECESSARILY SO: this write happens before the decision row exists, because
+      // that row has to carry the corrected target. The exact cycle is filled in afterwards by
+      // `resolvePilotEventCycles`, which is idempotent and repairs a previous miss.
       decisionId: null,
+      latestDecidedDecisionId,
       equityQuote: portfolio.equity.toNumber(),
       contractSha256: pilotContractSha256,
       contractVersion: config.exposurePilot.contractVersion,
@@ -1752,8 +1761,13 @@ export async function decide(): Promise<DecideResult> {
   // official INSTANT is durable from that moment. This fills in the pointer a heartbeat later,
   // best-effort and idempotent: if it misses, the replay still finds the opening cycle from
   // `activated_at`, which is the fact that matters.
-  if (pilotJudgement.write?.kind === 'activation' && id != null) {
-    await backfillActivationDecision(supabase, id);
+  // THE THREE EVENT POINTERS, RESOLVED AND REPAIRED. Activation, the 40% alert and the 50%
+  // stop are all written before the decision row exists, so none of them can name its own
+  // cycle at the time. This pass fills every one that is still missing, from the instant each
+  // event durably recorded — so it is idempotent, and a cycle that died before running it is
+  // repaired by the next one rather than leaving a window nobody can ever bound.
+  if (EXPOSURE_BAND_MODE === 'application') {
+    await resolvePilotEventCycles(supabase);
   }
 
   // THE HEARTBEAT. Records that this pilot saw this decided cycle — on EVERY application

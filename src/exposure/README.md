@@ -17,9 +17,9 @@ lue et contestée avant qu'une seule ligne de correction n'existe.
 ni rendement.** Le rejeu historique le dit dans son propre artefact (`bite.json` →
 `contract.not_measured`), pas seulement ici.
 
-**Ni l'une ni l'autre ne touche au chemin des ordres.** Le mode `application` reste refusé par
-le binaire jusqu'à la dernière brique ; jusque-là la correction est calculée, journalisée, et
-rien ne l'envoie.
+**Les briques 1 à 3 ne touchent pas au chemin des ordres**, et la brique 4 est la seule qui le
+peut — sous deux verrous, et seulement quand le pilote est armé. En `off` et en `observation`
+la correction est calculée, journalisée, et rien ne l'envoie.
 
 ---
 
@@ -103,18 +103,16 @@ dessus.
 |---|---|
 | absente / `off` | la bande n'est pas calculée et rien n'est écrit — comportement v5 strictement inchangé |
 | `observation` | calcul et journal complets, **aucun effet sur les ordres** |
-| `application` | **refusée par ce binaire** — voir ci-dessous |
+| `application` | **légale depuis la brique 4**, et armée seulement si l'identité persistante le dit aussi |
 
 **L'absence signifie sûr.** Rien à poser sur Railway pour garder le comportement actuel, et un
 environnement qui perd ses variables revient bande éteinte plutôt qu'à moitié armée.
 
-`application` est refusée **par le binaire**, pas par la discipline. Le passage
-`observation` → `application` est l'instant officiel de départ du pilote : son equity, son
-plus-haut et son horloge de huit semaines commencent là, et cet instant ne se dépense qu'une
-fois. La correction, les deux témoins, l'identité et le coupe-circuit ne sont pas dans ce
-build ; un bot qui accepterait `application` aujourd'hui démarrerait l'expérience sans témoin
-et sans drawdown persistant pour l'arrêter. La valeur devient légale dans la PR qui la rend
-sûre, et son message de refus le dit plutôt que de se lire comme une faute de frappe.
+`application` est **légale** depuis la brique 4 — la correction, les deux témoins, l'identité
+fixe et le coupe-circuit sont tous là. **Légale n'est pas armée** : la variable seule ne décide
+de rien, et la correction n'atteint l'exécuteur que si l'identité persistante le dit aussi. Le
+passage `observation` → `application` reste l'instant officiel du pilote, et il ne se dépense
+qu'une fois.
 
 ---
 
@@ -610,6 +608,40 @@ donc pas le cycle passé dangereux : ce cycle a bien tourné sous un pilote vali
 **suivant** impossible, parce qu'à ce moment-là le pilote ne peut plus prouver avoir vu ce qui
 s'est passé.
 
+### Les trois instants officiels et leurs pointeurs
+
+Activation, alerte 40 % et arrêt 50 % sont tous écrits **avant** que la ligne de décision
+existe — cette ligne doit porter la cible corrigée, elle ne peut donc pas venir en premier.
+Aucun des trois ne peut donc nommer son propre cycle au moment où il se produit. Chacun
+enregistre son **instant**, durablement, et une passe de résolution remplit le cycle ensuite :
+le premier cycle décidé à cet instant ou après.
+
+Elle est **idempotente** — elle ne touche qu’un pointeur encore nul — et **récupérable** : un
+cycle qui meurt entre son événement et cette passe laisse le pointeur nul, et le cycle suivant
+le répare depuis le même instant durable.
+
+**Un événement survenu n’est jamais enjambé.** La cascade par défaut est pilotée par le fait
+que l’événement a eu lieu, pas par la présence de son pointeur : un arrêt survenu dont le cycle
+reste irrésolu fait **refuser** le rejeu officiel, il ne le fait pas glisser jusqu’au point
+courant. C’est la prolongation silencieuse que le premier jet réintroduisait par une autre
+porte.
+
+L’alerte à 40 % fait exception dans un seul sens : elle ne **borne** pas la cascade par défaut,
+parce qu’elle ne termine rien — la correction continue de s’appliquer après elle.
+
+### Un battement nul se lit, il ne dispense pas
+
+Un battement nul recouvrait deux situations. L’activation fige donc une **référence durable** :
+le dernier cycle décidé qui existait avant elle.
+
+| Situation | Réponse |
+|---|---|
+| aucun cycle décidé depuis l’activation | **reprise possible** — le pilote n’a pas encore eu de cycle à nommer |
+| au moins un cycle décidé sans battement | **statut interrompu** — il y a un trou dans le plus-haut |
+| ni battement ni référence | **statut interrompu** — le pilote ne peut rien prouver de sa continuité |
+
+Un crash **avant** toute décision tombe dans la première ligne ; un crash **après** la décision
+mais avant le battement, dans la deuxième.
 ### La fenêtre officielle des témoins
 
 Le rejeu des témoins lit ses bornes dans l'identité : ouverture au cycle officiel d'activation,
