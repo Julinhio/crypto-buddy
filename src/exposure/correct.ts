@@ -240,7 +240,7 @@ function round(value: number): number {
  * pass 1 respect "cibles risquées STRICTEMENT POSITIVES" without a special case. The equal
  * pass passes `share = 1` for everyone.
  */
-function waterfill(
+export function waterfill(
   amount: number,
   candidates: ReadonlyArray<{ asset: string; share: number; headroom: number }>,
 ): Map<string, number> {
@@ -602,7 +602,11 @@ export function correctToBand(input: CorrectInput): CorrectionOutcome {
         cause = 'plafond_individuel';
       } else if (dropped?.reason === 'movement_floor') {
         cause = 'seuil_de_mouvement';
-      } else if (dropped?.reason === 'no_price') {
+      } else if (dropped?.reason === 'no_price' || dropped?.reason === 'no_budget') {
+        // The §3.3 vocabulary has four causes, and both of these are the fourth: "autre
+        // impossibilité". Neither is the 2% threshold — one could not be priced, the other
+        // could not be paid for — and reporting either as `seuil_de_mouvement` would send a
+        // reader looking for a threshold that had nothing to do with it.
         cause = 'autre_impossibilite';
       } else if (delta === 0 && !line.mayIncrease) cause = 'gel';
       // DUST IS NOT A BLOCKAGE, and it deliberately leaves the cause at `aucune`.

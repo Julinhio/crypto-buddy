@@ -1,10 +1,12 @@
-# Pilote d'exposition contrainte — briques 1 et 2
+# Pilote d'exposition contrainte — briques 1 à 3
 
 | Brique | Fichier | Ce qu'elle fait |
 |---|---|---|
 | 1 | `band.ts` | **évalue** : le contexte, la bande, où la cible se situe, ce que les gels et les plafonds laissent atteindre |
 | 1 | `observe.ts` | une ligne d'observation par cycle + le contrôle d'intégrité par bougie |
 | 2 | `correct.ts` | **répartit** : §3.5 vers le plancher, §3.6 vers le plafond, la préséance, la consolidation |
+| 3 | `witness.ts` | **compare** : les deux témoins chaînés, leur pondération sous plafonds, leur plomberie |
+| 3 | `../replay/exposureBandWitnesses.ts` | le rejeu hors ligne des trois livres, en segments, et ses huit critères |
 
 Les tenir séparées est ce qui a rendu le point de contrôle honnête : la morsure s'est publiée,
 lue et contestée avant qu'une seule ligne de correction n'existe.
@@ -305,9 +307,9 @@ Trois lectures, parce qu'une seule serait trompeuse. « Le modèle demande moins
 imposée » est presque automatique — il ré-émet sa propre préférence. Ce qui distingue
 l'indifférence de la **lutte**, c'est qu'il descende plus bas qu'il n'était descendu lui-même.
 
-## Limite connue — à lever AVANT l'activation du pilote
+## La limite connue de la brique 2 — LEVÉE (brique 3)
 
-**Un achat abandonné faute de budget n'apparaît nulle part.**
+**Un achat abandonné faute de budget n'apparaissait nulle part.**
 
 Quand le cash est déjà au niveau de la réserve cible et que les ventes censées le financer
 sont toutes supprimées sous le seuil de 2 %, le budget d'achat est nul et `planMovements` saute
@@ -323,13 +325,220 @@ Portée mesurée : **aucun ordre n'est modifié et aucun chiffre publié n'est a
 condition est étroite et sa fréquence n'a pas été mesurée. C'est pourquoi elle n'a pas été
 corrigée dans la brique 2, sur arbitrage.
 
-**Critère obligatoire avant de passer le pilote en `application`** : un achat abandonné pour
-budget insuffisant doit porter une raison **distincte et durable**, jamais confondue avec le
-seuil de 2 %, la poussière ou un prix absent. Tant que ce n'est pas fait, la comptabilité des
-suppressions n'est pas exhaustive, et le journal du pilote hériterait de trous silencieux sur
-exactement les lignes qu'il est censé expliquer.
+**Le critère obligatoire est rempli.** `planMovements` déclare désormais ces jambes sous une
+quatrième raison, `no_budget`, distincte et durable (migration 0032) :
 
-## Passage de relais vers la brique 3
+| Raison | Ce qu'elle dit de la jambe |
+|---|---|
+| `movement_floor` | trop petite pour valoir la peine d'être envoyée |
+| `no_price` | pas dimensionnable, aucun prix ce cycle |
+| `dust` | rien à bouger, le livre est déjà là |
+| `no_budget` | elle valait la peine, elle tenait au-dessus du seuil, **et rien ne pouvait la payer** |
+
+Les fondre aurait laissé le seuil de 2 % prendre le crédit d'une contrainte de trésorerie —
+la même famille de mauvaise attribution que la cause par ligne existe pour empêcher. Côté
+cause du §3.3, `no_budget` est la quatrième cause, `autre_impossibilite` : ce n'est pas le
+seuil, et seul `movement_floor` peut réclamer `seuil_de_mouvement`.
+
+**Aucun ordre ne change.** Ces jambes n'étaient pas envoyées avant et ne le sont pas
+davantage ; ce qui change, c'est qu'elles sont déclarées. La preuve 23 de
+`src/test/exposureCorrection.ts` vérifie les deux moitiés : la jambe non financée est
+déclarée, le plan n'envoie toujours rien, et un achat *financé* est toujours envoyé sans
+qu'aucune raison ne soit inventée pour lui.
+
+## Les deux témoins (brique 3)
+
+```bash
+npm run replay:band-witnesses
+```
+
+Hors ligne, lecture seule, huit critères, sortie non nulle si l’un échoue. L'artefact
+`out/exposure-band-witnesses/` n'est pas commité.
+
+### Trois livres chaînés, et deux seulement sont des témoins
+
+| Livre | Ce qu'il vise | Porte les gels du bot ? |
+|---|---|:--:|
+| **E** | l'exposition **réelle** du bot, à chaque intervalle | non |
+| **P** | le **plancher** de la bande courante | non |
+| **B̂** | le bot **corrigé** — pas un témoin, voir plus bas | oui |
+
+Bot moins E mesure la sélection à exposition identique. E moins P mesure la valeur du timing
+d'exposition dans la bande. Bot moins P mesure les deux ensemble.
+
+### La pondération : équipondérée sous plafonds, excédent redistribué
+
+Arbitré. Le §3.7 dit « répartie également entre les quatre actifs » et les plafonds par actif
+disent que XRP ne dépasse pas 15. À 70 % d'exposition la part égale vaut 17,5 : au-dessus de
+60 %, les deux ne peuvent pas tenir ensemble, et l'histoire v5 y passe 57 cycles sur 904.
+
+**La priorité du contrat est l'exposition** — « bot moins E mesure la sélection *à exposition
+identique* » n'est vrai que si E porte vraiment celle du bot. Donc : répartition égale,
+écrêtement de ce qu'un plafond refuse, et **redistribution** de l'excédent sur les lignes qui
+ont encore de la place — le même water-filling que la répartition de bande, importé plutôt que
+réécrit. Aucun surplus ne repart en cash tant que les plafonds peuvent tenir l'exposition ;
+seul ce qu'aucun plafond ne peut prendre est publié comme inplaçable.
+
+Les actifs écrêtés et les points redistribués sont journalisés à chaque cycle.
+
+### Les témoins portent la plomberie, jamais les gels
+
+Arbitré aussi, et c'est une séparation de **nature**, pas de mode.
+
+Ils portent leur propre plomberie d'exécution — frais, seuil de 2 %, poussière, prix absent,
+budget insuffisant — appliquée à **leur** livre, à travers le `planMovements` de l'exécuteur
+lui-même. Un témoin qui ignorerait le seuil serait un étalon qu'aucun portefeuille n'aurait pu
+tenir.
+
+Ils ne portent ni gel, ni stop, ni transition. Ces états décrivent une position **du bot** : un
+`stop_exit` se déclenche sur son prix d'entrée, un `frozen` marque une transition sur sa ligne.
+Un témoin n'a jamais pris cette entrée. Les lui appliquer rendrait le comparateur dépendant de
+la trajectoire qu'il existe pour évaluer — et, aujourd'hui, plus contraint que le bot lui-même,
+dont la porte est en `observe` et ne bloque aucun ordre réel. **La séparation reste valable si
+la porte passe un jour en `enforce`** : elle dit de quel livre un gel parle, pas dans quel mode
+il est lu.
+
+Prouvé sur le graphe d'imports plutôt que sur le comportement : `transition/gate.ts` n'est pas
+dans le graphe d'exécution de `witness.ts`, qui n'appelle aucune fonction de porte et ne lit
+aucune carte de verdicts.
+
+### B̂ — ce que la répartition envoie vraiment (C7)
+
+B̂ n'est pas un témoin. C'est le bot **sous la correction**, chaîné : à chaque cycle la bande
+est évaluée contre **son** livre, la correction dimensionnée sur **son** équité, et ses
+mouvements bookés. À ce titre il hérite des gels en entier — le code ne crée jamais d'ordre sur
+une ligne gelée.
+
+**L'hypothèse est affichée, pas enfouie** : B̂ rejoue les réponses **historiques** du modèle
+contre un livre que le modèle n'a jamais vu. Il mesure donc la **conséquence mécanique de la
+correction sous décisions historiques figées**. Ce n'est ni une simulation de la réaction du
+modèle, ni une borne de performance — ni haute ni basse.
+
+C'est ce livre qui répond à C7, que le ré-ancrage à un pas de la brique 2 ne pouvait pas
+atteindre : il repartait à chaque cycle d'un livre que rien n'avait corrigé.
+
+### C8 n'a pas de verdict, et c'est de l'arithmétique
+
+« Le modèle utilise-t-il l'exposition imposée, ou la combat-il ? » porte sur ce que le modèle
+fait quand il **voit** une position que le correcteur a créée. En mode observation il n'en a
+jamais vu une seule, et aucun contrefactuel chaîné ne répare cela : il ferait répondre les mots
+réels du modèle à une question qu'on ne lui a jamais posée.
+
+Le **lecteur** existe (`readAdoption`, trois lectures : adoption, indifférence, lutte) et les
+données sont conservées. Le **chiffre** n'est pas publié : un chiffre affaibli serait lu comme
+la réponse. C8 commence le jour où `application` expose réellement le modèle aux positions
+corrigées.
+
+### L'exposition que E vise est RECONSTRUITE, jamais lue
+
+`equity_snapshots` ressemblait à la réponse et n'en est pas une : le scheduler la construit
+depuis `DecideResult.portfolio`, documenté comme « le livre que l'IA a vu » — le livre **avant**
+les ordres. Prouvé sur le corpus : au cycle 1807 le bot vend sa ligne ETH entière et le snapshot
+la porte encore à sa quantité d'avant.
+
+Le livre post-cycle est donc dérivé comme la production le dérive : **le livre pré-cycle plus le
+registre souverain du même cycle** — `event_type='intent'` et `validation_status='executed'`,
+exactement le filtre de `loadLedger`. Les quantités bougent de `ledger_base_delta`, le cash du
+`ledger_quote_delta` frais compris, et le tout est valorisé aux prix **du cycle**. Les deux
+entrées sont connues à l'instant N : rien d'un cycle ultérieur n'entre dans la cible de E.
+
+**W2 vérifie cette reconstruction contre un terme indépendant** : le contexte du cycle
+**suivant**, une autre ligne écrite par un autre chemin, qui montre ce que le bot tenait à son
+réveil suivant. Comparé sur les **quantités** — un prix bouge entre deux réveils, une quantité
+détenue non. L'ancien W2 était circulaire : il confrontait la cible de E à la valeur dont il
+l'avait construite, et serait passé aussi bien sur le mauvais livre.
+
+**Et W2 doit avoir comparé quelque chose.** « Aucune dérive » ne prouve rien sur un corpus où
+rien n'a été comparé : un cycle terminal n'a pas de successeur, un segment singleton n'a aucune
+paire, et un corpus entièrement fait de singletons serait passé avec zéro comparaison et un taux
+d'accord affiché à 0 %. Le nombre attendu est donc calculé depuis la **structure des segments**
+— quatre actifs par cycle ayant un successeur dans son segment — et l'observé doit lui être
+**exactement égal**. Les cycles terminaux sont publiés comme non contrôlables, les segments
+singletons comme **non exercés**, et un corpus n'attendant aucune comparaison ne peut pas faire
+passer le critère.
+
+### Le rejeu s'arrête à un point que le journal a PROUVÉ terminé
+
+Une ligne de décision apparaît **avant** que le cycle qui l'a écrite soit fini : production
+insère la décision, puis place les ordres, puis book le registre souverain, puis journalise les
+verdicts de transition. Trois requêtes lancées ensemble peuvent donc enjamber cet instant —
+l'une voyant la décision, l'autre ratant son registre — et le rejeu conclurait, en silence, que
+le cycle n'a rien booké. C'est le défaut du livre pré-trade, ressuscité par une course.
+
+La borne n'est donc pas « le dernier identifiant visible ». C'est **le dernier cycle que la
+couche écrite en dernier couvre complètement** — un verdict de porte par actif de l'univers — et
+toutes les requêtes portent ensuite exactement cette borne. Mesuré sur le corpus : les portes
+arrivent 0,33 s après la ligne de décision en moyenne, 2,96 s au pire, et **jamais** avant le
+registre. Aucun point figé du tout est un refus de rejouer, jamais un run vide.
+
+### La précision dont dépend la reconstruction est un invariant, pas une hypothèse
+
+Le livre de départ vient d'un contexte dont production arrondit les quantités à **8 décimales**
+et le cash au **centime**. Repartir de là et y ajouter des deltas exacts n'égale la dérivation de
+production que tant que les deux tiennent sur la grille du journal — ce qui est le cas, parce
+qu'une quantité bookée est calée sur le pas du marché avant d'être journalisée.
+
+Mesuré : 2472 comparaisons, écart relatif maximum **2,14 · 10⁻¹⁶**, soit du bruit machine. Mais
+« mesuré » n'est pas « garanti », donc la condition est **vérifiée** : une quantité — du livre de
+départ ou du registre — qui ne tient plus sur la grille **arrête le rejeu** avec son cycle et son
+nombre nommés, plutôt que de laisser passer une approximation silencieuse.
+
+L'arrondi du **cash** est documenté à part et borné : au plus 0,005 $ par reconstruction, sur
+l'**équité** et jamais sur les quantités. À la plus petite équité de la fenêtre (1019,72 $), son
+effet maximal sur l'exposition est de **0,00049 point** — quatre ordres de grandeur sous le seuil
+de mouvement de 2 %. W2 reste la preuve empirique indépendante, et elle porte sur les quantités.
+
+### Un trou coupe la chaîne, il ne la comprime jamais
+
+Une chaîne qui saute un cycle irreconstructible et continue traite l'intervalle comme s'il
+n'avait pas existé. Si les témoins s'y étaient rééquilibrés, toutes les lignes suivantes
+portent des quantités, du cash et des frais qui n'ont jamais existé — et le compteur de trous
+affiche un rejeu propre.
+
+Donc un trou **interne ferme le segment**. Un nouveau s'ouvre au premier cycle complet suivant
+et **réancre** les livres sur l'equity du bot à cet instant, en cash. Aucune equity, aucun
+mouvement, aucun écart ne traverse la frontière, et chaque ligne porte son `segment_id`.
+
+W0 distingue trois places, parce qu'elles ne coûtent pas la même chose :
+
+| Place | Effet |
+|---|---|
+| antérieure au début reconstructible | aucun — la chaîne n'a pas commencé |
+| **interne** | **rupture + réancrage** |
+| terminale | aucune — rien ne reprend après |
+
+La règle vit dans `witness.ts` (`cutIntoSegments`), pure et prouvée sur des fixtures qui **ont**
+des trous : le corpus n'en porte aujourd'hui aucun d'interne, et une règle qui ne vivrait que
+dans le rejeu ne serait jamais exercée.
+
+### Ce que ce rejeu ne mesure pas
+
+Aucun rendement, aucun drawdown, aucun écart bot-témoin. La fenêtre du pilote commence au
+passage en `application` ; ce rejeu est un **banc d'essai de la machinerie**, et son artefact
+le dit dans son propre bloc `contract.not_measured`.
+
+Ce qu il prouve, c est le §6 : que toutes les entrées des témoins sont **durablement
+journalisées** par le cycle vivant — prix, livre pré-cycle, registre souverain, journal de régime,
+verdicts de porte, cible bornée — et que la reconstruction se **reproduit** à l'empreinte près.
+Aucune écriture n'a été ajoutée au chemin de trading pour les témoins.
+
+## Passage de relais vers la brique 4
+
+Ce que la brique 4 hérite, et ce qu'elle doit apporter :
+
+| | |
+|---|---|
+| **Hérite** | les trois livres chaînés et leur rejeu reproductible, prêts à être valorisés à un instant donné — ce que demande le §3.9 au déclenchement du coupe-circuit |
+| **Hérite** | le lecteur de C8 et les colonnes qui l'alimentent, en attente du premier cycle en `application` |
+| **Doit apporter** | l'**identité persistante** du pilote : version de configuration, instant d'activation, equity initiale, plus-haut, état de l'alerte, actif ou arrêté — et qui survit à un redémarrage Railway |
+| **Doit apporter** | le **coupe-circuit** : alerte unique à 40 %, désactivation persistante de la seule correction de bande à 50 %, aucune liquidation forcée |
+| **Doit apporter** | la légalisation de `application` dans le résolveur d'environnement — **et elle seule crée l'instant officiel du pilote**, qui ne se dépense qu'une fois |
+
+L'instant d'ouverture des témoins est aujourd'hui un **paramètre** du banc d'essai, pris au
+premier cycle de la fenêtre. Le vrai instant appartient à la brique 4 : c'est le passage en
+`application`, et les livres devront s'ouvrir là, sur l'equity réelle de ce moment.
+
+## Passage de relais de la brique 2 (tenu)
 
 Ce que la brique 3 hérite, et ce qu'elle doit apporter :
 
@@ -338,13 +547,16 @@ Ce que la brique 3 hérite, et ce qu'elle doit apporter :
 | **Hérite** | les faits par cycle : `base_weight_percent`, `correction_moves_holding`, `realised_*`, les deux écarts, `suppressed_reason` par ligne, l'origine et la cause |
 | **Hérite** | l'artefact du rejeu, où les cycles sans faisabilité connue n'affirment **rien** plutôt que d'affirmer un écart fabriqué |
 | **Doit apporter** | le contrefactuel **chaîné** — les témoins E et P — qui seul permet une lecture entre cycles |
-| **Doit lever** | la limite ci-dessus, avant activation |
+| **A levé** | la limite ci-dessus — `no_budget`, migration 0032, preuve 23 |
 
-Deux conclusions ont été retirées de la brique 2 et lui reviennent : ce que la répartition
-enverrait réellement, et si le modèle utilise ou combat l'exposition imposée. Toutes deux
-posent des questions **entre cycles** — à qui appartient cette jambe, dans quel cadre de
-valorisation — et y répondre avec un ré-ancrage à un pas produisait des attributions
-approximatives. Les témoins sont l'outil adapté ; les faits durables sont déjà là pour eux.
+Deux conclusions ont été retirées de la brique 2 et lui revenaient : ce que la répartition
+enverrait réellement (C7), et si le modèle utilise ou combat l'exposition imposée (C8).
+
+**Ce passage de relais était juste sur la première et faux sur la seconde**, et la brique 3 l'a
+corrigé plutôt que de l'exécuter tel quel. C7 est bien une question de cadre de valorisation :
+un livre chaîné y répond, et c'est B̂. C8 demande la **réaction du modèle** à une position qu'il
+n'a jamais vue ; aucun chaînage ne fabrique cette réponse, et son verdict attend le pilote. Le
+détail est dans la section des témoins ci-dessus.
 
 ## Ce que ces briques ne peuvent pas conclure
 

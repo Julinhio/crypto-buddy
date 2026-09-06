@@ -36,7 +36,19 @@ export interface SuppressedLeg {
   side: 'buy' | 'sell';
   /** What the leg would have been worth, in quote. */
   notional: Decimal;
-  reason: 'movement_floor' | 'no_price' | 'dust';
+  /**
+   * `no_budget` is the one that is NOT about the leg itself. The other three describe the leg
+   * — too small, unpriceable, dust. This one describes the cycle: the buy was well formed and
+   * over the floor, and there was simply no cash above the target reserve to pay for it,
+   * because the sells that would have funded it were all suppressed first.
+   *
+   * It is kept DISTINCT rather than folded into `movement_floor` because the two lead to
+   * opposite readings. A leg under the floor says "this correction was too small to be worth
+   * making"; an unfunded buy says "this correction was worth making and could not be paid
+   * for". Merging them would let the floor take the blame for a cash constraint, which is the
+   * same class of mis-attribution the per-line cause exists to prevent.
+   */
+  reason: 'movement_floor' | 'no_price' | 'dust' | 'no_budget';
   /** The floor it failed to clear, when that is the reason. */
   floor: Decimal;
   detail: string;
@@ -238,7 +250,37 @@ export function planMovements(
   const buyBudget = Decimal.max(portfolio.cash.plus(cashFromSells).minus(targetReserve), ZERO);
   const totalBuyGross = buys.reduce((sum, b) => sum.plus(b.grossDelta), ZERO);
 
-  if (totalBuyGross.gt(0) && buyBudget.gt(0)) {
+  // NO BUDGET AT ALL — the branch that used to abandon its buys in silence.
+  //
+  // When the cash already sits at (or under) the target reserve and every sell that would have
+  // funded these buys was suppressed first, `buyBudget` is zero and the loop below never runs.
+  // The buys were sized, priced, and cleared the floor; they then vanished, appearing NEITHER
+  // in `movements` NOR in `suppressed`, while every consumer of this plan — the band's per-line
+  // cause, the suppressed-leg count, the pilot's journal — believes the accounting is
+  // exhaustive.
+  //
+  // Nothing about the ORDERS changes here: these legs were never sent before and are not sent
+  // now. What changes is that they are declared. The mandate for the exposure pilot makes this
+  // a precondition of activation, because the pilot's journal exists precisely to explain the
+  // lines that did not move, and a silent exit is a hole on exactly those lines.
+  if (buys.length > 0 && (totalBuyGross.lte(0) || buyBudget.lte(0))) {
+    for (const b of buys) {
+      const detail =
+        `buy of ${b.grossDelta.toFixed(2)} has no budget: cash above the target reserve is ` +
+        `${buyBudget.toFixed(2)} after the sells this cycle really makes`;
+      console.log(`[skip${logTag}] ${b.asset}: ${detail} — nothing was sent, nothing journaled.`);
+      suppressed.push({
+        asset: b.asset,
+        side: 'buy',
+        // What the leg WOULD have been worth. Deliberately its gross delta and not its
+        // pro-rata share: there was no budget to take a share of.
+        notional: b.grossDelta,
+        reason: 'no_budget',
+        floor,
+        detail,
+      });
+    }
+  } else {
     for (const b of buys) {
       const cashOutlay = buyBudget.times(b.grossDelta).div(totalBuyGross); // share incl. fee
       if (cashOutlay.lt(DUST_NOTIONAL)) {

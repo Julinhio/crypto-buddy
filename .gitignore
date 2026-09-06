@@ -57,3 +57,12 @@ out/exposure-observation/
 # corpus. The published deliverable is the report on stdout and the aggregates in
 # docs/RAPPORT-MORSURE-BANDE.md, never the per-cycle export.
 out/exposure-band-bite/
+
+# Exposure-BAND witness artefacts — never committed.
+#
+# Same nature and same reason again, plus one of its own: the file carries the three chained
+# books cycle by cycle — equity included — and an equity series sitting in the repository
+# would be read as a result the protocol says this brick does not produce. It is regenerable
+# from the same corpus at any time, and the run prints its SHA-256 so a regenerated copy can
+# be checked against the one that produced the figures.
+out/exposure-band-witnesses/
