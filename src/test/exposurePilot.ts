@@ -47,6 +47,7 @@ function identity(over: Partial<PilotIdentity> = {}): PilotIdentity {
     openingEquityQuote: 1000,
     peakEquityQuote: 1000,
     alertDrawdownAt: null,
+    lastSeenDecisionId: 1000,
     ...over,
   };
 }
@@ -60,6 +61,8 @@ function judge(over: Partial<PilotJudgeInput> = {}) {
     contractVersion: config.exposurePilot.contractVersion,
     equityQuote: 1000,
     drawdown: DRAWDOWN,
+    // The journal's newest decided cycle IS the one the pilot last saw: no hole.
+    latestDecidedDecisionId: 1000,
     ...over,
   });
 }
@@ -306,6 +309,99 @@ console.log('\nProof 8 — the module on the trading path can neither spawn, rea
   ok('no file system, no process', !/node:fs|node:child_process|readFileSync|execFileSync/.test(code));
   ok('no query builder', !/\.from\('/.test(code));
   ok('and no clock of its own — every instant is an argument', !/Date\.now\(\)|new Date\(\)/.test(code));
+}
+
+// ── PROOF 9 — an interrupted pilot never resumes ─────────────────────────────────────
+//
+// ARBITRATED, and it replaces a documented limitation with a refusal. The brick shipped with
+// this hole: the high-water mark was only tracked while the pilot was armed, so a spell in
+// `observation` could hide a peak, and every drawdown measured afterwards would be smaller
+// than the truth — in the direction that makes the breaker bite too late.
+//
+// THE DETECTION IS FROM THE JOURNAL, NOT FROM A FLAG. A flag would have to be set by the very
+// cycle that was not running this code. The decided cycles, on the other hand, are written
+// whatever the mode: if one exists that is newer than the cycle the pilot last saw, the pilot
+// missed it. That is what makes "no intermediate cycle can be ignored" a proof rather than a
+// hope.
+console.log('\nProof 9 — a cycle the pilot did not see ends it, and nothing brings it back:');
+{
+  // (a) A PLAIN RESTART, application unchanged. The decided cycles follow one another, so
+  // there is no hole: the pilot resumes from its persisted state.
+  const resumed = judge({
+    identity: identity({ lastSeenDecisionId: 1500, peakEquityQuote: 1800 }),
+    latestDecidedDecisionId: 1500,
+    equityQuote: 1700,
+  });
+  ok('[redémarrage] the pilot resumes normally', resumed.mayCorrect && resumed.hold === null);
+  ok('on the peak it left behind, not on the equity at boot', resumed.peakEquityQuote === 1800);
+  ok('and nothing is invalidated', resumed.statusAfter === 'active');
+
+  // (b) A SPELL IN OBSERVATION OR OFF. Cycles 1501..1504 were decided while the pilot was not
+  // running; at 1505 the journal shows a decided cycle newer than the one it saw.
+  const interrupted = judge({
+    identity: identity({ lastSeenDecisionId: 1500, peakEquityQuote: 1800 }),
+    latestDecidedDecisionId: 1504,
+    equityQuote: 1700,
+  });
+  ok('[passage en observation] the interruption is detected', interrupted.hold === 'pilote_interrompu');
+  ok('the correction stands down', !interrupted.mayCorrect);
+  ok('the identity is invalidated durably', interrupted.statusAfter === 'interrupted_mode');
+  ok(
+    'and the write records BOTH ends of the hole',
+    interrupted.write?.kind === 'interrupt_mode' &&
+      interrupted.write.lastSeenDecisionId === 1500 &&
+      interrupted.write.latestDecidedDecisionId === 1504,
+  );
+  ok('with an alert of its own', interrupted.alert === 'mode_interrupted');
+  ok('a single missed cycle is enough — the rule has no tolerance', judge({
+    identity: identity({ lastSeenDecisionId: 1500 }),
+    latestDecidedDecisionId: 1501,
+  }).hold === 'pilote_interrompu');
+
+  // (c) THE VARIABLE COMES BACK. It does not re-arm anything, ever.
+  const back = judge({ identity: identity({ status: 'interrupted_mode', lastSeenDecisionId: 1500 }), latestDecidedDecisionId: 1500 });
+  ok('[retour à application] the correction is still refused', !back.mayCorrect);
+  ok('with the same named cause', back.hold === 'pilote_interrompu');
+  ok(
+    'and a recovery to a new high changes nothing',
+    !judge({ identity: identity({ status: 'interrupted_mode' }), equityQuote: 99999 }).mayCorrect,
+  );
+
+  // (d) THE INVARIANT THIS BUYS. A pilot that is STILL VALID has seen every decided cycle since
+  // its activation, so no peak it could have observed is missing from its high-water mark.
+  ok(
+    'an identity that is still active has no unseen decided cycle behind it',
+    judge({ identity: identity({ lastSeenDecisionId: 1500 }), latestDecidedDecisionId: 1500 }).statusAfter === 'active' &&
+      judge({ identity: identity({ lastSeenDecisionId: 1500 }), latestDecidedDecisionId: 1501 }).statusAfter !== 'active',
+  );
+  ok(
+    'so a missing peak can never understate a valid pilot\'s drawdown',
+    judge({ identity: identity({ lastSeenDecisionId: 1500 }), latestDecidedDecisionId: 1502 }).mayCorrect === false,
+  );
+
+  // (e) THE CHECK CANNOT BE SKIPPED. A journal it could not read fails closed rather than
+  // waving the cycle through.
+  ok('an unreadable journal holds the correction', !judge({ latestDecidedDecisionId: null }).mayCorrect);
+  ok('and is treated as an unreadable identity', judge({ latestDecidedDecisionId: null }).hold === 'identite_illisible');
+
+  // (f) THE HEARTBEAT IS WRITTEN ON EVERY APPLICATION CYCLE, not only when something changed —
+  // otherwise its absence would mean two different things.
+  const decide = readFileSync(path.join(ROOT, 'src/decision/decide.ts'), 'utf8');
+  ok(
+    'the mark is written on every application cycle with an active pilot',
+    /EXPOSURE_BAND_MODE === 'application' && id != null && pilotJudgement\.statusAfter === 'active'[\s\S]{0,120}markPilotSawDecision\(supabase, id\)/.test(
+      decide,
+    ),
+  );
+  ok(
+    'and the journal is read before the verdict, in application only',
+    /EXPOSURE_BAND_MODE === 'application' \? await readLatestDecidedDecisionId\(supabase\) : null/.test(decide),
+  );
+  const persistence = readFileSync(path.join(ROOT, 'src/persistence/exposurePilot.ts'), 'utf8');
+  ok(
+    'only DECIDED cycles count — a skipped cycle decides nothing and moves no order',
+    /readLatestDecidedDecisionId[\s\S]{0,600}?\.eq\('status', 'decided'\)/.test(persistence),
+  );
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────────

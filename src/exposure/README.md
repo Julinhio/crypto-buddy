@@ -572,10 +572,40 @@ redémarrage, redéploiement, passage temporaire en `observation`. Un plus-haut 
 afficherait un drawdown nul le lendemain du pire jour du pilote, et c'est exactement la panne que
 la preuve 4 de `src/test/exposurePilot.ts` met en scène.
 
-**Limite connue** : le plus-haut n'est suivi que pendant que le pilote est armé. Un sommet atteint
-pendant une désactivation temporaire n'est pas enregistré, et le drawdown mesuré ensuite part du
-dernier sommet connu. Le journal des cycles permet de le reconstituer hors ligne ; le code, lui,
-ne fabrique rien.
+### Une interruption du mode met fin au pilote
+
+Le plus-haut n'est suivi que pendant que le pilote est armé. Un passage temporaire en
+`observation` laisserait donc un trou, et un sommet atteint dans ce trou ferait paraître tous
+les drawdowns suivants plus petits qu'ils ne sont — dans le sens qui fait mordre le
+coupe-circuit trop tard.
+
+Arbitré : **cette reprise silencieuse est refusée**. Dès qu'une identité active connaît un cycle
+décidé hors `application`, l'interruption est constatée, persistée sous `interrupted_mode`, et
+l'identité ne se réarme **jamais** — un retour de la variable n'y change rien.
+
+**La détection vient du journal, pas d'un drapeau.** Un drapeau devrait être posé par le cycle
+qui, précisément, ne faisait pas tourner ce code. Les cycles décidés, eux, sont écrits quoi
+qu'il arrive : le pilote garde le dernier qu'il a vu, et si la table en contient un plus récent,
+c'est qu'il en a manqué un. C'est ce qui fait de « aucun cycle intermédiaire ne peut être
+ignoré » une preuve et non un espoir.
+
+Un simple redémarrage ne laisse aucun trou : les cycles décidés se suivent et la reprise se fait
+normalement depuis l'état persistant. Les cycles `skipped` et `error` ne comptent pas — ils ne
+décident rien et ne déplacent aucun ordre.
+
+L'invariant acheté : **une identité encore valide a vu tous les cycles décidés depuis son
+activation**, donc aucun sommet observable ne manque à son plus-haut.
+
+### La fenêtre officielle des témoins
+
+Le rejeu des témoins lit ses bornes dans l'identité : ouverture au cycle officiel d'activation,
+**inclusive**, sur l'**equity réellement enregistrée** à ce moment, et fermeture au cycle demandé
+— `--at=alerte_40`, `arret_50` ou `cloture`. Rien d'antérieur à l'ouverture ni de postérieur à la
+fermeture n'entre dans le résultat.
+
+**Sans identité, il n'y a pas de résultat officiel**, et le rejeu le dit en toutes lettres dans
+sa propre bannière : c'est un banc d'essai de la machinerie, sa fenêtre est celle de l'historique
+disponible, et son ouverture est un paramètre, pas un instant.
 
 ### Le contrat, et ce qui invalide un pilote
 

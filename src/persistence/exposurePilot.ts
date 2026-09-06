@@ -25,7 +25,8 @@ export const PILOT_DEADLINE_MS = 5000;
 
 const COLUMNS =
   'id, contract_sha256, contract_version, band_version, status, activated_at, ' +
-  'activated_decision_id, opening_equity_usd, peak_equity_usd, alert_drawdown_at';
+  'activated_decision_id, opening_equity_usd, peak_equity_usd, alert_drawdown_at, ' +
+  'last_seen_decision_id';
 
 interface PilotRow {
   id: number;
@@ -38,6 +39,7 @@ interface PilotRow {
   opening_equity_usd: string | number;
   peak_equity_usd: string | number;
   alert_drawdown_at: string | null;
+  last_seen_decision_id: number | null;
 }
 
 /**
@@ -97,6 +99,7 @@ export async function readPilotIdentity(supabase: SupabaseClient | null): Promis
       openingEquityQuote: opening,
       peakEquityQuote: peak,
       alertDrawdownAt: row.alert_drawdown_at,
+      lastSeenDecisionId: row.last_seen_decision_id,
     },
   };
 }
@@ -163,6 +166,13 @@ export async function applyPilotWrite(
         patch.stopped_decision_id = ctx.decisionId;
         patch.stopped_drawdown_percent = write.drawdownPercent;
         patch.stopped_equity_usd = ctx.equityQuote;
+      }
+      if (write.kind === 'interrupt_mode') {
+        patch.status = 'interrupted_mode';
+        patch.interrupted_at = stamp;
+        patch.interrupted_decision_id = ctx.decisionId;
+        patch.interrupted_after_decision_id = write.latestDecidedDecisionId;
+        patch.interrupted_seen_decision_id = write.lastSeenDecisionId;
       }
       if (write.kind === 'invalidate_contract') {
         patch.status = 'invalidated_contract';
@@ -233,6 +243,69 @@ export async function closeMeasurementWindow(
 }
 
 /**
+ * THE NEWEST DECIDED CYCLE THE JOURNAL HOLDS.
+ *
+ * Read before this cycle's own row exists, so it names the PREVIOUS decided cycle. Compared
+ * against the pilot's `last_seen_decision_id`, it is what makes an interruption provable: a
+ * decided cycle more recent than the one the pilot saw can only exist if the pilot did not run
+ * on it. Null on a failed read, which fails closed rather than skipping the check.
+ *
+ * Only `decided` rows count. A skipped or errored cycle decides nothing, never reaches the
+ * pilot's block and moves no order, so its presence is not a hole in anything.
+ */
+export async function readLatestDecidedDecisionId(
+  supabase: SupabaseClient | null,
+): Promise<number | null> {
+  if (!supabase) return null;
+  let latest: number | null = null;
+  try {
+    await runBoundedWrite(async (signal) => {
+      const res = await supabase
+        .from('decisions')
+        .select('id')
+        .eq('status', 'decided')
+        .order('id', { ascending: false })
+        .limit(1)
+        .abortSignal(signal);
+      const rows = (res.data ?? []) as Array<{ id: number }>;
+      latest = rows[0]?.id ?? null;
+      return { error: res.error };
+    }, PILOT_DEADLINE_MS);
+  } catch {
+    return null;
+  }
+  return latest;
+}
+
+/**
+ * THE HEARTBEAT. Records that this pilot saw this decided cycle.
+ *
+ * Written on EVERY cycle the pilot runs on, whether or not the correction applied, because the
+ * absence of this mark is exactly what the next cycle reads as an interruption. A write that
+ * does not land therefore ends the pilot on the following cycle — conservative on purpose: a
+ * cycle the pilot cannot prove it saw is a cycle whose peak it cannot vouch for.
+ */
+export async function markPilotSawDecision(
+  supabase: SupabaseClient | null,
+  decisionId: number,
+): Promise<void> {
+  if (!supabase) return;
+  try {
+    await runBoundedWrite(
+      (signal) =>
+        supabase
+          .from(TABLE)
+          .update({ last_seen_decision_id: decisionId })
+          .eq('status', 'active')
+          .abortSignal(signal),
+      PILOT_DEADLINE_MS,
+    );
+  } catch (err) {
+    console.warn(`[warn] the pilot could not record the cycle it saw — ${String(err)}`);
+  }
+}
+
+/**
  * Fills in the decision the activation happened on.
  *
  * The identity is written BEFORE the decision row exists — that row has to carry the corrected
@@ -250,7 +323,7 @@ export async function backfillActivationDecision(
       (signal) =>
         supabase
           .from(TABLE)
-          .update({ activated_decision_id: decisionId, peak_decision_id: decisionId })
+          .update({ activated_decision_id: decisionId, peak_decision_id: decisionId, last_seen_decision_id: decisionId })
           .is('activated_decision_id', null)
           .abortSignal(signal),
       PILOT_DEADLINE_MS,

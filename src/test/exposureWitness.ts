@@ -561,6 +561,55 @@ console.log('\nProof 10 — W2 owes a number of comparisons, computed from the s
   );
 }
 
+// ── PROOF 11 — the official window is the pilot’s, or there is no official result ──
+//
+// §3.8 and §3.9 make three instants official — the activation, the 40% photograph, the 50%
+// stop — and §7 adds the closure of the measurement window. A witness result is a PILOT result
+// only when it is bounded by those and opened on the equity really recorded at the activation.
+//
+// Without an identity the replay is still useful, and still honest: it announces that it is a
+// bench of the machinery and produces no official result at all.
+console.log('\nProof 11 — the replay reads its bounds from the identity, or says it has none:');
+{
+  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandWitnesses.ts'), 'utf8');
+  // Containment rather than regexes: every one of these is a literal fragment of the source,
+  // and an escaped regex would only add a way to get the escaping wrong.
+  ok(
+    'the window comes from the persisted identity',
+    replay.includes('loadPilotWindow(supabase, requestedInstant)') && replay.includes("from('exposure_pilot')"),
+  );
+  ok(
+    'the opening is the activation cycle, inclusive',
+    replay.includes('decision.id < pilotWindow.fromDecisionId'),
+  );
+  ok(
+    'the closing instant is chosen among the three persisted ones',
+    replay.includes('alert_drawdown_decision_id') &&
+      replay.includes('stopped_decision_id') &&
+      replay.includes('window_closed_decision_id'),
+  );
+  ok(
+    'and it never runs past the settled point either',
+    replay.includes('Math.min(pilotWindow.toDecisionId, cutoffId)'),
+  );
+  ok(
+    'the books open on the equity recorded at the activation',
+    replay.includes('openingEquityOverride != null ? openingEquityOverride'),
+  );
+  ok(
+    'and only the first segment takes it — nothing crosses a re-anchor',
+    replay.includes('segment.id === 1 && openingEquityOverride != null'),
+  );
+  ok(
+    'without an identity the run declares it produces NO official result',
+    /AUCUNE IDENTITÉ DE PILOTE/.test(replay) && /AUCUN résultat officiel du pilote/.test(replay),
+  );
+  ok(
+    'and with one it prints the bounds it is honouring',
+    /FENÊTRE OFFICIELLE DU PILOTE/.test(replay),
+  );
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────────
 
 /** The transitive RUNTIME module graph — `import type` edges are erased, deliberately. */

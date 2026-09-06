@@ -88,7 +88,18 @@ export function contractDigest(contract: PilotContract): string {
  * pilot is a deliberate, reviewed administrative act — and no code path in this brick can
  * perform one.
  */
-export type PilotStatus = 'active' | 'stopped_drawdown' | 'invalidated_contract';
+export type PilotStatus =
+  | 'active'
+  | 'stopped_drawdown'
+  | 'invalidated_contract'
+  /**
+   * A DECIDED cycle ran without this pilot seeing it. The mode was not `application`, or the
+   * pilot's own write did not land — either way the high-water mark has a hole in it, and a
+   * peak reached inside that hole would make every later drawdown look smaller than it is.
+   *
+   * Terminal, like the others. Putting the variable back does not re-arm it.
+   */
+  | 'interrupted_mode';
 
 export interface PilotIdentity {
   contractSha256: string;
@@ -100,6 +111,14 @@ export interface PilotIdentity {
   peakEquityQuote: number;
   /** Null until the 40% alert has fired. It fires once for the life of the pilot. */
   alertDrawdownAt: string | null;
+  /**
+   * The last DECIDED cycle this pilot actually saw.
+   *
+   * Its whole job is to make an interruption provable from the journal rather than from a flag
+   * the interrupted cycle would have had to set itself. A decided cycle more recent than this
+   * one exists if and only if the pilot missed it.
+   */
+  lastSeenDecisionId: number | null;
 }
 
 /** Why the correction is not touching the orders this cycle. Never a silence. */
@@ -109,6 +128,7 @@ export type PilotHold =
   | 'ecriture_obligatoire_impossible'
   | 'pilote_arrete_drawdown'
   | 'pilote_invalide_contrat'
+  | 'pilote_interrompu'
   | 'contrat_divergent'
   | 'equite_inutilisable';
 
@@ -118,7 +138,8 @@ export type PilotWrite =
   | { kind: 'peak'; peakEquityQuote: number }
   | { kind: 'alert_drawdown'; drawdownPercent: number; peakEquityQuote: number }
   | { kind: 'stop_drawdown'; drawdownPercent: number; peakEquityQuote: number }
-  | { kind: 'invalidate_contract'; seenSha256: string };
+  | { kind: 'invalidate_contract'; seenSha256: string }
+  | { kind: 'interrupt_mode'; lastSeenDecisionId: number | null; latestDecidedDecisionId: number };
 
 export interface PilotJudgement {
   /** May the band correction reach the executor this cycle? */
@@ -127,7 +148,7 @@ export interface PilotJudgement {
   /** Must land BEFORE the correction may apply. A failed write means `mayCorrect` is false. */
   write: PilotWrite | null;
   /** One-shot, and only ever on the cycle its write lands. */
-  alert: 'drawdown_40' | 'drawdown_50' | 'contract_invalidated' | null;
+  alert: 'drawdown_40' | 'drawdown_50' | 'contract_invalidated' | 'mode_interrupted' | null;
   drawdownPercent: number | null;
   peakEquityQuote: number | null;
   statusAfter: PilotStatus | null;
@@ -144,6 +165,17 @@ export interface PilotJudgeInput {
   /** The sovereign book's equity this cycle. The only equity there is. */
   equityQuote: number;
   drawdown: { alertPercent: number; stopPercent: number };
+  /**
+   * THE NEWEST DECIDED CYCLE THE JOURNAL HOLDS, read before this one is written.
+   *
+   * Compared against the identity's `lastSeenDecisionId`, it answers "did a decided cycle run
+   * without this pilot" — the question a flag could never answer honestly, because the cycle
+   * that would have had to raise the flag is precisely the one that was not running this code.
+   *
+   * Null when it could not be read, which is treated as an unreadable identity: the check
+   * cannot be skipped, only failed closed.
+   */
+  latestDecidedDecisionId: number | null;
 }
 
 const hold = (reason: PilotHold): PilotJudgement => ({
@@ -192,6 +224,36 @@ export function judgePilot(input: PilotJudgeInput): PilotJudgement {
   const identity = input.identity;
   if (identity.status === 'stopped_drawdown') return hold('pilote_arrete_drawdown');
   if (identity.status === 'invalidated_contract') return hold('pilote_invalide_contrat');
+  if (identity.status === 'interrupted_mode') return hold('pilote_interrompu');
+
+  // ── THE INTERRUPTION, judged from the journal ────────────────────────────────────────
+  //
+  // Arbitrated, and it replaces a documented limitation with a refusal: a pilot that lived
+  // through a cycle it did not see has a hole in its high-water mark, and a peak reached inside
+  // that hole would understate every drawdown measured afterwards — in the direction that makes
+  // the breaker bite too late.
+  //
+  // A plain restart leaves no hole: the decided cycles follow one another and the pilot resumes
+  // from its persisted state. Only a cycle that ran WITHOUT this code does.
+  if (input.latestDecidedDecisionId == null) return hold('identite_illisible');
+  if (
+    identity.lastSeenDecisionId != null &&
+    input.latestDecidedDecisionId > identity.lastSeenDecisionId
+  ) {
+    return {
+      mayCorrect: false,
+      hold: 'pilote_interrompu',
+      write: {
+        kind: 'interrupt_mode',
+        lastSeenDecisionId: identity.lastSeenDecisionId,
+        latestDecidedDecisionId: input.latestDecidedDecisionId,
+      },
+      alert: 'mode_interrupted',
+      drawdownPercent: null,
+      peakEquityQuote: identity.peakEquityQuote,
+      statusAfter: 'interrupted_mode',
+    };
+  }
 
   // ── The contract, judged before anything numeric ─────────────────────────────────────
   if (identity.contractSha256 !== input.contractSha256) {

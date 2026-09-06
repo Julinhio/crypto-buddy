@@ -36,6 +36,8 @@ import {
   backfillActivationDecision,
   closeMeasurementWindow,
   markDrawdownAlertDelivered,
+  markPilotSawDecision,
+  readLatestDecidedDecisionId,
   readPilotIdentity,
 } from '../persistence/exposurePilot.js';
 import { saveBandObservation, readWindowCoverage } from '../persistence/exposureBandObservations.js';
@@ -1430,6 +1432,11 @@ export async function decide(): Promise<DecideResult> {
   // `mode_inactif` without looking at anything, so observation adds no query to the cycle.
   const pilotRead =
     EXPOSURE_BAND_MODE === 'application' ? await readPilotIdentity(supabase) : null;
+  // THE NEWEST DECIDED CYCLE THE JOURNAL HOLDS, read before this one is written. Compared
+  // against the pilot's own mark, it is what makes an interruption PROVABLE: a decided cycle
+  // more recent than the one the pilot saw can only exist if the pilot did not run on it.
+  const latestDecidedDecisionId =
+    EXPOSURE_BAND_MODE === 'application' ? await readLatestDecidedDecisionId(supabase) : null;
   const pilotJudgement = judgePilot({
     mode: EXPOSURE_BAND_MODE,
     identity: pilotRead != null && pilotRead.ok ? pilotRead.identity : null,
@@ -1441,6 +1448,7 @@ export async function decide(): Promise<DecideResult> {
       alertPercent: config.exposurePilot.alertDrawdownPercent,
       stopPercent: config.exposurePilot.stopDrawdownPercent,
     },
+    latestDecidedDecisionId,
   });
   if (pilotRead != null && !pilotRead.ok) {
     console.warn(`[pilot] identity unreadable — the band correction stands down (${pilotRead.reason}).`);
@@ -1742,6 +1750,15 @@ export async function decide(): Promise<DecideResult> {
   // `activated_at`, which is the fact that matters.
   if (pilotJudgement.write?.kind === 'activation' && id != null) {
     await backfillActivationDecision(supabase, id);
+  }
+
+  // THE HEARTBEAT. Records that this pilot saw this decided cycle — on EVERY application
+  // cycle, whether or not the correction applied. Its absence is exactly what the next cycle
+  // reads as an interruption, so a write that does not land ends the pilot rather than leaving
+  // a hole nobody can see. Conservative on purpose: a cycle the pilot cannot prove it saw is a
+  // cycle whose peak it cannot vouch for.
+  if (EXPOSURE_BAND_MODE === 'application' && id != null && pilotJudgement.statusAfter === 'active') {
+    await markPilotSawDecision(supabase, id);
   }
 
   // THE MEASUREMENT WINDOW, closed by the clock and the coverage — never by the breaker, and
