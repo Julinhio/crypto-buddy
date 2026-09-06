@@ -61,10 +61,17 @@ déclare gelée, quel que soit `TRANSITION_MODE`.** La contrainte porte sur les 
 correction et sur eux seuls — elle ne bascule pas la porte en `enforce`, et elle ne touche pas
 au vecteur brut du modèle.
 
-Aujourd'hui la porte est en `observe` : elle ne bloque rien, et 0 des 884 cycles v5 portent un
-`applied_divergence_cause`. Le modèle peut donc trader une ligne gelée, la correction non.
-L'asymétrie est une donnée, pas un défaut, et `increasable_assets` / `decreasable_assets` la
-publient à chaque cycle.
+**La porte est en `enforce`**, et elle l'était avant ce chantier. Le cycle 1590 du 26 août en
+porte la preuve : un stop de sommet à −11,13 % a généré une sortie totale, le verdict de la
+ligne XRP est `superseded`, la cible appliquée est passée à `XRP 0` contre 13 demandés par le
+modèle, et le registre a booké la vente des 97,8 XRP.
+
+Aucun cycle v5 ne porte de `applied_divergence_cause` pour autant : un stop qui reprend une
+ligne SUPERSÈDE, il ne refuse pas. Les deux mécanismes sont distincts et seul le second remplit
+cette colonne.
+
+L'asymétrie tient quel que soit le mode : le modèle peut trader une ligne gelée, la correction
+non. `increasable_assets` / `decreasable_assets` la publient à chaque cycle.
 
 La traduction de l'échelle de priorité, verdict par verdict :
 
@@ -394,7 +401,7 @@ Ils ne portent ni gel, ni stop, ni transition. Ces états décrivent une positio
 `stop_exit` se déclenche sur son prix d'entrée, un `frozen` marque une transition sur sa ligne.
 Un témoin n'a jamais pris cette entrée. Les lui appliquer rendrait le comparateur dépendant de
 la trajectoire qu'il existe pour évaluer — et, aujourd'hui, plus contraint que le bot lui-même,
-dont la porte est en `observe` et ne bloque aucun ordre réel. **La séparation reste valable si
+dont les gels décrivent SES positions et pas les leurs. **La séparation reste valable si
 la porte passe un jour en `enforce`** : elle dit de quel livre un gel parle, pas dans quel mode
 il est lu.
 
@@ -642,6 +649,34 @@ le dernier cycle décidé qui existait avant elle.
 
 Un crash **avant** toute décision tombe dans la première ligne ; un crash **après** la décision
 mais avant le battement, dans la deuxième.
+### Le mode de la porte est dans le contrat, et figé dans l’identité
+
+La porte est en **`enforce`**, et elle l’était avant ce chantier. Ce n’est pas un détail
+d’environnement : sous `enforce`, le code génère lui-même des sorties de stop, une jambe
+interdite refuse le **vecteur entier** — correction comprise — et `stoppedWeightSurvives`
+bascule, la bande dimensionnant alors sa correction contre un livre où la ligne stoppée part à
+zéro.
+
+Trois comportements différents de la même correction. Le mode entre donc **dans l’empreinte du
+contrat** : le déplacer en cours de fenêtre invalide le pilote au lieu de le laisser continuer.
+
+Et il est **figé dans l’identité** à l’activation. Le rejeu officiel reconstruit avec le mode
+qui était en vigueur à ce moment-là, jamais avec la variable du poste où il est lancé — sans
+quoi le même rejeu donnerait deux réponses selon la machine.
+
+**Le banc d’essai historique, lui, dérive le mode des données.** Aucun `true` codé en dur : un
+cycle où le stop du code a repris une ligne est nommé et écarté, parce que sa cible stockée est
+post-porte et que ni elle ni le drapeau ne sont récupérables. Sur tous les autres, aucune ligne
+n’est en instance de liquidation, donc le drapeau ne peut pas changer la réponse.
+
+Un cycle et un seul est concerné dans tout le corpus : le **1590**, le 26 août.
+
+### La morsure historique s’arrête au pré-pilote
+
+Dès qu’une identité existe, `replay:band-bite` borne son corpus au cycle précédant
+l’activation. Le rapport accepté décrit l’ère où rien ne corrigeait jamais ; cette ère se
+termine à l’armement, et un vrai refus de porte après activation ne doit pas casser un rapport
+qui ne parle pas de lui.
 ### La fenêtre officielle des témoins
 
 Le rejeu des témoins lit ses bornes dans l'identité : ouverture au cycle officiel d'activation,

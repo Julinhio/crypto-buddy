@@ -29,10 +29,10 @@ import { waterfill } from './correct.js';
  * They do NOT bear the bot's transition gates, stops, or freezes. Those states belong to the
  * bot's own positions: a `stop_exit` fires on the bot's entry price, a `frozen` marks a
  * transition on the bot's line. A witness never took that entry. Applying them would make the
- * comparator depend on the very trajectory it exists to evaluate — and, today, would make the
- * witnesses MORE constrained than the bot they benchmark, since `TRANSITION_MODE=observe`
- * blocks none of the bot's real orders. This separation holds even if the gate is later armed
- * in `enforce`; it is a statement about whose book a freeze describes, not about a mode.
+ * comparator depend on the very trajectory it exists to evaluate: a witness would be frozen out
+ * of a line because the BOT was mid-transition on it, which says nothing about the benchmark.
+ * The separation is a statement about WHOSE BOOK a freeze describes, and it holds under either
+ * mode — the gate is in `enforce` today, and that changes nothing here.
  *
  * The one book here that DOES inherit the gates is `B̂`, the corrected bot — and it is not a
  * witness. It is the bot itself under the correction, so the corrector's rule applies to it in

@@ -91,6 +91,8 @@ function correct(opts: {
   gates?: Map<string, TransitionGate>;
   equity?: number;
   raw?: Record<string, number> | null;
+  /** Under `enforce` the chain pursues 0 on a stopped line, so its weight does NOT survive. */
+  stoppedWeightSurvives?: boolean;
 }): CorrectionOutcome {
   const equity = opts.equity ?? 1000;
   const portfolio = bookOf(opts.book ?? {}, equity);
@@ -114,7 +116,7 @@ function correct(opts: {
     maxDeployablePercent: 100 - config.execution.caps.minCashPercent,
     equityQuote: equity,
     movementFloorQuote: (equity * config.execution.minMovementPercent) / 100,
-    stoppedWeightSurvives: true,
+    stoppedWeightSurvives: opts.stoppedWeightSurvives ?? true,
   };
   const assessment = assessBand(assessInput);
 
@@ -1340,6 +1342,115 @@ console.log('\nProof 23 — a buy with no budget is declared, not abandoned in s
     /check \(\s*suppressed_reason is null\s*or suppressed_reason in \('movement_floor', 'no_price', 'dust', 'no_budget'\)\s*\)/.test(
       migration,
     ),
+  );
+}
+
+// ── PROOF 24 — the three interactions that only exist under `enforce` ─────────
+//
+// The gate is in `enforce`, and it was before this chantier: cycle 1590 of 26 August carries a
+// peak stop at −11.13%, an XRP verdict of `superseded`, an applied allocation of `XRP 0`
+// against a model asking 13, and a booked full exit of the whole line.
+//
+// Three behaviours therefore exist that `observe` never produced, and none of them had a
+// scenario until now.
+console.log('\nProof 24 — stop exits, atomic refusal and frozen lines, under enforce:');
+{
+  // (1) A STOP EXIT AND A CORRECTION IN THE SAME CYCLE.
+  //
+  // Under `enforce` the chain pursues 0 on the stopped line, so the band must size against
+  // that zero and not against the weight the model still asks for. `stoppedWeightSurvives:
+  // false` is exactly that switch. The failure it prevents is FICTITIOUS FUNDING: sizing buys
+  // from the proceeds of a line the code is about to liquidate anyway, and counting the same
+  // exposure twice.
+  const stopped = correct({
+    state: 'constructive',
+    target: { BTC: 10, ETH: 10, BNB: 0, XRP: 20 },
+    book: { BTC: 10, ETH: 10, XRP: 20 },
+    gates: gates({ BTC: 'actionable', ETH: 'actionable', BNB: 'actionable', XRP: 'stop_exit' }),
+    stoppedWeightSurvives: false,
+  });
+  const xrp = lineOf(stopped, 'XRP');
+  ok('[sortie de stop] the stopped line is not counted as surviving exposure', xrp.baseWeightPercent === 0);
+  ok(
+    'the band never lifts it — a stopped line takes no order from the code',
+    xrp.correctionPoints === 0 && !xrp.mayIncrease && !xrp.mayDecrease,
+  );
+  ok('and it is named as frozen by the ladder, not as a threshold miss', xrp.cause === 'gel');
+  ok(
+    'the correction is sized on the exposure that will really remain',
+    stopped.correctedExposurePercent > 20 && stopped.correctedExposurePercent <= 45.000001,
+  );
+  // THE LEG ON THE STOPPED LINE IS THE CHAIN'S, NOT THE CORRECTION'S — and it must be there.
+  //
+  // This is the defect brick 2's first review round found and removed: a version that dropped
+  // the stop's full exit had already sized the buys from its proceeds, so the cycle spent money
+  // it never received. The exit belongs in the plan; what must not happen is the BAND adding to
+  // that line, and `correctionPoints === 0` above is that guarantee.
+  const exit = stopped.movements.find((m) => m.asset === 'XRP');
+  ok('[pas de financement fictif] the stop\'s full exit is in the plan', exit?.side === 'sell' && exit.fullExit);
+  ok(
+    'and the buys are sized by the executor\'s own budget, from the same plan',
+    stopped.movements.filter((m) => m.side === 'buy').length > 0,
+  );
+  // NO DOUBLE COUNTING: the stopped line's weight is zero in the corrected vector, so it is
+  // never counted as exposure while its proceeds are also being deployed.
+  ok('the stopped line carries no corrected weight', weightOf(stopped, 'XRP') === 0);
+  ok(
+    'so its value is not counted twice — once as exposure and once as budget',
+    Math.abs(
+      stopped.correctedExposurePercent -
+        stopped.lines.filter((l) => l.asset !== 'XRP').reduce((sum, l) => sum + l.correctedWeightPercent, 0),
+    ) < 1e-6,
+  );
+
+  // (2) AN ATOMIC REFUSAL TAKES THE CORRECTION WITH IT.
+  //
+  // This one is a property of the CYCLE, not of the corrector: `judgeVector` refuses the whole
+  // vector when one leg is forbidden, and `applyGate` then reverts to the previous effective
+  // target. The correction is inside that vector, so it falls with it — the gate winning over
+  // both bounds, exactly as §3.4.2 says.
+  const decide = readFileSync(path.join(ROOT, 'src/decision/decide.ts'), 'utf8');
+  ok(
+    'the gate judges the CORRECTED vector, so a refusal covers the correction too',
+    /judgeVector\(\s*correctedMovements\.map/.test(decide),
+  );
+  ok(
+    'and applyGate receives the same corrected vector',
+    /applyGate\(\{[\s\S]{0,400}?movements: correctedMovements,/.test(decide),
+  );
+  const gateSrc = readFileSync(path.join(ROOT, 'src/transition/apply.ts'), 'utf8');
+  ok(
+    'a refused vector reverts to the previous applied target, not to the corrected one',
+    /previousApplied/.test(gateSrc),
+  );
+  ok(
+    'and the cycle journals the cause rather than swallowing it',
+    /applied_divergence_cause: gateOutcome\.refused \? gateOutcome\.reason : null/.test(decide),
+  );
+
+  // (3) A CORRECTION ALONE NEVER MOVES A FROZEN LINE.
+  //
+  // The invariant W4 really defends, and it has nothing to do with the mode: whatever the gate
+  // is set to, the CODE does not create an order on a line the transition layer froze.
+  for (const frozenGate of ['frozen', 'stop_exit', 'no_regime'] as const) {
+    const outcome = correct({
+      state: 'constructive',
+      target: { BTC: 5, ETH: 5, BNB: 0, XRP: 0 },
+      book: { BTC: 5, ETH: 5 },
+      gates: gates({ BTC: frozenGate, ETH: 'actionable', BNB: 'actionable', XRP: 'actionable' }),
+    });
+    const line = lineOf(outcome, 'BTC');
+    ok(`[${frozenGate}] the correction adds nothing to the frozen line`, line.correctionPoints === 0);
+    ok(`[${frozenGate}] and sends no leg on it`, !outcome.movements.some((m) => m.asset === 'BTC'));
+    ok(
+      `[${frozenGate}] the deficit goes to the actionable lines instead`,
+      outcome.movements.length > 0 || outcome.unrealisablePoints > 0,
+    );
+  }
+  const corrector = readFileSync(path.join(ROOT, 'src/exposure/correct.ts'), 'utf8');
+  ok(
+    'and the rule is expressed once, on capability rather than on a mode',
+    !/TRANSITION_MODE/.test(corrector),
   );
 }
 

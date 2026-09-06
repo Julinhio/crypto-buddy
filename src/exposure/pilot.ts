@@ -57,6 +57,16 @@ export interface PilotContract {
     minCashPercent: number;
   };
   execution: { feePercent: number; minMovementPercent: number };
+  /**
+   * THE TRANSITION GATE'S MODE — part of the contract, not of the environment.
+   *
+   * Under `enforce` the code generates its own stop exits, a single forbidden leg refuses the
+   * WHOLE vector, and `stoppedWeightSurvives` flips: the band then sizes its correction against
+   * a book where the stopped line is going to zero rather than against its surviving weight.
+   * Those are three different behaviours of the same correction, so the mode belongs in the
+   * contract — moving it mid-window changes what the pilot does and must invalidate it.
+   */
+  transitionMode: 'observe' | 'enforce';
   drawdown: { alertPercent: number; stopPercent: number };
   window: { minWeeks: number; maxWeeks: number; requiredBarsPerFamily: number };
 }
@@ -85,6 +95,7 @@ export function contractDigest(contract: PilotContract): string {
       min_cash_percent: contract.caps.minCashPercent,
     },
     execution: [contract.execution.feePercent, contract.execution.minMovementPercent],
+    transition_mode: contract.transitionMode,
     drawdown: [contract.drawdown.alertPercent, contract.drawdown.stopPercent],
     window: [contract.window.minWeeks, contract.window.maxWeeks, contract.window.requiredBarsPerFamily],
   };
@@ -141,6 +152,14 @@ export interface PilotIdentity {
   lastSeenDecisionId: number | null;
   /** Set once the MEASUREMENT window has closed. The correction keeps running regardless. */
   windowClosedAt: string | null;
+  /**
+   * THE GATE'S MODE AT ACTIVATION, frozen here.
+   *
+   * The official replay must reconstruct with the mode that was in force when the pilot
+   * started, never with the variable of whatever machine it happens to run on — otherwise the
+   * same replay would produce two different answers depending on the laptop.
+   */
+  transitionMode: 'observe' | 'enforce' | null;
 }
 
 /** Why the correction is not touching the orders this cycle. Never a silence. */
@@ -452,6 +471,7 @@ export function pilotContractOf(
   source: PilotContractSource,
   universe: readonly string[],
   reserveAsset: string,
+  transitionMode: 'observe' | 'enforce',
 ): PilotContract {
   return {
     contractVersion: source.exposurePilot.contractVersion,
@@ -468,6 +488,7 @@ export function pilotContractOf(
       feePercent: source.execution.feePercent,
       minMovementPercent: source.execution.minMovementPercent,
     },
+    transitionMode,
     drawdown: {
       alertPercent: source.exposurePilot.alertDrawdownPercent,
       stopPercent: source.exposurePilot.stopDrawdownPercent,

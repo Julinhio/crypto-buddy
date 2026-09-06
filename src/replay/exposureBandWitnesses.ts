@@ -324,25 +324,27 @@ interface PilotRow {
   alert_drawdown_decision_id: number | null;
   stopped_decision_id: number | null;
   window_closed_decision_id: number | null;
+  transition_mode: string | null;
 }
 
 async function loadPilotWindow(
   supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
   requested: string | null,
-): Promise<PilotWindowResolution> {
+): Promise<{ window: PilotWindowResolution; transitionMode: 'observe' | 'enforce' | null }> {
   const { data, error } = await supabase
     .from('exposure_pilot')
     .select(
       'status, activated_at, activated_decision_id, opening_equity_usd, ' +
         'alert_drawdown_at, stopped_at, window_closed_at, ' +
-        'alert_drawdown_decision_id, stopped_decision_id, window_closed_decision_id',
+        'alert_drawdown_decision_id, stopped_decision_id, window_closed_decision_id, transition_mode',
     )
     .limit(1);
   if (error) throw new Error(`band witnesses: could not read exposure_pilot (${error.message}).`);
   const row = ((data ?? []) as unknown as PilotRow[])[0];
-  if (row == null) return resolvePilotWindow(null, requested);
+  if (row == null) return { window: resolvePilotWindow(null, requested), transitionMode: null };
   const opening = row.opening_equity_usd == null ? null : Number(row.opening_equity_usd);
-  return resolvePilotWindow(
+  const mode = row.transition_mode === 'observe' || row.transition_mode === 'enforce' ? row.transition_mode : null;
+  return { transitionMode: mode, window: resolvePilotWindow(
     {
       status: row.status,
       activatedAt: row.activated_at,
@@ -356,7 +358,7 @@ async function loadPilotWindow(
       closedDecisionId: row.window_closed_decision_id,
     },
     requested,
-  );
+  ) };
 }
 
 // ── The chain ─// ── The chain ─────────────────────────────────────────────────────────────────────────
@@ -402,6 +404,8 @@ interface ChainRow {
     sent_by_origin: Record<string, number>;
     suppressed_by_reason: Record<string, number>;
     frozen_lines: number;
+    /** True when a peak stop took a line over and B̂ therefore corrected nothing. */
+    stop_owned_a_line: boolean;
     /**
      * Legs on a frozen line that the CORRECTION created or resized. Must be zero: the code
      * never creates an order on a line the transition layer froze, whatever `TRANSITION_MODE`
@@ -454,6 +458,12 @@ function runChain(
   universe: string[],
   reserveAsset: string,
   openingEquityOverride: number | null,
+  /**
+   * THE GATE'S MODE, from the pilot's identity in an official window and derived per cycle on
+   * the bench — NEVER from the environment variable of the machine running this. The same
+   * replay must not answer differently depending on the laptop.
+   */
+  transitionMode: 'observe' | 'enforce' | null,
 ): ChainRow[] {
   const cycles = segment.cycles;
   // THE RE-ANCHOR. Each segment opens its own books, in cash, on the bot's equity at its first
@@ -507,6 +517,12 @@ function runChain(
     // whole difference between a chained counterfactual and the one-step re-anchoring brick 2
     // could only do. So the assessment's exposure, equity and movement floor all come from
     // here.
+    // A CYCLE THE CODE'S OWN STOP TOOK OVER. Under `enforce` the peak stop generates a full
+    // exit and `applyGate` rewrites the applied allocation — so the cycle's stored target is no
+    // longer the pre-gate one, and the pre-gate value is not recoverable. B̂ therefore does what
+    // the real bot did on that cycle and corrects nothing, rather than correcting a target the
+    // stop had already replaced.
+    const stopOwnedALine = [...cycle.gates.values()].includes('stop_exit');
     const valuedB = valueBook(bookB, priceOf);
     // A held line with no price stops every book on this cycle; the caller has already
     // filtered those out, so these are narrowings rather than branches.
@@ -527,9 +543,15 @@ function runChain(
       maxDeployablePercent: 100 - config.execution.caps.minCashPercent,
       equityQuote: equityB,
       movementFloorQuote: (equityB * floorPercent) / 100,
-      stoppedWeightSurvives: true,
+      // DERIVED, never a constant. Under `enforce` the gate is about to flatten a stopped line,
+      // so its weight does not survive and the band must not size against it. The cycles where
+      // that actually bites are handled above — they carry a stop exit and B̂ does not correct
+      // there at all — so this expresses the rule rather than papering over a case.
+      stoppedWeightSurvives: (transitionMode ?? 'observe') === 'observe',
     });
-    const correction = correctToBand({
+    const correction = stopOwnedALine
+      ? null
+      : correctToBand({
       assessment,
       clampedAllocation: cycle.clamped,
       rawAllocation: cycle.raw,
@@ -538,10 +560,10 @@ function runChain(
       priceOf,
       feePercent: fee,
       minMovementPercent: floorPercent,
-    });
+        });
     const stepB = stepWitness({
       book: bookB,
-      allocation: correction.correctedAllocation,
+      allocation: correction == null ? cycle.clamped : correction.correctedAllocation,
       priceOf,
       feePercent: fee,
       minMovementPercent: floorPercent,
@@ -556,10 +578,12 @@ function runChain(
     // order on a line the transition layer declared frozen — whatever `TRANSITION_MODE` says —
     // and a criterion that only claimed it in prose would prove nothing.
     const frozen = new Set(
-      correction.lines.filter((line) => !line.mayIncrease && !line.mayDecrease).map((line) => line.asset),
+      (correction?.lines ?? [])
+        .filter((line) => !line.mayIncrease && !line.mayDecrease)
+        .map((line) => line.asset),
     );
-    const movedByBand = new Map(correction.lines.map((line) => [line.asset, line.correctionPoints !== 0]));
-    const originOf = new Map(correction.lines.map((line) => [line.asset, line.origin]));
+    const movedByBand = new Map((correction?.lines ?? []).map((line) => [line.asset, line.correctionPoints !== 0]));
+    const originOf = new Map((correction?.lines ?? []).map((line) => [line.asset, line.origin]));
     const sentByOrigin: Record<string, number> = {};
     for (const movement of stepB.movements) {
       const origin = originOf.get(movement.asset) ?? 'modele';
@@ -596,10 +620,13 @@ function runChain(
         equity: stepB.equityAfter,
         fees: stepB.feesQuote,
         target_exposure_percent: assessment.targetExposurePercent,
-        corrected_exposure_percent: correction.correctedExposurePercent,
+        corrected_exposure_percent: correction?.correctedExposurePercent ?? assessment.targetExposurePercent,
         realised_exposure_percent: stepB.exposureAfterPercent,
-        unrealisable_points: correction.unrealisablePoints,
-        label: correction.label,
+        unrealisable_points: correction?.unrealisablePoints ?? 0,
+        label: correction?.label ?? 'aucune_correction',
+        // NAMED, not silent: on this cycle the code's own stop owned a line and the stored
+        // target is post-gate, so no correction was computed at all.
+        stop_owned_a_line: stopOwnedALine,
         sent: stepB.movements.length,
         suppressed: stepB.suppressed.length,
         sent_by_origin: sentByOrigin,
@@ -657,7 +684,7 @@ async function main(): Promise<void> {
   // means someone asked for one and named nothing, which is a refusal like any other bad value.
   const instantFlag = process.argv.find((arg) => arg.startsWith('--at='));
   const requestedInstant = instantFlag == null ? null : instantFlag.slice('--at='.length);
-  const resolved = await loadPilotWindow(supabase, requestedInstant);
+  const { window: resolved, transitionMode: pilotTransitionMode } = await loadPilotWindow(supabase, requestedInstant);
   // AN OFFICIAL BOUND BEYOND THE SETTLED POINT IS A REFUSAL, not a truncation.
   //
   // `Math.min` used to clip the window to the settled cutoff while the banner went on printing
@@ -798,8 +825,20 @@ async function main(): Promise<void> {
   // The books open with the bot's own equity at the first cycle of EACH segment. The pilot's
   // real opening instant belongs to brick 4 — these are parameters of the dry run.
   const reserveAsset = portfolioOf(segments[0]!.cycles[0]!.context).reserveAsset;
+  // THE MODE THE RECONSTRUCTION USES. In an official window it is the one frozen in the
+  // identity at activation; on the bench there is no identity to ask, and every cycle where the
+  // flag could matter carries a stop exit and is handled on its own.
+  const chainTransitionMode = pilotWindow.official ? pilotTransitionMode : null;
   const runAll = (): ChainRow[] =>
-    segments.flatMap((segment) => runChain(segment, universe, reserveAsset, pilotWindow.official ? pilotWindow.openingEquityQuote : null));
+    segments.flatMap((segment) =>
+      runChain(
+        segment,
+        universe,
+        reserveAsset,
+        pilotWindow.official ? pilotWindow.openingEquityQuote : null,
+        chainTransitionMode,
+      ),
+    );
   const rows = runAll();
 
   console.log('');
@@ -1018,8 +1057,9 @@ async function main(): Promise<void> {
     record('W4', 'les gels : portés par B̂ parce qu’il EST le bot, jamais par les témoins', violations.length === 0, [
       'Arbitré : un gel, un stop ou une transition décrit une position DU BOT. Un témoin ne l’a',
       'pas prise. Les lui appliquer rendrait le comparateur dépendant de la trajectoire qu’il',
-      'existe pour évaluer — et, aujourd’hui, plus contraint que le bot lui-même, dont la porte',
-      'est en `observe` et ne bloque aucun ordre réel.',
+      'existe pour évaluer : un témoin serait gelé sur une ligne parce que LE BOT y est en',
+      'transition, ce qui ne dit rien de l’étalon. La séparation porte sur le livre dont un gel',
+      'parle, et elle tient sous les deux modes.',
       `B̂, qui EST le bot corrigé, en hérite : ${frozenCycles.length} cycle(s) sur ${rows.length} portent au moins`,
       `une ligne gelée, et la CORRECTION y a créé ${rows.reduce((s2, r) => s2 + r.B.correction_legs_on_frozen, 0)} ordre(s).`,
       'Vérifié jambe par jambe, pas affirmé : chaque mouvement envoyé est confronté aux verdicts',
