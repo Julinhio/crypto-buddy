@@ -240,7 +240,7 @@ function round(value: number): number {
  * pass 1 respect "cibles risquées STRICTEMENT POSITIVES" without a special case. The equal
  * pass passes `share = 1` for everyone.
  */
-function waterfill(
+export function waterfill(
   amount: number,
   candidates: ReadonlyArray<{ asset: string; share: number; headroom: number }>,
 ): Map<string, number> {

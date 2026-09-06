@@ -1,10 +1,12 @@
-# Pilote d'exposition contrainte — briques 1 et 2
+# Pilote d'exposition contrainte — briques 1 à 3
 
 | Brique | Fichier | Ce qu'elle fait |
 |---|---|---|
 | 1 | `band.ts` | **évalue** : le contexte, la bande, où la cible se situe, ce que les gels et les plafonds laissent atteindre |
 | 1 | `observe.ts` | une ligne d'observation par cycle + le contrôle d'intégrité par bougie |
 | 2 | `correct.ts` | **répartit** : §3.5 vers le plancher, §3.6 vers le plafond, la préséance, la consolidation |
+| 3 | `witness.ts` | **compare** : les deux témoins chaînés, leur pondération sous plafonds, leur plomberie |
+| 3 | `../replay/exposureBandWitnesses.ts` | le rejeu hors ligne des trois livres et ses sept critères |
 
 Les tenir séparées est ce qui a rendu le point de contrôle honnête : la morsure s'est publiée,
 lue et contestée avant qu'une seule ligne de correction n'existe.
@@ -344,7 +346,117 @@ davantage ; ce qui change, c'est qu'elles sont déclarées. La preuve 23 de
 déclarée, le plan n'envoie toujours rien, et un achat *financé* est toujours envoyé sans
 qu'aucune raison ne soit inventée pour lui.
 
-## Passage de relais vers la brique 3
+## Les deux témoins (brique 3)
+
+```bash
+npm run replay:band-witnesses
+```
+
+Hors ligne, lecture seule, sept critères, sortie non nulle si l'un échoue. L'artefact
+`out/exposure-band-witnesses/` n'est pas commité.
+
+### Trois livres chaînés, et deux seulement sont des témoins
+
+| Livre | Ce qu'il vise | Porte les gels du bot ? |
+|---|---|:--:|
+| **E** | l'exposition **réelle** du bot, à chaque intervalle | non |
+| **P** | le **plancher** de la bande courante | non |
+| **B̂** | le bot **corrigé** — pas un témoin, voir plus bas | oui |
+
+Bot moins E mesure la sélection à exposition identique. E moins P mesure la valeur du timing
+d'exposition dans la bande. Bot moins P mesure les deux ensemble.
+
+### La pondération : équipondérée sous plafonds, excédent redistribué
+
+Arbitré. Le §3.7 dit « répartie également entre les quatre actifs » et les plafonds par actif
+disent que XRP ne dépasse pas 15. À 70 % d'exposition la part égale vaut 17,5 : au-dessus de
+60 %, les deux ne peuvent pas tenir ensemble, et l'histoire v5 y passe 57 cycles sur 904.
+
+**La priorité du contrat est l'exposition** — « bot moins E mesure la sélection *à exposition
+identique* » n'est vrai que si E porte vraiment celle du bot. Donc : répartition égale,
+écrêtement de ce qu'un plafond refuse, et **redistribution** de l'excédent sur les lignes qui
+ont encore de la place — le même water-filling que la répartition de bande, importé plutôt que
+réécrit. Aucun surplus ne repart en cash tant que les plafonds peuvent tenir l'exposition ;
+seul ce qu'aucun plafond ne peut prendre est publié comme inplaçable.
+
+Les actifs écrêtés et les points redistribués sont journalisés à chaque cycle.
+
+### Les témoins portent la plomberie, jamais les gels
+
+Arbitré aussi, et c'est une séparation de **nature**, pas de mode.
+
+Ils portent leur propre plomberie d'exécution — frais, seuil de 2 %, poussière, prix absent,
+budget insuffisant — appliquée à **leur** livre, à travers le `planMovements` de l'exécuteur
+lui-même. Un témoin qui ignorerait le seuil serait un étalon qu'aucun portefeuille n'aurait pu
+tenir.
+
+Ils ne portent ni gel, ni stop, ni transition. Ces états décrivent une position **du bot** : un
+`stop_exit` se déclenche sur son prix d'entrée, un `frozen` marque une transition sur sa ligne.
+Un témoin n'a jamais pris cette entrée. Les lui appliquer rendrait le comparateur dépendant de
+la trajectoire qu'il existe pour évaluer — et, aujourd'hui, plus contraint que le bot lui-même,
+dont la porte est en `observe` et ne bloque aucun ordre réel. **La séparation reste valable si
+la porte passe un jour en `enforce`** : elle dit de quel livre un gel parle, pas dans quel mode
+il est lu.
+
+Prouvé sur le graphe d'imports plutôt que sur le comportement : `transition/gate.ts` n'est pas
+dans le graphe d'exécution de `witness.ts`, qui n'appelle aucune fonction de porte et ne lit
+aucune carte de verdicts.
+
+### B̂ — ce que la répartition envoie vraiment (C7)
+
+B̂ n'est pas un témoin. C'est le bot **sous la correction**, chaîné : à chaque cycle la bande
+est évaluée contre **son** livre, la correction dimensionnée sur **son** équité, et ses
+mouvements bookés. À ce titre il hérite des gels en entier — le code ne crée jamais d'ordre sur
+une ligne gelée.
+
+**L'hypothèse est affichée, pas enfouie** : B̂ rejoue les réponses **historiques** du modèle
+contre un livre que le modèle n'a jamais vu. Il mesure donc la **conséquence mécanique de la
+correction sous décisions historiques figées**. Ce n'est ni une simulation de la réaction du
+modèle, ni une borne de performance — ni haute ni basse.
+
+C'est ce livre qui répond à C7, que le ré-ancrage à un pas de la brique 2 ne pouvait pas
+atteindre : il repartait à chaque cycle d'un livre que rien n'avait corrigé.
+
+### C8 n'a pas de verdict, et c'est de l'arithmétique
+
+« Le modèle utilise-t-il l'exposition imposée, ou la combat-il ? » porte sur ce que le modèle
+fait quand il **voit** une position que le correcteur a créée. En mode observation il n'en a
+jamais vu une seule, et aucun contrefactuel chaîné ne répare cela : il ferait répondre les mots
+réels du modèle à une question qu'on ne lui a jamais posée.
+
+Le **lecteur** existe (`readAdoption`, trois lectures : adoption, indifférence, lutte) et les
+données sont conservées. Le **chiffre** n'est pas publié : un chiffre affaibli serait lu comme
+la réponse. C8 commence le jour où `application` expose réellement le modèle aux positions
+corrigées.
+
+### Ce que ce rejeu ne mesure pas
+
+Aucun rendement, aucun drawdown, aucun écart bot-témoin. La fenêtre du pilote commence au
+passage en `application` ; ce rejeu est un **banc d'essai de la machinerie**, et son artefact
+le dit dans son propre bloc `contract.not_measured`.
+
+Ce qu'il prouve, c'est le §6 : que toutes les entrées des témoins sont **durablement
+journalisées** par le cycle vivant — prix, snapshot d'équité post-cycle, journal de régime,
+verdicts de porte, cible bornée — et que la reconstruction se **reproduit** à l'empreinte près.
+Aucune écriture n'a été ajoutée au chemin de trading pour les témoins.
+
+## Passage de relais vers la brique 4
+
+Ce que la brique 4 hérite, et ce qu'elle doit apporter :
+
+| | |
+|---|---|
+| **Hérite** | les trois livres chaînés et leur rejeu reproductible, prêts à être valorisés à un instant donné — ce que demande le §3.9 au déclenchement du coupe-circuit |
+| **Hérite** | le lecteur de C8 et les colonnes qui l'alimentent, en attente du premier cycle en `application` |
+| **Doit apporter** | l'**identité persistante** du pilote : version de configuration, instant d'activation, equity initiale, plus-haut, état de l'alerte, actif ou arrêté — et qui survit à un redémarrage Railway |
+| **Doit apporter** | le **coupe-circuit** : alerte unique à 40 %, désactivation persistante de la seule correction de bande à 50 %, aucune liquidation forcée |
+| **Doit apporter** | la légalisation de `application` dans le résolveur d'environnement — **et elle seule crée l'instant officiel du pilote**, qui ne se dépense qu'une fois |
+
+L'instant d'ouverture des témoins est aujourd'hui un **paramètre** du banc d'essai, pris au
+premier cycle de la fenêtre. Le vrai instant appartient à la brique 4 : c'est le passage en
+`application`, et les livres devront s'ouvrir là, sur l'equity réelle de ce moment.
+
+## Passage de relais de la brique 2 (tenu)
 
 Ce que la brique 3 hérite, et ce qu'elle doit apporter :
 
@@ -355,11 +467,14 @@ Ce que la brique 3 hérite, et ce qu'elle doit apporter :
 | **Doit apporter** | le contrefactuel **chaîné** — les témoins E et P — qui seul permet une lecture entre cycles |
 | **A levé** | la limite ci-dessus — `no_budget`, migration 0032, preuve 23 |
 
-Deux conclusions ont été retirées de la brique 2 et lui reviennent : ce que la répartition
-enverrait réellement, et si le modèle utilise ou combat l'exposition imposée. Toutes deux
-posent des questions **entre cycles** — à qui appartient cette jambe, dans quel cadre de
-valorisation — et y répondre avec un ré-ancrage à un pas produisait des attributions
-approximatives. Les témoins sont l'outil adapté ; les faits durables sont déjà là pour eux.
+Deux conclusions ont été retirées de la brique 2 et lui revenaient : ce que la répartition
+enverrait réellement (C7), et si le modèle utilise ou combat l'exposition imposée (C8).
+
+**Ce passage de relais était juste sur la première et faux sur la seconde**, et la brique 3 l'a
+corrigé plutôt que de l'exécuter tel quel. C7 est bien une question de cadre de valorisation :
+un livre chaîné y répond, et c'est B̂. C8 demande la **réaction du modèle** à une position qu'il
+n'a jamais vue ; aucun chaînage ne fabrique cette réponse, et son verdict attend le pilote. Le
+détail est dans la section des témoins ci-dessus.
 
 ## Ce que ces briques ne peuvent pas conclure
 
