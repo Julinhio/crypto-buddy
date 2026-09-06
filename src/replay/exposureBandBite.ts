@@ -121,13 +121,45 @@ const KNOWN_GATES: ReadonlySet<string> = new Set<TransitionGate>([
   'no_regime',
 ]);
 
+/**
+ * THE LAST CYCLE BEFORE THE PILOT — the historical report's hard ceiling.
+ *
+ * This replay produces the ACCEPTED checkpoint report, over the era in which nothing ever
+ * corrected. Once the pilot is armed that era is over: the corrected bot starts placing real
+ * orders, a genuine gate refusal becomes possible, and C0 would fail on a corpus that is no
+ * longer the one the report describes.
+ *
+ * So the moment an identity exists, the corpus stops at the cycle before its activation. The
+ * historical bite stays exactly what it was and stays reproducible; what happens after belongs
+ * to the pilot's own reading, not to this one.
+ */
+async function loadPrePilotCeiling(
+  supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
+): Promise<{ maxId: number | null; activatedAt: string | null }> {
+  const { data, error } = await supabase
+    .from('exposure_pilot')
+    .select('activated_at, activated_decision_id')
+    .limit(1);
+  if (error) throw new Error(`band bite: could not read exposure_pilot (${error.message}).`);
+  const row = ((data ?? []) as Array<{ activated_at: string | null; activated_decision_id: number | null }>)[0];
+  if (row == null) return { maxId: null, activatedAt: null };
+  return {
+    // The cycle BEFORE the activation. A null pointer means the activation cycle is not yet
+    // resolved, and the instant alone cannot bound an id — so the run refuses to guess and
+    // stops at the activation instant instead, handled by the caller.
+    maxId: row.activated_decision_id == null ? null : row.activated_decision_id - 1,
+    activatedAt: row.activated_at,
+  };
+}
+
 async function loadDecisions(
   supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  ceiling: { maxId: number | null; activatedAt: string | null },
 ): Promise<DecisionRead[]> {
   const PAGE = 500;
   const rows: DecisionRead[] = [];
   for (let from = 0; ; from += PAGE) {
-    const { data, error } = await supabase
+    let query = supabase
       .from('decisions')
       .select(
         'id, created_at, status, regime, market_context, target_allocation, applied_allocation, ' +
@@ -136,6 +168,9 @@ async function loadDecisions(
       .eq('prompt_version', 'v5')
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
+    if (ceiling.maxId != null) query = query.lte('id', ceiling.maxId);
+    else if (ceiling.activatedAt != null) query = query.lt('created_at', ceiling.activatedAt);
+    const { data, error } = await query;
     if (error) throw new Error(`band bite: could not read decisions (${error.message}).`);
     const page = (data ?? []) as unknown as DecisionRead[];
     rows.push(...page);
@@ -195,7 +230,18 @@ async function main(): Promise<void> {
   if (!supabase) throw new Error('band bite: Supabase is not configured.');
 
   const universe = tradableBaseAssets(config);
-  const [decisions, gatesByDecision] = await Promise.all([loadDecisions(supabase), loadGates(supabase)]);
+  const ceiling = await loadPrePilotCeiling(supabase);
+  const [decisions, gatesByDecision] = await Promise.all([
+    loadDecisions(supabase, ceiling),
+    loadGates(supabase),
+  ]);
+  if (ceiling.maxId != null || ceiling.activatedAt != null) {
+    console.log(
+      `CORPUS BORNÉ AU PRÉ-PILOTE — le pilote existe (activé le ${ceiling.activatedAt}), donc ce ` +
+        `rejeu s'arrête ${ceiling.maxId != null ? `au cycle ${ceiling.maxId}` : "à l'instant d'activation"}. ` +
+        "L'après appartient à la lecture du pilote, pas à ce rapport historique.",
+    );
+  }
 
   console.log('='.repeat(96));
   console.log('MORSURE HISTORIQUE — bande A contre l\'historique v5 réel, aucun ordre produit');
@@ -233,6 +279,26 @@ async function main(): Promise<void> {
    * publish a bite over a corpus it can no longer read correctly.
    */
   const postGateOnly: number[] = [];
+  /**
+   * CYCLES WHERE THE CODE'S OWN STOP TOOK A LINE OVER.
+   *
+   * The gate is in `enforce`, and it was already: cycle 1590 (26 August) carries a peak stop at
+   * −11.13%, an XRP verdict of `superseded`, an applied allocation of `XRP 0` against a model
+   * asking 13, and a booked full exit of the whole line.
+   *
+   * Such a cycle breaks TWO of this replay's assumptions at once:
+   *
+   *   · `applied_allocation` is no longer the pre-gate target — it is the vector the stop
+   *     rewrote — and the pre-gate value is not recoverable from the journal;
+   *   · `stoppedWeightSurvives` is FALSE there, where every other cycle has no stopped line at
+   *     all and the flag is simply irrelevant.
+   *
+   * The divergence-cause column does not catch them: a supersede is not a refusal, so that column
+   * stays null. They are therefore excluded and NAMED, exactly like the post-gate ones — a bite
+   * measured against a target the stop had already rewritten would be a bite on the wrong
+   * number.
+   */
+  const stopSuperseded: number[] = [];
 
   for (const decision of decisions) {
     statuses[decision.status] = (statuses[decision.status] ?? 0) + 1;
@@ -251,6 +317,14 @@ async function main(): Promise<void> {
 
     if (decision.applied_divergence_cause != null) {
       postGateOnly.push(decision.id);
+      continue;
+    }
+    // DERIVED FROM THE DATA, never from the environment variable of whatever machine runs this.
+    // A cycle where a stop exit superseded a line was necessarily run under `enforce`; a cycle
+    // with no stopped line at all has no stopped weight, so the flag cannot change its answer.
+    const gatesHere = gatesByDecision.get(decision.id);
+    if (gatesHere != null && [...gatesHere.values()].includes('stop_exit')) {
+      stopSuperseded.push(decision.id);
       continue;
     }
 
@@ -281,6 +355,10 @@ async function main(): Promise<void> {
       // The corpus ran entirely under TRANSITION_MODE=observe — zero rows carry an
       // `applied_divergence_cause`, so no peak stop ever generated an exit. A stopped line
       // therefore kept its weight, and that is what the replay reproduces.
+      // NOT A CONSTANT. Every cycle that reaches this point has no line the gate is about to
+      // flatten — the ones that do were excluded above and named — so no stopped weight exists
+      // to survive or not, and the answer is the same under either mode. That is what makes it
+      // derivable rather than assumed.
       stoppedWeightSurvives: true,
     });
 
@@ -337,8 +415,17 @@ async function main(): Promise<void> {
   // ── C0 — the corpus is what we think it is ────────────────────────────────────────
   {
     const withRegime = rows.filter((r) => r.bar_at != null).length;
+    // A STOP SUPERSEDE IS A NAMED EXCLUSION, NOT A FAILURE — and the difference is real.
+    //
+    // A post-gate REFUSAL means the corpus cannot be read correctly, so the run fails. A stop
+    // supersede means ONE cycle's target was rewritten by the code's own stop, which is the gate
+    // working as designed under `enforce`. Naming and excluding those cycles keeps the bite
+    // measured on targets that are really pre-gate; failing on them would refuse to publish a
+    // report over a behaviour nobody considers a defect.
     const ok =
-      malformed.length === 0 && postGateOnly.length === 0 && rows.length === decisions.length;
+      malformed.length === 0 &&
+      postGateOnly.length === 0 &&
+      rows.length === decisions.length - stopSuperseded.length;
     record('C0', 'le corpus est exploitable et aucun journal de régime n\'est corrompu', ok, [
       `${decisions.length} cycles v5 · ${Object.entries(statuses).map(([s, n]) => `${s}=${n}`).join(' · ')}.`,
       `${withRegime} portent un régime · ${rows.length - withRegime} n'en portent aucun (compté à part, jamais neutre).`,
@@ -355,6 +442,14 @@ async function main(): Promise<void> {
           "clamp appliquerait les plafonds D'AUJOURD'HUI à une proposition historique), donc ils " +
           "sont écartés et ce critère ÉCHOUE : mieux vaut pas de morsure qu'une morsure sur un " +
           'corpus mal lu.',
+      stopSuperseded.length === 0
+        ? "Aucun cycle où le stop du code a repris une ligne."
+        : `ÉCARTÉS — ${stopSuperseded.length} cycle(s) où le stop de sommet a repris une ligne ` +
+          `(${stopSuperseded.join(', ')}). La porte est en \`enforce\` : sur ces cycles le code a ` +
+          "généré lui-même une sortie totale, applied_allocation porte le vecteur que le stop a " +
+          "réécrit, et le poids stoppé ne survit PAS. Ni la cible pré-porte ni ce drapeau ne sont " +
+          'récupérables, donc le cycle est nommé plutôt que deviné. Ce n\'est pas un échec : ' +
+          "c'est la porte qui fait son travail.",
     ]);
   }
 

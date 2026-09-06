@@ -1432,7 +1432,7 @@ export async function decide(): Promise<DecideResult> {
    * already judged the model's RAW proposal (§3.4.5), the correction does not re-enter it
    * (§3.4.7), and the transition gate speaks AFTER it, on the corrected movements (§3.4.2).
    */
-  const pilotContract = pilotContractOf(config, tradableBaseAssets(config), reserveStable);
+  const pilotContract = pilotContractOf(config, tradableBaseAssets(config), reserveStable, TRANSITION_MODE);
   const pilotContractSha256 = contractDigest(pilotContract);
   // The read only happens in `application`. In every other mode `judgePilot` answers
   // `mode_inactif` without looking at anything, so observation adds no query to the cycle.
@@ -1478,6 +1478,7 @@ export async function decide(): Promise<DecideResult> {
       contractSha256: pilotContractSha256,
       contractVersion: config.exposurePilot.contractVersion,
       bandVersion: config.exposureBand.version,
+      transitionMode: TRANSITION_MODE,
       now: new Date(),
     });
     if (!landed.ok) {

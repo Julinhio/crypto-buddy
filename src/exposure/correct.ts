@@ -195,8 +195,14 @@ export interface CorrectionOutcome {
    * two silently diverge.
    *
    * So this is the plan as the EXECUTOR would receive it, and the gate's verdict on it is
-   * recorded per line (`gate`) rather than applied. Under `TRANSITION_MODE=observe` — the mode
-   * production has always run — the gate refuses nothing and the two coincide exactly.
+   * recorded per line (`gate`) rather than applied. The gate then speaks for itself, after this
+   * function and on what it produced — which is the only ordering in which its verdict is about
+   * the vector that is really being sent.
+   *
+   * Production runs under `enforce`, so that verdict can bite: a forbidden leg refuses the whole
+   * vector atomically, this correction included. That is the gate winning over both bounds
+   * (§3.4.2) and it is deliberate — but it means the correction is never guaranteed to reach the
+   * venue, and nothing here pretends otherwise.
    */
   movements: Movement[];
   /** §3.3 and §3.6.4 — the legs the floor deleted stay visible. */

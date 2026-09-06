@@ -34,7 +34,7 @@ function ok(label: string, cond: boolean): void {
 }
 
 const ROOT = process.cwd();
-const CONTRACT = pilotContractOf(config, ['BTC', 'ETH', 'BNB', 'XRP'], 'USDT');
+const CONTRACT = pilotContractOf(config, ['BTC', 'ETH', 'BNB', 'XRP'], 'USDT', 'enforce');
 const SHA = contractDigest(CONTRACT);
 const DRAWDOWN = {
   alertPercent: config.exposurePilot.alertDrawdownPercent,
@@ -54,6 +54,7 @@ function identity(over: Partial<PilotIdentity> = {}): PilotIdentity {
     lastSeenDecisionId: 1000,
     activationBaselineDecisionId: 999,
     windowClosedAt: null,
+    transitionMode: 'enforce',
     ...over,
   };
 }
@@ -726,9 +727,22 @@ console.log('\nProof 14 — the reserve, the persisted status, the settled bound
 {
   // (D) THE RESERVE IS PART OF THE CONTRACT. Same four base assets, different quote: every order
   // symbol and the reserved line change, and the pilot must not survive it.
-  const usdc = pilotContractOf(config, ['BTC', 'ETH', 'BNB', 'XRP'], 'USDC');
+  const usdc = pilotContractOf(config, ['BTC', 'ETH', 'BNB', 'XRP'], 'USDC', 'enforce');
   ok('[réserve] USDT and USDC are different contracts', contractDigest(usdc) !== SHA);
-  ok('and the same reserve keeps the same digest', contractDigest(pilotContractOf(config, ['BTC', 'ETH', 'BNB', 'XRP'], 'USDT')) === SHA);
+  // THE GATE'S MODE IS PART OF THE CONTRACT TOO. Under `enforce` the code generates its own
+  // stop exits, a forbidden leg refuses the whole vector, and `stoppedWeightSurvives` flips —
+  // three different behaviours of the same correction, so moving the mode must end the pilot.
+  const observeContract = pilotContractOf(config, ['BTC', 'ETH', 'BNB', 'XRP'], 'USDT', 'observe');
+  ok('[porte] observe and enforce are different contracts', contractDigest(observeContract) !== SHA);
+  ok(
+    'and a pilot activated under one is invalidated by the other',
+    judge({ contractSha256: contractDigest(observeContract) }).hold === 'contrat_divergent',
+  );
+  ok(
+    'the mode is frozen in the identity, so a replay never reads the machine it runs on',
+    readFileSync(path.join(ROOT, 'src/persistence/exposurePilot.ts'), 'utf8').includes('transition_mode: ctx.transitionMode'),
+  );
+  ok('and the same reserve keeps the same digest', contractDigest(pilotContractOf(config, ['BTC', 'ETH', 'BNB', 'XRP'], 'USDT', 'enforce')) === SHA);
 
   // (E) THE PERSISTED STATUS IS A STATUS. It used to persist correctly and be rejected on the
   // way back, so every cycle after an interruption reported an unreadable identity instead.

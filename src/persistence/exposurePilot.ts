@@ -26,7 +26,7 @@ export const PILOT_DEADLINE_MS = 5000;
 const COLUMNS =
   'id, contract_sha256, contract_version, band_version, status, activated_at, ' +
   'activated_decision_id, opening_equity_usd, peak_equity_usd, alert_drawdown_at, ' +
-  'last_seen_decision_id, activation_baseline_decision_id, window_closed_at';
+  'last_seen_decision_id, activation_baseline_decision_id, window_closed_at, transition_mode';
 
 interface PilotRow {
   id: number;
@@ -42,6 +42,7 @@ interface PilotRow {
   last_seen_decision_id: number | null;
   activation_baseline_decision_id: number | null;
   window_closed_at: string | null;
+  transition_mode: string | null;
 }
 
 /**
@@ -110,6 +111,8 @@ export async function readPilotIdentity(supabase: SupabaseClient | null): Promis
       lastSeenDecisionId: row.last_seen_decision_id,
       activationBaselineDecisionId: row.activation_baseline_decision_id,
       windowClosedAt: row.window_closed_at,
+      transitionMode:
+        row.transition_mode === 'observe' || row.transition_mode === 'enforce' ? row.transition_mode : null,
     },
   };
 }
@@ -122,6 +125,7 @@ export interface PilotWriteContext {
   contractSha256: string;
   contractVersion: string;
   bandVersion: string;
+  transitionMode: 'observe' | 'enforce';
   now: Date;
 }
 
@@ -157,6 +161,7 @@ export async function applyPilotWrite(
             peak_equity_usd: write.peakEquityQuote,
             peak_decision_id: ctx.decisionId,
             activation_baseline_decision_id: ctx.latestDecidedDecisionId,
+            transition_mode: ctx.transitionMode,
             status: 'active',
           })
           .abortSignal(signal);
