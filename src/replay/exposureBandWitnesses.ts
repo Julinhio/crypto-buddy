@@ -1068,9 +1068,10 @@ async function main(): Promise<void> {
       `En revanche ${modelLegs} jambe(s) touchent une ligne gelée parce que LE MODÈLE les a demandées et`,
       'que la correction ne les a pas touchées. Ce n’est pas une violation : la contrainte de gel',
       'porte sur les mouvements que la bande crée, et sur eux seuls — elle n’arme pas la porte et',
-      'ne touche pas au vecteur brut du modèle. Le bot réel envoie déjà ces jambes.',
-      'La séparation reste valable si la porte passe un jour en `enforce` : elle dit de quel',
-      'livre un gel parle, pas dans quel mode il est lu.',
+      'ne touche pas au vecteur brut du modèle. Sous `enforce` la porte tranche ensuite sur le',
+      'vecteur entier — le modèle PROPOSE une jambe gelée, il ne la trade pas forcément.',
+      'La séparation vaut sous la porte telle qu’elle est aujourd’hui, en `enforce` : elle dit de',
+      'quel livre un gel parle, pas dans quel mode il est lu.',
     ]);
   }
 

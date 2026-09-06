@@ -70,8 +70,9 @@ Aucun cycle v5 ne porte de `applied_divergence_cause` pour autant : un stop qui 
 ligne SUPERSÈDE, il ne refuse pas. Les deux mécanismes sont distincts et seul le second remplit
 cette colonne.
 
-L'asymétrie tient quel que soit le mode : le modèle peut trader une ligne gelée, la correction
-non. `increasable_assets` / `decreasable_assets` la publient à chaque cycle.
+L'asymétrie tient quel que soit le mode : **le modèle peut proposer une jambe sur une ligne
+gelée ; sous `enforce`, la porte décide ensuite du vecteur entier** — la correction, elle, n'en
+crée jamais. `increasable_assets` / `decreasable_assets` la publient à chaque cycle.
 
 La traduction de l'échelle de priorité, verdict par verdict :
 
@@ -401,9 +402,9 @@ Ils ne portent ni gel, ni stop, ni transition. Ces états décrivent une positio
 `stop_exit` se déclenche sur son prix d'entrée, un `frozen` marque une transition sur sa ligne.
 Un témoin n'a jamais pris cette entrée. Les lui appliquer rendrait le comparateur dépendant de
 la trajectoire qu'il existe pour évaluer — et, aujourd'hui, plus contraint que le bot lui-même,
-dont les gels décrivent SES positions et pas les leurs. **La séparation reste valable si
-la porte passe un jour en `enforce`** : elle dit de quel livre un gel parle, pas dans quel mode
-il est lu.
+dont les gels décrivent SES positions et pas les leurs. **La séparation vaut sous la porte
+telle qu'elle est aujourd'hui, en `enforce`** : elle dit de quel livre un gel parle, pas dans
+quel mode il est lu.
 
 Prouvé sur le graphe d'imports plutôt que sur le comportement : `transition/gate.ts` n'est pas
 dans le graphe d'exécution de `witness.ts`, qui n'appelle aucune fonction de porte et ne lit
