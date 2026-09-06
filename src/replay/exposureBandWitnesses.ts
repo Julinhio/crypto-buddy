@@ -9,6 +9,7 @@ import { readContext, type ControllerReading } from '../calibration/exposure/con
 import type { TransitionGate } from '../transition/gate.js';
 import { assessBand, bandOf } from '../exposure/band.js';
 import { correctToBand } from '../exposure/correct.js';
+import { resolvePilotWindow, type PilotWindowResolution } from '../exposure/pilot.js';
 import {
   cutIntoSegments,
   equalWeightUnderCaps,
@@ -301,32 +302,22 @@ async function loadLedgerByDecision(
 }
 
 /**
- * THE OFFICIAL WINDOW — the pilot's, when there is a pilot.
+ * THE OFFICIAL WINDOW — the pilot's, when there is a pilot AND the pilot can be trusted.
  *
- * §3.8 and §3.9 make three instants official: the activation, the 40% photograph, the 50%
- * stop. §7 adds a fourth, the closure of the measurement window. The witnesses' result is only
- * a PILOT result when it is bounded by those: opened at the activation cycle, inclusive, on the
- * real equity recorded there, and closed at the cycle asked for. Nothing before, nothing after.
+ * §3.8 and §3.9 make three instants official — the activation, the 40% photograph, the 50%
+ * stop — and §7 adds the closure of the measurement window. A witness result is a PILOT result
+ * only when it is bounded by those and opened on the equity really recorded at the activation.
  *
- * WITHOUT AN IDENTITY THERE IS NO OFFICIAL RESULT, and the run says so in its own banner rather
- * than letting a dry run of the machinery be read as one.
+ * The RULE lives in `resolvePilotWindow`, pure and shared, because it is a contract and not a
+ * query: an identity whose activation cycle was never resolved, or whose opening equity cannot
+ * be read, REFUSES to be official rather than quietly replaying the whole history under the
+ * pilot's name. This function only fetches the row.
  */
-interface PilotWindow {
-  official: boolean;
-  fromDecisionId: number | null;
-  toDecisionId: number | null;
-  openingEquity: number | null;
-  /** Which persisted instant closes it, when one does. */
-  closedAt: 'activation' | 'alerte_40' | 'arret_50' | 'cloture' | 'aucune' | null;
-  status: string | null;
-  activatedAt: string | null;
-}
-
 interface PilotRow {
   status: string;
-  activated_at: string;
+  activated_at: string | null;
   activated_decision_id: number | null;
-  opening_equity_usd: string | number;
+  opening_equity_usd: string | number | null;
   alert_drawdown_decision_id: number | null;
   stopped_decision_id: number | null;
   window_closed_decision_id: number | null;
@@ -334,8 +325,8 @@ interface PilotRow {
 
 async function loadPilotWindow(
   supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
-  requested: string,
-): Promise<PilotWindow> {
+  requested: string | null,
+): Promise<PilotWindowResolution> {
   const { data, error } = await supabase
     .from('exposure_pilot')
     .select(
@@ -345,38 +336,23 @@ async function loadPilotWindow(
     .limit(1);
   if (error) throw new Error(`band witnesses: could not read exposure_pilot (${error.message}).`);
   const row = ((data ?? []) as unknown as PilotRow[])[0];
-  if (row == null) {
-    return {
-      official: false,
-      fromDecisionId: null,
-      toDecisionId: null,
-      openingEquity: null,
-      closedAt: null,
-      status: null,
-      activatedAt: null,
-    };
-  }
-  const opening = Number(row.opening_equity_usd);
-  const chosen =
-    requested === 'alerte_40'
-      ? row.alert_drawdown_decision_id
-      : requested === 'arret_50'
-      ? row.stopped_decision_id
-      : requested === 'cloture'
-      ? row.window_closed_decision_id
-      : (row.window_closed_decision_id ?? row.stopped_decision_id ?? null);
-  return {
-    official: true,
-    fromDecisionId: row.activated_decision_id,
-    toDecisionId: chosen,
-    openingEquity: Number.isFinite(opening) ? opening : null,
-    closedAt: chosen == null ? 'aucune' : (requested as PilotWindow['closedAt']),
-    status: row.status,
-    activatedAt: row.activated_at,
-  };
+  if (row == null) return resolvePilotWindow(null, requested);
+  const opening = row.opening_equity_usd == null ? null : Number(row.opening_equity_usd);
+  return resolvePilotWindow(
+    {
+      status: row.status,
+      activatedAt: row.activated_at,
+      activatedDecisionId: row.activated_decision_id,
+      openingEquityQuote: opening,
+      alertDecisionId: row.alert_drawdown_decision_id,
+      stoppedDecisionId: row.stopped_decision_id,
+      closedDecisionId: row.window_closed_decision_id,
+    },
+    requested,
+  );
 }
 
-// ── The chain ─────────────────────────────────────────────────────────────────────────
+// ── The chain ─// ── The chain ─────────────────────────────────────────────────────────────────────────
 
 /** Why a cycle could not be reconstructed. Every skipped cycle carries one — none is silent. */
 type CycleGap = 'no_context' | 'no_gates' | 'no_book' | 'no_target' | 'no_prices' | 'post_gate_only';
@@ -670,7 +646,10 @@ async function main(): Promise<void> {
   // THE PILOT'S OWN WINDOW, when a pilot exists. `--at=alerte_40|arret_50|cloture` picks which
   // persisted instant closes it; without the flag it takes the closure, then the stop, then the
   // settled point.
-  const requestedInstant = (process.argv.find((a) => a.startsWith('--at=')) ?? '').slice('--at='.length);
+  // ABSENT AND EMPTY ARE DIFFERENT. No flag means "choose the instant that exists"; `--at=`
+  // means someone asked for one and named nothing, which is a refusal like any other bad value.
+  const instantFlag = process.argv.find((arg) => arg.startsWith('--at='));
+  const requestedInstant = instantFlag == null ? null : instantFlag.slice('--at='.length);
   const pilotWindow = await loadPilotWindow(supabase, requestedInstant);
   const upperBound =
     pilotWindow.official && pilotWindow.toDecisionId != null
@@ -695,12 +674,14 @@ async function main(): Promise<void> {
   if (pilotWindow.official) {
     console.log(
       `FENÊTRE OFFICIELLE DU PILOTE · activé le ${pilotWindow.activatedAt} · statut ${pilotWindow.status} · ` +
-        `ouverture au cycle ${pilotWindow.fromDecisionId ?? '(inconnu)'} sur ${(pilotWindow.openingEquity ?? 0).toFixed(2)} $ · ` +
-        `fermeture ${pilotWindow.toDecisionId == null ? 'non demandée' : `au cycle ${pilotWindow.toDecisionId} (${pilotWindow.closedAt})`}`,
+        `ouverture au cycle ${pilotWindow.fromDecisionId} sur ${pilotWindow.openingEquityQuote.toFixed(2)} $ · ` +
+        `fermeture ${pilotWindow.toDecisionId == null ? 'au point d\'arrêt courant' : `au cycle ${pilotWindow.toDecisionId}`} ` +
+        `(instant : ${pilotWindow.instant})`,
     );
     console.log('Rien d\'antérieur à l\'ouverture ni de postérieur à la fermeture n\'entre dans ce résultat.');
   } else {
-    console.log('AUCUNE IDENTITÉ DE PILOTE — ce rejeu est un BANC D\'ESSAI de la machinerie.');
+    console.log(`PAS DE RÉSULTAT OFFICIEL — ${pilotWindow.reason}.`);
+    console.log('Ce rejeu est un BANC D\'ESSAI de la machinerie.');
     console.log('Il ne produit AUCUN résultat officiel du pilote : sa fenêtre est celle de l\'historique');
     console.log('disponible, pas celle d\'une expérience, et son ouverture est un paramètre et non un');
     console.log('instant. Le pilote commence au passage en `application`, et pas avant.');
@@ -722,7 +703,7 @@ async function main(): Promise<void> {
     // NOTHING BEFORE THE OPENING. A cycle older than the activation is not a gap in the pilot's
     // window — it is outside it, and counting it as either reconstructed or missing would be a
     // statement about an experiment that had not started.
-    if (pilotWindow.official && pilotWindow.fromDecisionId != null && decision.id < pilotWindow.fromDecisionId) {
+    if (pilotWindow.official && decision.id < pilotWindow.fromDecisionId) {
       continue;
     }
     const fail = (cause: CycleGap): void => {
@@ -798,7 +779,7 @@ async function main(): Promise<void> {
   // real opening instant belongs to brick 4 — these are parameters of the dry run.
   const reserveAsset = portfolioOf(segments[0]!.cycles[0]!.context).reserveAsset;
   const runAll = (): ChainRow[] =>
-    segments.flatMap((segment) => runChain(segment, universe, reserveAsset, pilotWindow.openingEquity));
+    segments.flatMap((segment) => runChain(segment, universe, reserveAsset, pilotWindow.official ? pilotWindow.openingEquityQuote : null));
   const rows = runAll();
 
   console.log('');
@@ -827,9 +808,7 @@ async function main(): Promise<void> {
     // were never in scope, so they belong in neither the reconstructed count nor the missing one.
     const inScope = decisions.filter(
       (d) =>
-        !pilotWindow.official ||
-        pilotWindow.fromDecisionId == null ||
-        d.id >= pilotWindow.fromDecisionId,
+        !pilotWindow.official || d.id >= pilotWindow.fromDecisionId,
     ).length;
     const accounted = rows.length + gaps.length;
     const causes = (list: PlacedGap[]): string =>
@@ -1112,6 +1091,9 @@ async function main(): Promise<void> {
     execution: { feePercent: config.execution.feePercent, minMovementPercent: config.execution.minMovementPercent },
     window: {
       settled_cutoff_id: cutoffId,
+      official: pilotWindow.official,
+      official_instant: pilotWindow.official ? pilotWindow.instant : null,
+      not_official_because: pilotWindow.official ? null : pilotWindow.reason,
       cycles: rows.length,
       from_id: rows[0]?.decision_id ?? null,
       to_id: rows[rows.length - 1]?.decision_id ?? null,

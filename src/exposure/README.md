@@ -596,6 +596,20 @@ décident rien et ne déplacent aucun ordre.
 L'invariant acheté : **une identité encore valide a vu tous les cycles décidés depuis son
 activation**, donc aucun sommet observable ne manque à son plus-haut.
 
+### Deux natures d'écriture, et deux conséquences différentes
+
+| | Quand | Un échec fait quoi |
+|---|---|---|
+| **écritures préalables obligatoires** — activation, nouveau plus-haut, alerte, arrêt | **avant** que la correction touche un ordre | **désarme le cycle courant** : la correction ne s'applique pas, la cible reste `clamp.applied` |
+| **le battement** — le reçu de continuité | **après** la décision, une fois la ligne écrite | **invalide le pilote au cycle suivant**, irréversiblement, sans rendre dangereux le cycle déjà exécuté |
+
+La distinction est délibérée. Une écriture préalable garantit qu'aucun ordre corrigé ne part sur
+un état qu'on n'a pas su enregistrer. Le battement, lui, ne peut pas être préalable — il nomme la
+ligne de décision, qui n'existe pas encore quand la correction est calculée. Son échec ne rend
+donc pas le cycle passé dangereux : ce cycle a bien tourné sous un pilote valide. Il rend le
+**suivant** impossible, parce qu'à ce moment-là le pilote ne peut plus prouver avoir vu ce qui
+s'est passé.
+
 ### La fenêtre officielle des témoins
 
 Le rejeu des témoins lit ses bornes dans l'identité : ouverture au cycle officiel d'activation,
@@ -603,8 +617,18 @@ Le rejeu des témoins lit ses bornes dans l'identité : ouverture au cycle offic
 — `--at=alerte_40`, `arret_50` ou `cloture`. Rien d'antérieur à l'ouverture ni de postérieur à la
 fermeture n'entre dans le résultat.
 
-**Sans identité, il n'y a pas de résultat officiel**, et le rejeu le dit en toutes lettres dans
-sa propre bannière : c'est un banc d'essai de la machinerie, sa fenêtre est celle de l'historique
+**Le refus est strict, et il est nommé.** Une identité présente ne suffit pas : si son cycle
+d'activation est irrésolu ou son equity d'ouverture inutilisable, le résultat n'est pas officiel.
+Un `--at` inconnu est refusé ; un `--at` connu dont le pointeur est absent est refusé aussi — et
+**jamais prolongé jusqu'au point d'arrêt courant**, parce que « valorise au moment de l'arrêt » et
+« valorise aujourd'hui » sont deux questions différentes.
+
+Sans `--at`, le rejeu choisit **explicitement** l'instant réellement disponible — clôture, puis
+arrêt, sinon le point courant — et publie le libellé de celui qu'il a pris. Aucun libellé ne
+provient d'une chaîne vide ni d'un cast de la ligne de commande : les quatre valeurs sont closes.
+
+**Sans identité — ou sur un refus — il n'y a pas de résultat officiel**, et le rejeu l'affiche
+avec sa raison : c'est un banc d'essai de la machinerie, sa fenêtre est celle de l'historique
 disponible, et son ouverture est un paramètre, pas un instant.
 
 ### Le contrat, et ce qui invalide un pilote

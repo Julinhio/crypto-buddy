@@ -27,6 +27,7 @@ import {
   contractDigest,
   judgePilot,
   judgeWindowClosure,
+  pilotAlertMessage,
   pilotContractOf,
   type PilotHold,
   type PilotIdentity,
@@ -1491,13 +1492,16 @@ export async function decide(): Promise<DecideResult> {
   // and the latch is already durable, so a missed send is visible in the identity rather than
   // silently repeated on the next cycle.
   if (pilotJudgement.alert != null && pilotHold !== 'ecriture_obligatoire_impossible') {
-    const drawdown = (pilotJudgement.drawdownPercent ?? 0).toFixed(2);
-    const text =
-      pilotJudgement.alert === 'drawdown_40'
-        ? `Pilote d'exposition — drawdown ${drawdown}% depuis le plus-haut du pilote. Alerte unique, la correction continue de s'appliquer.`
-        : pilotJudgement.alert === 'drawdown_50'
-        ? `Pilote d'exposition — drawdown ${drawdown}%. COUPE-CIRCUIT : la correction de bande est desarmee durablement. Aucune liquidation, le bot v5 continue.`
-        : `Pilote d'exposition — le contrat a diverge de celui enregistre a l'activation. Le pilote est invalide durablement et la correction est desarmee. Le bot v5 continue.`;
+    // ONE FUNCTION, TOTAL OVER THE UNION. This was a chain of ternaries, and a chain of
+    // ternaries has a last branch that silently catches whatever nobody wrote a case for —
+    // `mode_interrupted` fell into it and announced a contract divergence, sending anyone reading
+    // the alert to look for a configuration change that had not happened.
+    const text = pilotAlertMessage(pilotJudgement.alert, {
+      drawdownPercent: pilotJudgement.drawdownPercent,
+      lastSeenDecisionId:
+        pilotRead != null && pilotRead.ok ? (pilotRead.identity?.lastSeenDecisionId ?? null) : null,
+      latestDecidedDecisionId,
+    });
     const delivered = await sendTelegram(text);
     if (pilotJudgement.alert === 'drawdown_40' && delivered) {
       await markDrawdownAlertDelivered(supabase);

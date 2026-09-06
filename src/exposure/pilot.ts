@@ -442,3 +442,165 @@ export function pilotContractOf(source: PilotContractSource, universe: readonly 
     },
   };
 }
+
+// ── THE ALERTS, WORDED ONCE ───────────────────────────────────────────────────────────
+
+export type PilotAlert = 'drawdown_40' | 'drawdown_50' | 'contract_invalidated' | 'mode_interrupted';
+
+/**
+ * One message per alert, and a message that says what happened.
+ *
+ * Written here rather than at the call site because the call site had a chain of ternaries,
+ * and a chain of ternaries has a LAST branch that quietly catches whatever nobody added a case
+ * for. That is exactly what happened to `mode_interrupted`: it fell through and announced a
+ * contract divergence — an operator woken at four in the morning would have gone looking for a
+ * configuration change that never occurred.
+ *
+ * A total function over a closed union cannot do that: adding a fifth alert without a message
+ * stops the build.
+ */
+export function pilotAlertMessage(
+  alert: PilotAlert,
+  facts: { drawdownPercent: number | null; lastSeenDecisionId: number | null; latestDecidedDecisionId: number | null },
+): string {
+  const drawdown = (facts.drawdownPercent ?? 0).toFixed(2);
+  switch (alert) {
+    case 'drawdown_40':
+      return (
+        `Pilote d'exposition — drawdown ${drawdown}% depuis le plus-haut du pilote. ` +
+        "Alerte unique, et la correction CONTINUE de s'appliquer."
+      );
+    case 'drawdown_50':
+      return (
+        `Pilote d'exposition — drawdown ${drawdown}%. COUPE-CIRCUIT : la correction de bande est ` +
+        'desarmee durablement. Aucune liquidation, le bot v5 continue normalement.'
+      );
+    case 'contract_invalidated':
+      return (
+        "Pilote d'exposition — le contrat a diverge de celui enregistre a l'activation. Le pilote " +
+        'est invalide durablement et la correction est desarmee. Le bot v5 continue normalement.'
+      );
+    case 'mode_interrupted': {
+      const seen = facts.lastSeenDecisionId == null ? 'inconnu' : String(facts.lastSeenDecisionId);
+      const latest = facts.latestDecidedDecisionId == null ? 'inconnu' : String(facts.latestDecidedDecisionId);
+      return (
+        "Pilote d'exposition — INTERRUPTION : un ou plusieurs cycles decides ont tourne sans que le " +
+        `pilote les voie (dernier cycle vu ${seen}, dernier cycle decide ${latest}). Son plus-haut a ` +
+        'donc un trou, l\'identite est invalidee DURABLEMENT et la correction est desarmee. Un retour ' +
+        'de la variable a `application` ne la reactivera pas. Le bot v5 continue normalement.'
+      );
+    }
+  }
+}
+
+// ── THE OFFICIAL WINDOW, RESOLVED STRICTLY ────────────────────────────────────────────
+
+/** Which persisted instant closes the official window. Never a raw string from the CLI. */
+export type PilotInstant = 'alerte_40' | 'arret_50' | 'cloture' | 'point_courant';
+
+/** The persisted pointers a window can be cut on, as the row holds them. */
+export interface PilotWindowRow {
+  status: string;
+  activatedAt: string | null;
+  activatedDecisionId: number | null;
+  openingEquityQuote: number | null;
+  alertDecisionId: number | null;
+  stoppedDecisionId: number | null;
+  closedDecisionId: number | null;
+}
+
+export type PilotWindowResolution =
+  | {
+      official: true;
+      fromDecisionId: number;
+      /** Null means "up to the settled point" — only ever with the `point_courant` label. */
+      toDecisionId: number | null;
+      openingEquityQuote: number;
+      instant: PilotInstant;
+      status: string;
+      activatedAt: string;
+    }
+  | { official: false; reason: string };
+
+/**
+ * THE WINDOW, OR A NAMED REFUSAL — never a half-official run.
+ *
+ * The first version treated the mere existence of a row as an official window. An identity
+ * whose activation cycle was never backfilled, or whose opening equity could not be read, would
+ * then have printed "FENÊTRE OFFICIELLE" while replaying the whole history from a different
+ * equity — a bench run wearing the pilot's name, which is the one confusion this brick exists
+ * to prevent.
+ *
+ * So every doubt refuses, and the refusal says why. A refused window is a bench run, clearly
+ * announced as one; it is never a shorter or longer official one.
+ *
+ * The `--at` contract is equally strict. An instant that was asked for and has no pointer is a
+ * REFUSAL, never a quiet extension to the current settled point: "value the witnesses at the
+ * 50% stop" and "value them at today" are different questions, and answering the second while
+ * being asked the first is how a result gets misread. Only the absence of `--at` chooses, and
+ * it chooses explicitly — the closure, then the stop, then the current point — publishing the
+ * label of what it really used.
+ */
+export function resolvePilotWindow(
+  row: PilotWindowRow | null,
+  requested: string | null,
+): PilotWindowResolution {
+  if (row == null) return { official: false, reason: 'aucune identite de pilote' };
+  if (row.activatedAt == null || row.activatedAt === '') {
+    return { official: false, reason: "l'identite ne porte pas d'instant d'activation" };
+  }
+  if (row.activatedDecisionId == null) {
+    return {
+      official: false,
+      reason: "le cycle d'activation du pilote est irresolu — sans lui l'ouverture ne peut pas etre bornee",
+    };
+  }
+  if (row.openingEquityQuote == null || !Number.isFinite(row.openingEquityQuote) || row.openingEquityQuote <= 0) {
+    return { official: false, reason: "l'equity d'ouverture du pilote est inutilisable" };
+  }
+
+  const known: Record<string, number | null> = {
+    alerte_40: row.alertDecisionId,
+    arret_50: row.stoppedDecisionId,
+    cloture: row.closedDecisionId,
+  };
+
+  let instant: PilotInstant;
+  let toDecisionId: number | null;
+  if (requested == null) {
+    // NO FLAG: take what really exists, and say which one it was.
+    if (row.closedDecisionId != null) {
+      instant = 'cloture';
+      toDecisionId = row.closedDecisionId;
+    } else if (row.stoppedDecisionId != null) {
+      instant = 'arret_50';
+      toDecisionId = row.stoppedDecisionId;
+    } else {
+      instant = 'point_courant';
+      toDecisionId = null;
+    }
+  } else if (!(requested in known)) {
+    return {
+      official: false,
+      reason: `instant "${requested}" inconnu — attendus : alerte_40, arret_50, cloture`,
+    };
+  } else if (known[requested] == null) {
+    return {
+      official: false,
+      reason: `l'instant "${requested}" n'a pas eu lieu pour ce pilote — aucun cycle ne lui correspond`,
+    };
+  } else {
+    instant = requested as PilotInstant;
+    toDecisionId = known[requested]!;
+  }
+
+  return {
+    official: true,
+    fromDecisionId: row.activatedDecisionId,
+    toDecisionId,
+    openingEquityQuote: row.openingEquityQuote,
+    instant,
+    status: row.status,
+    activatedAt: row.activatedAt,
+  };
+}

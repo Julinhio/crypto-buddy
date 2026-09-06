@@ -601,8 +601,12 @@ console.log('\nProof 11 — the replay reads its bounds from the identity, or sa
     replay.includes('segment.id === 1 && openingEquityOverride != null'),
   );
   ok(
-    'without an identity the run declares it produces NO official result',
-    /AUCUNE IDENTITÉ DE PILOTE/.test(replay) && /AUCUN résultat officiel du pilote/.test(replay),
+    'a run that is not official says so, with the reason that refused it',
+    replay.includes('PAS DE RÉSULTAT OFFICIEL') && replay.includes('AUCUN résultat officiel du pilote'),
+  );
+  ok(
+    'and the refusal is the shared resolver\'s, not a local judgement',
+    replay.includes('resolvePilotWindow(') && !replay.includes('official: true,'),
   );
   ok(
     'and with one it prints the bounds it is honouring',

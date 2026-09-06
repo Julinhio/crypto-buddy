@@ -6,8 +6,12 @@ import {
   contractDigest,
   judgePilot,
   judgeWindowClosure,
+  pilotAlertMessage,
   pilotContractOf,
+  resolvePilotWindow,
+  type PilotAlert,
   type PilotIdentity,
+  type PilotWindowRow,
   type PilotJudgeInput,
 } from '../exposure/pilot.js';
 
@@ -401,6 +405,160 @@ console.log('\nProof 9 — a cycle the pilot did not see ends it, and nothing br
   ok(
     'only DECIDED cycles count — a skipped cycle decides nothing and moves no order',
     /readLatestDecidedDecisionId[\s\S]{0,600}?\.eq\('status', 'decided'\)/.test(persistence),
+  );
+}
+
+// ── PROOF 10 — four alerts, four messages, and none of them borrowed ────────────────
+//
+// THE DEFECT THIS REPLACES. The four alerts were worded by a chain of ternaries, whose LAST
+// branch caught whatever nobody had written a case for. `mode_interrupted` fell into it and
+// announced a contract divergence: an operator reading that alert would have gone looking for a
+// configuration change that never happened, while the real event — a pilot that had lost sight
+// of its own cycles — went unsaid.
+console.log('\nProof 10 — each alert says what actually happened:');
+{
+  const facts = { drawdownPercent: 43.21, lastSeenDecisionId: 1500, latestDecidedDecisionId: 1504 };
+  const message = (alert: PilotAlert): string => pilotAlertMessage(alert, facts);
+
+  ok(
+    '[40%] names the drawdown AND says the correction continues',
+    message('drawdown_40').includes('43.21%') && /CONTINUE/.test(message('drawdown_40')),
+  );
+  ok(
+    '[50%] names the breaker, the persistence and the absence of liquidation',
+    /COUPE-CIRCUIT/.test(message('drawdown_50')) &&
+      message('drawdown_50').includes('desarmee durablement') &&
+      message('drawdown_50').includes('Aucune liquidation'),
+  );
+  ok(
+    '[contrat] names the divergence and nothing else',
+    message('contract_invalidated').includes('contrat a diverge') &&
+      !message('contract_invalidated').includes('cycles decides'),
+  );
+  ok(
+    '[interruption] names the missed cycles, both ends of the hole included',
+    message('mode_interrupted').includes('cycles decides') &&
+      message('mode_interrupted').includes('1500') &&
+      message('mode_interrupted').includes('1504'),
+  );
+  ok(
+    'it says the identity is invalidated DURABLY and the correction disarmed',
+    message('mode_interrupted').includes('DURABLEMENT') &&
+      message('mode_interrupted').includes('desarmee'),
+  );
+  ok(
+    'and that putting the variable back will not revive it',
+    message('mode_interrupted').includes('ne la reactivera pas'),
+  );
+  ok(
+    'THE DEFECT ITSELF: the interruption no longer borrows the contract message',
+    !message('mode_interrupted').includes('contrat a diverge'),
+  );
+  ok(
+    'every alert says the v5 bot carries on, except the one where nothing stops',
+    (['drawdown_50', 'contract_invalidated', 'mode_interrupted'] as PilotAlert[]).every((a) =>
+      message(a).includes('bot v5 continue'),
+    ),
+  );
+  const four: PilotAlert[] = ['drawdown_40', 'drawdown_50', 'contract_invalidated', 'mode_interrupted'];
+  ok('the four messages are four DIFFERENT messages', new Set(four.map(message)).size === 4);
+  ok('and none is empty', four.every((a) => message(a).length > 60));
+  ok(
+    'the call site no longer words them itself',
+    !/Pilote d'exposition — drawdown \$\{drawdown\}/.test(
+      readFileSync(path.join(ROOT, 'src/decision/decide.ts'), 'utf8'),
+    ),
+  );
+}
+
+// ── PROOF 11 — an official window, or a named refusal — never a half-official run ───
+//
+// THE DEFECT THIS REPLACES. The mere existence of a pilot row made a run "official". An
+// identity whose activation cycle had never been backfilled, or whose opening equity could not
+// be read, would have printed FENÊTRE OFFICIELLE while replaying the whole history from a
+// different equity — a bench run wearing the pilot's name.
+console.log('\nProof 11 — the official window refuses on every doubt, and says why:');
+{
+  const row = (over: Partial<PilotWindowRow> = {}): PilotWindowRow => ({
+    status: 'active',
+    activatedAt: '2026-09-06T00:00:00.000Z',
+    activatedDecisionId: 1500,
+    openingEquityQuote: 1026.26,
+    alertDecisionId: null,
+    stoppedDecisionId: null,
+    closedDecisionId: null,
+    ...over,
+  });
+
+  // (a) NO IDENTITY — a bench run, as before.
+  const none = resolvePilotWindow(null, null);
+  ok('[sans identité] no official result', !none.official);
+  ok('and the reason says so plainly', !none.official && none.reason.includes('aucune identite'));
+
+  // (b) AN IDENTITY THAT CANNOT BOUND ITSELF. Each of these used to pass as official.
+  const noCycle = resolvePilotWindow(row({ activatedDecisionId: null }), null);
+  ok('[cycle d\'activation irrésolu] REFUSED', !noCycle.official);
+  ok('and named', !noCycle.official && noCycle.reason.includes('irresolu'));
+  for (const bad of [null, 0, -5, Number.NaN]) {
+    const r = resolvePilotWindow(row({ openingEquityQuote: bad }), null);
+    ok(`[equity d'ouverture ${String(bad)}] REFUSED`, !r.official && r.reason.includes('inutilisable'));
+  }
+  const noInstant = resolvePilotWindow(row({ activatedAt: null }), null);
+  ok('[sans instant d\'activation] REFUSED', !noInstant.official && noInstant.reason.includes("instant d'activation"));
+
+  // (c) THE --at CONTRACT. An unknown value refuses; a known one with no pointer refuses too,
+  // and never quietly stretches the window to today.
+  const unknown = resolvePilotWindow(row(), 'la_semaine_derniere');
+  ok('[--at inconnu] REFUSED', !unknown.official && unknown.reason.includes('inconnu'));
+  ok('and the accepted values are listed', !unknown.official && unknown.reason.includes('alerte_40'));
+  const empty = resolvePilotWindow(row(), '');
+  ok('[--at= vide] REFUSED too — asking for nothing is asking badly', !empty.official);
+  for (const asked of ['alerte_40', 'arret_50', 'cloture']) {
+    const missing = resolvePilotWindow(row(), asked);
+    ok(`[--at=${asked} sans pointeur] REFUSED rather than extended`, !missing.official);
+    ok(`and it says the instant never happened (${asked})`, !missing.official && missing.reason.includes("n'a pas eu lieu"));
+  }
+  const stopped = resolvePilotWindow(row({ stoppedDecisionId: 1700 }), 'arret_50');
+  ok('[--at=arret_50 avec pointeur] accepted', stopped.official);
+  ok('bounded exactly on it', stopped.official && stopped.toDecisionId === 1700);
+  ok('with its own label, not the raw flag', stopped.official && stopped.instant === 'arret_50');
+
+  // (d) WITHOUT --at: the instant that really exists, and the right label for it.
+  const bare = resolvePilotWindow(row(), null);
+  ok('[sans --at, rien de fermé] the current settled point', bare.official && bare.instant === 'point_courant');
+  ok('and no upper cycle is invented', bare.official && bare.toDecisionId === null);
+  const withStop = resolvePilotWindow(row({ stoppedDecisionId: 1700 }), null);
+  ok('[sans --at, un arrêt] takes the stop', withStop.official && withStop.instant === 'arret_50' && withStop.toDecisionId === 1700);
+  const withBoth = resolvePilotWindow(row({ stoppedDecisionId: 1700, closedDecisionId: 1800 }), null);
+  ok('[sans --at, arrêt ET clôture] the closure wins', withBoth.official && withBoth.instant === 'cloture' && withBoth.toDecisionId === 1800);
+
+  // (e) NO CAST, EVER. The label is one of four known values, never a string from the CLI.
+  const labels = ['alerte_40', 'arret_50', 'cloture', 'point_courant'];
+  const produced = [
+    resolvePilotWindow(row({ alertDecisionId: 1600 }), 'alerte_40'),
+    withStop,
+    withBoth,
+    bare,
+  ];
+  ok(
+    'every published instant is one of the four known labels',
+    produced.every((r) => r.official && labels.includes(r.instant)),
+  );
+  const pilotSrc = readFileSync(path.join(ROOT, 'src/exposure/pilot.ts'), 'utf8');
+  ok(
+    'and the resolver casts the request only after proving it is one of them',
+    pilotSrc.includes('} else if (!(requested in known)) {') &&
+      pilotSrc.includes('instant = requested as PilotInstant;'),
+  );
+  const replaySrc = readFileSync(path.join(ROOT, 'src/replay/exposureBandWitnesses.ts'), 'utf8');
+  ok(
+    'the replay tells an ABSENT flag from an empty one',
+    replaySrc.includes("const instantFlag = process.argv.find((arg) => arg.startsWith('--at='));") &&
+      replaySrc.includes('instantFlag == null ? null : instantFlag.slice'),
+  );
+  ok(
+    'and a refused window prints the reason instead of the pilot\'s name',
+    replaySrc.includes('PAS DE RÉSULTAT OFFICIEL'),
   );
 }
 
