@@ -162,23 +162,19 @@ console.log('\nProof 2 — EXPOSURE_BAND_MODE: absence is safe, and `application
   ok('off resolves to off', resolveExposureBandMode('off') === 'off');
   ok('observation resolves to observation', resolveExposureBandMode('observation') === 'observation');
 
-  // THE ONE THAT MATTERS. The switch from observation to application is the pilot's official
-  // start — its equity, its high-water mark and its eight-week clock all begin there, and it
-  // can be spent exactly once. The witnesses and the circuit breaker are not in this build,
-  // so the value is refused by the BINARY rather than by discipline.
-  let applicationError = '';
-  try {
-    resolveExposureBandMode('application');
-  } catch (err) {
-    applicationError = err instanceof Error ? err.message : String(err);
-  }
-  ok('application is REFUSED by this build', applicationError !== '');
-  ok(
-    'and it says why, rather than reading as a typo',
-    applicationError.includes('not a legal value in this build') &&
-      applicationError.includes('witnesses') &&
-      applicationError.includes('circuit breaker'),
-  );
+  // THE ONE THAT MATTERS, and brick 4 changed its answer rather than its importance.
+  //
+  // Through bricks 1 to 3 this value was refused by the BINARY, because the correction, the
+  // witnesses and the circuit breaker were not there yet and the pilot's official instant can
+  // be spent exactly once. All three shipped, so `application` is now a value the build
+  // understands.
+  //
+  // LEGAL IS NOT ARMED. The variable alone still decides nothing: the correction reaches the
+  // executor only when the pilot's persistent identity also says so, and that identity fails
+  // closed on every doubt. The proof of the second lock lives in `exposurePilot.ts`, where it
+  // can be walked rung by rung; here we only assert that the resolver stopped lying about what
+  // the build can do.
+  ok('application resolves to application', resolveExposureBandMode('application') === 'application');
 
   for (const bad of ['Observation', 'ON', 'true', 'enforce', 'observe']) {
     let threw = false;
@@ -657,8 +653,15 @@ console.log('\nProof 13 — the band cannot change what the bot does:');
   );
   ok(
     'and it is the only call site that does — every other path publishes what it measured',
-    [...decide.matchAll(/bookExposurePercent: portfolio\.deployedPercent\.toNumber\(\)/g)].length ===
-      outageCalls - 1,
+    // SCOPED TO THE OBSERVATION CALLS. Brick 4 put a second reader of the same measurement on
+    // the ORDER path — the band's own assessment, when the pilot is armed — and a bare count of
+    // the expression would have folded the two populations together and failed on a change that
+    // is not about the journal at all.
+    [
+      ...decide.matchAll(
+        /observeExposureBand\(\{[^}]*bookExposurePercent: portfolio\.deployedPercent\.toNumber\(\)/g,
+      ),
+    ].length === outageCalls - 1,
   );
 
   // (e) IT RUNS AFTER THE ORDERS. On the decided path the observation sits after
@@ -825,13 +828,14 @@ console.log('Proof 15 — every insert shape matches its migration, column for c
     ok(label + ': nothing left unwritten (' + (missing.join(', ') || 'none') + ')', missing.length === 0);
   };
 
-  // THE OBSERVATION ROW — created by 0028, extended by 0030.
+  // THE OBSERVATION ROW — created by 0028, extended by 0030 and again by 0034.
   compare(
     'observations',
     [
       ...new Set([
         ...columnsOf('0028_exposure_band_observations.sql', 'exposure_band_observations'),
         ...columnsOf('0030_exposure_band_corrections.sql', 'exposure_band_observations'),
+        ...columnsOf('0034_exposure_band_observations_pilot.sql', 'exposure_band_observations'),
         'decision_id',
       ]),
     ].sort(),

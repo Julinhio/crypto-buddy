@@ -563,50 +563,102 @@ console.log('\nProof 12 — the correction applies the executor\'s own floor, no
   );
 }
 
-// ── PROOF 13 — brick 2 does not touch the order path ──────────────────────────
+// ── PROOF 13 — the correction reaches the orders ONLY through the two locks ───
 //
-// The correction exists, it is computed on every cycle, and NOTHING sends it. That is the
-// whole safety claim of this brick, and it is structural rather than promised: `correctToBand`
-// is called from inside the observation closure, which runs after the orders are placed and
-// returns void. Moving it up to the risk clamp — where it will eventually have to live — is
-// the last brick's job, and it should be one reviewable diff rather than something that has
-// quietly already happened.
-console.log('\nProof 13 — the correction is computed and nothing sends it:');
+// THIS PROOF CHANGED ITS ANSWER IN BRICK 4, AND THAT WAS THE PLAN.
+//
+// Through bricks 2 and 3 it asserted the opposite: the correction was computed on every cycle
+// and NOTHING sent it, because `correctToBand` was called only from an observation closure that
+// ran after the orders and returned void. The comment here said, in as many words, that moving
+// it up to the risk clamp was the last brick's job and should be one reviewable diff rather
+// than something that had quietly already happened.
+//
+// This is that diff, and the claim it now defends is narrower but still structural: the
+// correction can reach the executor, and only through two independent locks — the operator's
+// variable AND the pilot's persistent identity — with the precedence contract intact around it.
+console.log('\nProof 13 — the correction reaches the orders only through the two locks:');
 {
   const decide = readFileSync(path.join(ROOT, 'src/decision/decide.ts'), 'utf8');
 
-  // (a) EXACTLY ONE CALL SITE, and it is inside the observation closure.
+  // (a) TWO CALL SITES, and each one has a job. The order path computes the correction the
+  // executor will use; the closure only recomputes when the order path did NOT hand one down,
+  // which is every cycle the pilot is not armed.
   const calls = [...decide.matchAll(/correctToBand\(\{/g)];
-  ok('correctToBand is called exactly once in decide()', calls.length === 1);
+  ok('correctToBand is called exactly twice in decide()', calls.length === 2);
   const closureStart = decide.indexOf('const observeExposureBand');
   const closureEnd = decide.indexOf('// The AI sees the virtual book');
   ok(
-    'and that call sits inside the observation closure',
-    calls[0]!.index! > closureStart && calls[0]!.index! < closureEnd,
+    'one call is inside the observation closure',
+    calls.some((c) => c.index! > closureStart && c.index! < closureEnd),
+  );
+  ok(
+    'and the other is on the order path, outside it',
+    calls.some((c) => c.index! > closureEnd),
+  );
+  ok(
+    'the closure prefers the correction the ORDERS used over recomputing one',
+    /opts\.applied != null\s*\n\s*\? opts\.applied/.test(decide),
   );
 
-  // (b) THE ORDER PATH STILL READS THE GUARD'S OWN MOVEMENTS. If the correction ever reached
-  // the executor it would have to pass through here, and this is the line that would change.
+  // (b) THE LOCKS. `mayCorrect` is born from the pilot's verdict and can only ever be turned
+  // OFF afterwards — a single assignment to `true` outside `judgePilot` would be the whole
+  // safety story undone, so the assignments are counted.
   ok(
-    'the executed vector still comes from the guard-evaluated movements',
-    /const \{ clamp, movements: proposedMovements \} = evaluated;/.test(decide),
+    'the order-path correction is gated on the pilot verdict',
+    /if \(mayCorrect && bandState != null\) \{/.test(decide),
   );
   ok(
-    'and the gate is still judged on those, not on a corrected vector',
-    /judgeVector\(\s*proposedMovements\.map/.test(decide),
+    'mayCorrect is seeded from judgePilot and never re-raised',
+    /let mayCorrect = pilotJudgement\.mayCorrect;/.test(decide) &&
+      [...decide.matchAll(/mayCorrect = (?!pilotJudgement)/g)].every((m) =>
+        decide.slice(m.index!, m.index! + 20).includes('false'),
+      ),
   );
   ok(
-    'no corrected allocation is ever handed to computeMovements',
-    !/computeMovements\([^)]*correct/i.test(decide),
-  );
-  ok(
-    'nor to applyGate',
-    !/applyGate\(\{[\s\S]{0,600}?correct/i.test(decide),
+    'and the identity is only read in application mode',
+    /EXPOSURE_BAND_MODE === 'application' \? await readPilotIdentity\(supabase\) : null/.test(decide),
   );
 
-  // (c) THE CORRECTION RUNS AFTER EXECUTION. Same tier as every other observational write.
+  // (c) THE PRECEDENCE CONTRACT, unchanged around the new call. The guard judged the model's
+  // raw proposal BEFORE (§3.4.5), the correction does not re-enter it (§3.4.7), and the
+  // transition gate speaks AFTER it on the corrected movements (§3.4.2).
   ok(
-    'the single call site is after executeMovements in the file',
+    'the correction starts from the guard-evaluated, risk-clamped target',
+    /const \{ clamp, movements: proposedMovements \} = evaluated;/.test(decide) &&
+      /clampedAllocation: clamp\.applied,/.test(decide),
+  );
+  const orderPathCall = calls.find((c) => c.index! > closureEnd)!.index!;
+  const guardCall = decide.indexOf('const evaluate = (decision: ValidatedDecision)');
+  ok('the order-path correction runs AFTER the guard', orderPathCall > guardCall);
+  ok(
+    'and BEFORE the transition gate, which judges what it produced',
+    orderPathCall < decide.indexOf('const gateJudgement = judgeVector(') &&
+      /judgeVector\(\s*correctedMovements\.map/.test(decide),
+  );
+  ok(
+    'the corrected vector is what applyGate receives',
+    /applyGate\(\{[\s\S]{0,400}?movements: correctedMovements,/.test(decide),
+  );
+  ok(
+    'the correction never re-enters the coherence guard',
+    decide.lastIndexOf('checkCoherence({') < orderPathCall,
+  );
+
+  // (d) THE DEFAULT IS THE MODEL'S OWN TARGET. Every path that does not arm the pilot leaves
+  // the executor exactly what it received before this brick existed.
+  ok(
+    'the corrected target defaults to clamp.applied',
+    /let correctedAllocation = clamp\.applied;/.test(decide),
+  );
+  ok(
+    'and the corrected movements to the guard-evaluated ones',
+    /let correctedMovements = proposedMovements;/.test(decide),
+  );
+
+  // (e) THE OBSERVATION STILL RUNS AFTER EXECUTION. Unchanged: the journal is still in the
+  // best-effort tier, and only the correction moved.
+  ok(
+    'the closure is still called after executeMovements',
     decide.indexOf('await executeMovements(') < decide.lastIndexOf('await observeExposureBand({'),
   );
 }
@@ -781,7 +833,10 @@ console.log('\nProof 15 — the three enforce-mode defects, and their fixes:');
   const decideSrc = readFileSync(path.join(ROOT, 'src/decision/decide.ts'), 'utf8');
   ok(
     'while decide() still runs the real gate on the vector it executes',
-    /judgeVector\(\s*proposedMovements\.map/.test(decideSrc) && /applyGate\(\{/.test(decideSrc),
+    // The vector it executes is the CORRECTED one from brick 4 onward, and the point of this
+    // assertion is unchanged: the corrector models no gate of its own, and the real gate is
+    // applied by the cycle, last, to whatever is really about to be sent.
+    /judgeVector\(\s*correctedMovements\.map/.test(decideSrc) && /applyGate\(\{/.test(decideSrc),
   );
 
   // (c) THE REALISED EXPOSURE IS REPLAYED FROM THE NOTIONALS, not assumed from the target.

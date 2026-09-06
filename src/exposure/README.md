@@ -1,4 +1,4 @@
-# Pilote d'exposition contrainte — briques 1 à 3
+# Pilote d'exposition contrainte — briques 1 à 4
 
 | Brique | Fichier | Ce qu'elle fait |
 |---|---|---|
@@ -7,6 +7,8 @@
 | 2 | `correct.ts` | **répartit** : §3.5 vers le plancher, §3.6 vers le plafond, la préséance, la consolidation |
 | 3 | `witness.ts` | **compare** : les deux témoins chaînés, leur pondération sous plafonds, leur plomberie |
 | 3 | `../replay/exposureBandWitnesses.ts` | le rejeu hors ligne des trois livres, en segments, et ses huit critères |
+| 4 | `pilot.ts` | **arme** : l'identité persistante, le coupe-circuit, la fermeture de la fenêtre de mesure |
+| 4 | `../persistence/exposurePilot.ts` | la lecture et les écritures obligatoires, bornées, sur le chemin de trading |
 
 Les tenir séparées est ce qui a rendu le point de contrôle honnête : la morsure s'est publiée,
 lue et contestée avant qu'une seule ligne de correction n'existe.
@@ -521,6 +523,94 @@ Ce qu il prouve, c est le §6 : que toutes les entrées des témoins sont **dura
 journalisées** par le cycle vivant — prix, livre pré-cycle, registre souverain, journal de régime,
 verdicts de porte, cible bornée — et que la reconstruction se **reproduit** à l'empreinte près.
 Aucune écriture n'a été ajoutée au chemin de trading pour les témoins.
+
+## L'identité du pilote et son coupe-circuit (brique 4)
+
+C'est la brique qui **arme**. Les trois précédentes calculaient et journalisaient ; celle-ci
+laisse la correction atteindre l'exécuteur — sous deux verrous indépendants.
+
+### Deux verrous, pas un
+
+| Verrou | Ce qu'il vaut |
+|---|---|
+| `EXPOSURE_BAND_MODE=application` | l'interrupteur de l'opérateur |
+| l'identité persistante du pilote | celui du code, et il **échoue fermé** |
+
+`application` est devenue une valeur légale du résolveur — les trois briques qu'elle attendait
+sont là. **Légal n'est pas armé.** La variable seule ne décide de rien : la correction n'atteint
+l'exécuteur que si l'identité le dit aussi, et l'identité refuse sur le moindre doute — ligne
+illisible, plus-haut non écrit, contrat divergent, pilote arrêté à 50 %. Dans chacun de ces cas
+le bot v5 continue **exactement** comme avant, et la cible transmise reste `clamp.applied`.
+
+### Le point d'insertion EST le contrat de préséance
+
+Entre `clamp.applied` et la porte de transition. Le garde a déjà jugé la proposition **brute** du
+modèle (§3.4.5), la correction ne repasse pas devant lui (§3.4.7), et la porte parle **après**
+elle, sur les mouvements corrigés (§3.4.2). Ce n'est pas une commodité : c'est le seul endroit du
+cycle où les sept clauses tombent juste.
+
+### L'instant officiel ne se dépense qu'une fois
+
+Le premier cycle en `application` écrit l'identité : l'instant, l'equity d'ouverture, le
+plus-haut initial. La correction s'applique **dès ce cycle** — l'alignement initial et ses frais
+comptent, §3.8 — et aucun cycle suivant ne réactive quoi que ce soit.
+
+**La base le garantit, pas la discipline** : un index unique interdit une seconde ligne. Créer un
+pilote suivant supposera de lever cet index à la main, c'est-à-dire l'acte délibéré et revu que
+l'arbitrage exige. Aucun chemin de code, aucune variable, aucune faute de frappe ne peut le
+faire.
+
+### Le coupe-circuit
+
+| Seuil | Effet |
+|---|---|
+| **40 %** | une alerte **unique** et sa photographie. **La correction continue** — ce barreau est un avertissement, et en faire un arrêt désarmerait l'expérience à l'instant où son résultat devient intéressant. |
+| **50 %** | la correction de bande s'arrête, **durablement**. Aucune liquidation, aucun verdict de stratégie, le bot v5 continue. L'identité ne peut plus se réactiver. |
+
+Le drawdown se mesure depuis le **plus-haut du pilote**, qui ne fait que monter et survit à tout :
+redémarrage, redéploiement, passage temporaire en `observation`. Un plus-haut remis à zéro
+afficherait un drawdown nul le lendemain du pire jour du pilote, et c'est exactement la panne que
+la preuve 4 de `src/test/exposurePilot.ts` met en scène.
+
+**Limite connue** : le plus-haut n'est suivi que pendant que le pilote est armé. Un sommet atteint
+pendant une désactivation temporaire n'est pas enregistré, et le drawdown mesuré ensuite part du
+dernier sommet connu. Le journal des cycles permet de le reconstituer hors ligne ; le code, lui,
+ne fabrique rien.
+
+### Le contrat, et ce qui invalide un pilote
+
+L'identité porte une empreinte canonique de tout son contrat **en valeurs** : version de politique
+et de contrat, six bornes, univers et plafonds par actif, frais et seuil de mouvement, seuils de
+drawdown, durées et couverture requise.
+
+Elle **n'inclut pas le SHA git**. Un commentaire ou un renommage ne doit pas tuer une expérience de
+huit semaines. La contrepartie est un devoir : une modification substantielle du comportement doit
+déplacer `contractVersion` **à la main**, parce qu'aucune empreinte de valeurs ne voit un
+changement de code.
+
+Une divergence **invalide durablement** le pilote, arrête la correction et alerte une fois. Un
+retour ultérieur à l'ancienne configuration ne le réactive pas. Le contrat est jugé **avant** tout
+drawdown : des seuils qu'on ne reconnaît plus ne sont pas des seuils.
+
+### La fenêtre de mesure se ferme ; la bande, non
+
+Arbitré, et la distinction est tout. À huit semaines la fenêtre se ferme si la couverture requise
+est atteinte — 84 bougies dans chaque famille — sinon elle court jusqu'à douze, où elle se ferme
+dans tous les cas avec son libellé. Aucun cycle postérieur n'entre dans les résultats officiels,
+**C8 compris**.
+
+La correction, elle, **continue** après la clôture, en attendant notre décision. Elle ne se
+désarme que sur le coupe-circuit ou sur un contrat invalide. Se désarmer sur une date
+réarrangerait le portefeuille à un instant arbitraire, pour une raison qui n'a rien à voir avec le
+risque.
+
+### Ce qui est journalisé, cycle par cycle
+
+`pilot_hold` dit pourquoi la correction n'a pas touché les ordres, et il n'est nul que quand elle
+les a touchés. En `observation` il vaut `mode_inactif` partout : c'est la réponse honnête, et
+c'est aussi la preuve continue que rien ne s'applique. À côté, le drawdown et le plus-haut que le
+coupe-circuit voyait à cet instant — l'identité ne garde que le dernier état, et sans eux un arrêt
+ne se relirait jamais dans son contexte.
 
 ## Passage de relais vers la brique 4
 
