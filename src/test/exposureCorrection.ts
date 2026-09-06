@@ -1180,6 +1180,114 @@ console.log('\nProof 22 — the feasibility criterion reads the gap, not the enr
   );
 }
 
+// ── PROOF 23 — the buy nobody could pay for ──────────────────────────────────
+//
+// The last hole in the suppression accounting, and the one the brick-2 handover turned into a
+// PRECONDITION OF ACTIVATION rather than a nice-to-have.
+//
+// When the cash already sits at the target reserve and every sell that would have funded the
+// buys is suppressed under the floor first, the buy budget is zero and the whole buy pass was
+// skipped. Those buys had been sized, priced and had cleared the floor — and then appeared in
+// NEITHER list: `movements` did not carry them and `suppressed` did not either. The pilot's
+// journal is meant to explain the lines that did not move, and this was a silent hole on
+// exactly those lines.
+console.log('\nProof 23 — a buy with no budget is declared, not abandoned in silence:');
+{
+  // Equity 1000, floor 20, three lines of 5% and 850 in cash.
+  //   · XRP, ETH and BNB each trim by 10 — under the floor, so all three are suppressed;
+  //   · BTC has to buy 25 — over the floor, correctly sized, perfectly sendable;
+  //   · the target reserve is 855 against 850 of cash and no sell was made, so there is
+  //     nothing whatsoever to pay with.
+  const unfunded = planMovements(
+    bookOf({ XRP: 5, ETH: 5, BNB: 5 }),
+    { BTC: 2.5, XRP: 4, ETH: 4, BNB: 4, USDT: 85.5 },
+    priceOf,
+    config.execution.feePercent,
+    config.execution.minMovementPercent,
+  );
+  ok('nothing is sent — the orders are exactly what they were before', unfunded.movements.length === 0);
+  const btc = unfunded.suppressed.find((leg) => leg.asset === 'BTC');
+  ok('the unfunded buy is declared', btc?.reason === 'no_budget');
+  ok('as a buy, carrying what it would have been worth', btc?.side === 'buy' && btc.notional.toNumber() === 25);
+  ok(
+    'and NOT blamed on the 2% floor, which it cleared by 5',
+    btc != null && btc.notional.gt(btc.floor),
+  );
+  ok(
+    'the three sells keep their own reason',
+    unfunded.suppressed.filter((leg) => leg.reason === 'movement_floor').length === 3,
+  );
+  // THE INVARIANT THE FIX RESTORES: every line the plan considered ends up in exactly one of
+  // the two lists. Counting is what makes it a proof — a reason on the leg we happened to look
+  // at says nothing about the leg we did not.
+  const considered = ['BTC', 'XRP', 'ETH', 'BNB'];
+  ok(
+    'and every line the plan looked at is accounted for exactly once',
+    considered.every(
+      (asset) =>
+        unfunded.movements.filter((m) => m.asset === asset).length +
+          unfunded.suppressed.filter((s) => s.asset === asset).length ===
+        1,
+    ),
+  );
+
+  // THE CASE THAT MUST NOT CHANGE. Same book, a target that leaves cash above the reserve:
+  // the buy is funded, it is sent, and no `no_budget` leg is invented for it.
+  const funded = planMovements(
+    bookOf({ XRP: 5, ETH: 5, BNB: 5 }),
+    { BTC: 5, XRP: 5, ETH: 5, BNB: 5, USDT: 80 },
+    priceOf,
+    config.execution.feePercent,
+    config.execution.minMovementPercent,
+  );
+  ok('[contrôle] a funded buy is still sent', funded.movements.length === 1 && funded.movements[0]!.asset === 'BTC');
+  ok(
+    'and no budget is claimed missing when there was one',
+    !funded.suppressed.some((leg) => leg.reason === 'no_budget'),
+  );
+
+  // THE CAUSE. `no_budget` is the fourth cause of §3.3 — "autre impossibilité" — and never the
+  // movement threshold: the arbitration is that only `movement_floor` may claim
+  // `seuil_de_mouvement`. Read through the band on a target that sits INSIDE its band, so the
+  // line is attributed with no correction arithmetic in the way.
+  const inBand = correct({
+    state: 'defensive',
+    target: { BTC: 2.5, XRP: 4, ETH: 4, BNB: 4 },
+    book: { XRP: 5, ETH: 5, BNB: 5 },
+  });
+  ok('[cause] the target is inside its band, so nothing is corrected', inBand.label === 'aucune_correction');
+  ok('the unfunded line still explains itself', lineOf(inBand, 'BTC').cause === 'autre_impossibilite');
+  ok(
+    'the lines the floor deleted keep the threshold as their cause',
+    (['XRP', 'ETH', 'BNB'] as const).every((a) => lineOf(inBand, a).cause === 'seuil_de_mouvement'),
+  );
+
+  // AND IT SURVIVES TO THE JOURNAL. A reason the database refuses is a reason nobody will ever
+  // read: the write is best-effort and bounded, so a CHECK violation would be swallowed and
+  // the row silently lost.
+  const rows = toCorrectionRows({
+    decisionId: 1,
+    correction: inBand,
+    gateByAsset: ALL_ACTIONABLE,
+    bookedLedger: [],
+    portfolioAfter: null,
+  });
+  ok(
+    'the row carries the reason verbatim',
+    rows.find((r) => r.asset === 'BTC')?.suppressed_reason === 'no_budget',
+  );
+  const migration = readFileSync(
+    path.join(ROOT, 'supabase/migrations/0032_exposure_band_corrections_no_budget.sql'),
+    'utf8',
+  ).replace(/\r\n/g, '\n');
+  ok(
+    'and the migration admits it alongside the other three',
+    /check \(\s*suppressed_reason is null\s*or suppressed_reason in \('movement_floor', 'no_price', 'dust', 'no_budget'\)\s*\)/.test(
+      migration,
+    ),
+  );
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────────
 
 /**

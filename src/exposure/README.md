@@ -305,9 +305,9 @@ Trois lectures, parce qu'une seule serait trompeuse. « Le modèle demande moins
 imposée » est presque automatique — il ré-émet sa propre préférence. Ce qui distingue
 l'indifférence de la **lutte**, c'est qu'il descende plus bas qu'il n'était descendu lui-même.
 
-## Limite connue — à lever AVANT l'activation du pilote
+## La limite connue de la brique 2 — LEVÉE (brique 3)
 
-**Un achat abandonné faute de budget n'apparaît nulle part.**
+**Un achat abandonné faute de budget n'apparaissait nulle part.**
 
 Quand le cash est déjà au niveau de la réserve cible et que les ventes censées le financer
 sont toutes supprimées sous le seuil de 2 %, le budget d'achat est nul et `planMovements` saute
@@ -323,11 +323,26 @@ Portée mesurée : **aucun ordre n'est modifié et aucun chiffre publié n'est a
 condition est étroite et sa fréquence n'a pas été mesurée. C'est pourquoi elle n'a pas été
 corrigée dans la brique 2, sur arbitrage.
 
-**Critère obligatoire avant de passer le pilote en `application`** : un achat abandonné pour
-budget insuffisant doit porter une raison **distincte et durable**, jamais confondue avec le
-seuil de 2 %, la poussière ou un prix absent. Tant que ce n'est pas fait, la comptabilité des
-suppressions n'est pas exhaustive, et le journal du pilote hériterait de trous silencieux sur
-exactement les lignes qu'il est censé expliquer.
+**Le critère obligatoire est rempli.** `planMovements` déclare désormais ces jambes sous une
+quatrième raison, `no_budget`, distincte et durable (migration 0032) :
+
+| Raison | Ce qu'elle dit de la jambe |
+|---|---|
+| `movement_floor` | trop petite pour valoir la peine d'être envoyée |
+| `no_price` | pas dimensionnable, aucun prix ce cycle |
+| `dust` | rien à bouger, le livre est déjà là |
+| `no_budget` | elle valait la peine, elle tenait au-dessus du seuil, **et rien ne pouvait la payer** |
+
+Les fondre aurait laissé le seuil de 2 % prendre le crédit d'une contrainte de trésorerie —
+la même famille de mauvaise attribution que la cause par ligne existe pour empêcher. Côté
+cause du §3.3, `no_budget` est la quatrième cause, `autre_impossibilite` : ce n'est pas le
+seuil, et seul `movement_floor` peut réclamer `seuil_de_mouvement`.
+
+**Aucun ordre ne change.** Ces jambes n'étaient pas envoyées avant et ne le sont pas
+davantage ; ce qui change, c'est qu'elles sont déclarées. La preuve 23 de
+`src/test/exposureCorrection.ts` vérifie les deux moitiés : la jambe non financée est
+déclarée, le plan n'envoie toujours rien, et un achat *financé* est toujours envoyé sans
+qu'aucune raison ne soit inventée pour lui.
 
 ## Passage de relais vers la brique 3
 
@@ -338,7 +353,7 @@ Ce que la brique 3 hérite, et ce qu'elle doit apporter :
 | **Hérite** | les faits par cycle : `base_weight_percent`, `correction_moves_holding`, `realised_*`, les deux écarts, `suppressed_reason` par ligne, l'origine et la cause |
 | **Hérite** | l'artefact du rejeu, où les cycles sans faisabilité connue n'affirment **rien** plutôt que d'affirmer un écart fabriqué |
 | **Doit apporter** | le contrefactuel **chaîné** — les témoins E et P — qui seul permet une lecture entre cycles |
-| **Doit lever** | la limite ci-dessus, avant activation |
+| **A levé** | la limite ci-dessus — `no_budget`, migration 0032, preuve 23 |
 
 Deux conclusions ont été retirées de la brique 2 et lui reviennent : ce que la répartition
 enverrait réellement, et si le modèle utilise ou combat l'exposition imposée. Toutes deux
