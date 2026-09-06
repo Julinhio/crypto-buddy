@@ -784,7 +784,13 @@ console.log('Proof 15 — every insert shape matches its migration, column for c
    * it would go green on a row the database cannot store.
    */
   const columnsOf = (file: string, table: string): string[] => {
-    const sql = readFileSync(path.join(ROOT, 'supabase/migrations', file), 'utf8');
+    // NORMALISED, because this proof reads a file from the WORKING TREE and the working
+    // tree's line endings are a checkout setting, not a property of the repository. With
+    // core.autocrlf on — it is on, on this project's machine — a fresh checkout renders the
+    // migrations CRLF, the multi-line search for the ALTER block stops matching, and the proof
+    // silently counts only the CREATE TABLE columns. It went green through the whole PR and
+    // would have failed on the first clean clone.
+    const sql = readFileSync(path.join(ROOT, 'supabase/migrations', file), 'utf8').replace(/\r\n/g, '\n');
     const found = new Set<string>();
     const createAt = sql.indexOf('create table if not exists public.' + table + ' (');
     if (createAt >= 0) {
@@ -802,7 +808,7 @@ console.log('Proof 15 — every insert shape matches its migration, column for c
   };
 
   const keysOf = (file: string, iface: string, until: string): string[] => {
-    const source = readFileSync(path.join(ROOT, file), 'utf8');
+    const source = readFileSync(path.join(ROOT, file), 'utf8').replace(/\r\n/g, '\n');
     const body = source.slice(source.indexOf('export interface ' + iface), source.indexOf(until));
     return [...body.matchAll(/^ {2}([a-z_]+)\??:/gm)].map((m) => m[1]!).sort();
   };
