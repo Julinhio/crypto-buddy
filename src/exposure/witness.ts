@@ -379,3 +379,89 @@ export function readAdoption(input: AdoptionInput): AdoptionReading {
   if (next + EPS >= own) return 'indifference';
   return 'lutte';
 }
+
+// ── CUTTING A CHAIN WHERE ITS DATA STOPS ─────────────────────────────────────────────
+
+/**
+ * WHERE a gap falls, which is what decides what it costs.
+ *
+ * A gap before the first reconstructible item costs nothing: the chain has not started, so
+ * there is no book to carry across it. A gap INSIDE the window is different in kind — the
+ * books would have to jump an interval in which they might have rebalanced, and continuing
+ * would COMPRESS TIME: every later row would carry quantities, cash and fees that never
+ * existed. So an internal gap CUTS: the segment closes there and a new one re-anchors at the
+ * next complete item. A gap after the last one cuts nothing, because nothing resumes.
+ */
+export type GapPlacement = 'anterieur_au_debut' | 'interne' | 'terminal';
+
+export interface PlacedGap {
+  id: number;
+  cause: string;
+  placement: GapPlacement;
+}
+
+export interface ChainSegment<T> {
+  /** 1-based, in order. No figure is ever computed across two segments. */
+  id: number;
+  items: T[];
+  /** The first segment opens because the data starts; the others heal a cut. */
+  opening: 'debut_reconstructible' | 'reancrage_apres_trou';
+  /** The gap that closed the PREVIOUS segment — null on the first. */
+  brokenBy: { id: number; cause: string } | null;
+}
+
+export type ChainEntry<T> = { ok: true; id: number; item: T } | { ok: false; id: number; cause: string };
+
+/**
+ * Cuts a sequence of classified items into contiguous segments.
+ *
+ * Pure and total, and separated from the replay on purpose: the corpus happens to carry no
+ * internal gap today, so a rule that lived only inside the replay would be a rule nothing ever
+ * exercised. Here it is proven on fixtures that DO have holes.
+ *
+ * A trailing gap is provisionally `terminal` and becomes `interne` the moment another complete
+ * item follows it — which is the only way to know, reading forward once.
+ */
+export function cutIntoSegments<T>(entries: ReadonlyArray<ChainEntry<T>>): {
+  segments: Array<ChainSegment<T>>;
+  gaps: PlacedGap[];
+} {
+  const segments: Array<ChainSegment<T>> = [];
+  const gaps: PlacedGap[] = [];
+  let started = false;
+  let pendingBreak: { id: number; cause: string } | null = null;
+  let current: ChainSegment<T> | null = null;
+
+  for (const entry of entries) {
+    if (!entry.ok) {
+      if (!started) {
+        gaps.push({ id: entry.id, cause: entry.cause, placement: 'anterieur_au_debut' });
+        continue;
+      }
+      gaps.push({ id: entry.id, cause: entry.cause, placement: 'terminal' });
+      if (current != null) {
+        segments.push(current);
+        current = null;
+        // The FIRST gap of a run is the one that broke the chain; the ones behind it are
+        // already inside the hole and did not break anything of their own.
+        pendingBreak = { id: entry.id, cause: entry.cause };
+      }
+      continue;
+    }
+    if (current == null) {
+      current = {
+        id: segments.length + 1,
+        items: [],
+        opening: started ? 'reancrage_apres_trou' : 'debut_reconstructible',
+        brokenBy: pendingBreak,
+      };
+      // Everything provisionally terminal that precedes a resumed chain was, in fact, internal.
+      for (const gap of gaps) if (gap.placement === 'terminal') gap.placement = 'interne';
+      pendingBreak = null;
+    }
+    current.items.push(entry.item);
+    started = true;
+  }
+  if (current != null) segments.push(current);
+  return { segments, gaps };
+}

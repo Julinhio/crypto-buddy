@@ -5,6 +5,7 @@ import { config } from '../config/index.js';
 import { dec } from '../money.js';
 import type { PriceLookup } from '../portfolio/derive.js';
 import {
+  cutIntoSegments,
   equalWeightUnderCaps,
   openBook,
   readAdoption,
@@ -335,6 +336,95 @@ console.log('\nProof 6 — adoption, indifference and fight are three different 
   ok(
     'and it does not call the reader to produce one',
     !/readAdoption\s*\(/.test(replay),
+  );
+}
+
+// ── PROOF 7 — a hole in the data cuts the chain, it never compresses it ───────────
+//
+// The corpus happens to carry no internal hole today, so this rule would otherwise be one
+// nothing ever exercises. Proven here on fixtures that DO have holes.
+//
+// The failure it prevents is silent: a chain that simply skips an unreconstructible cycle and
+// carries on treats the interval as if it had not existed. If the witnesses would have
+// rebalanced in it, every later row carries quantities, cash and fees that never were — and
+// the gap counter still reports a clean run.
+console.log('\nProof 7 — a gap cuts the chain and re-anchors it, never compresses it:');
+{
+  const entry = (id: number, ok: boolean, cause = 'no_prices') =>
+    ok ? ({ ok: true as const, id, item: id }) : ({ ok: false as const, id, cause });
+
+  // (a) A GAP BEFORE THE START costs nothing: no book exists to carry across it.
+  const before = cutIntoSegments([entry(1, false), entry(2, false), entry(3, true), entry(4, true)]);
+  ok('[avant le début] one segment only', before.segments.length === 1);
+  ok('opened because the data starts, not to heal a cut', before.segments[0]!.opening === 'debut_reconstructible');
+  ok('and it carries both complete cycles', before.segments[0]!.items.join(',') === '3,4');
+  ok(
+    'the two gaps are placed before the beginning',
+    before.gaps.length === 2 && before.gaps.every((g) => g.placement === 'anterieur_au_debut'),
+  );
+
+  // (b) AN INTERNAL GAP CUTS. This is the whole point: cycle 3 breaks the chain, and 4 opens a
+  // new one that re-anchors rather than resuming.
+  const inside = cutIntoSegments([entry(1, true), entry(2, true), entry(3, false), entry(4, true), entry(5, true)]);
+  ok('[trou interne] the chain is cut in two', inside.segments.length === 2);
+  ok('the first segment stops AT the hole', inside.segments[0]!.items.join(',') === '1,2');
+  ok('the second re-anchors after it', inside.segments[1]!.items.join(',') === '4,5');
+  ok('and says why it opened', inside.segments[1]!.opening === 'reancrage_apres_trou');
+  ok(
+    'naming the cycle that broke it',
+    inside.segments[1]!.brokenBy?.id === 3 && inside.segments[1]!.brokenBy?.cause === 'no_prices',
+  );
+  ok('the gap is placed INSIDE', inside.gaps.length === 1 && inside.gaps[0]!.placement === 'interne');
+  ok(
+    'no cycle is lost — every id is either reconstructed or a named gap',
+    inside.segments.flatMap((seg) => seg.items).length + inside.gaps.length === 5,
+  );
+
+  // (c) A TERMINAL GAP CUTS NOTHING, because nothing resumes after it.
+  const trailing = cutIntoSegments([entry(1, true), entry(2, true), entry(3, false), entry(4, false)]);
+  ok('[trou terminal] one segment', trailing.segments.length === 1);
+  ok(
+    'and both trailing gaps stay terminal',
+    trailing.gaps.length === 2 && trailing.gaps.every((g) => g.placement === 'terminal'),
+  );
+
+  // (d) A RUN OF HOLES breaks ONCE. The first one cut; the ones behind it were already inside
+  // the hole and broke nothing of their own.
+  const run = cutIntoSegments([
+    entry(1, true),
+    entry(2, false, 'no_gates'),
+    entry(3, false, 'no_prices'),
+    entry(4, true),
+  ]);
+  ok('[trou multiple] two segments, not three', run.segments.length === 2);
+  ok('the break is attributed to the FIRST missing cycle', run.segments[1]!.brokenBy?.id === 2);
+  ok(
+    'and both holes are internal',
+    run.gaps.length === 2 && run.gaps.every((g) => g.placement === 'interne'),
+  );
+
+  // (e) THE RE-ANCHOR IS REAL, not a label. Two segments, two freshly opened books: the second
+  // starts from cash at its own opening equity, so nothing of the first crosses the frontier.
+  const openings = [1000, 1500];
+  const finals = openings.map((equity) => {
+    const step = stepWitness({
+      book: openBook(RESERVE, dec(equity)),
+      allocation: equalWeightUnderCaps(40, UNIVERSE, capOf, RESERVE).allocation,
+      priceOf,
+      feePercent: config.execution.feePercent,
+      minMovementPercent: config.execution.minMovementPercent,
+      logTag: ':test',
+    });
+    if ('gap' in step) throw new Error('unreachable');
+    return step;
+  });
+  ok(
+    'a re-anchored book opens on its OWN equity, carrying nothing over',
+    finals[0]!.equityBefore === 1000 && finals[1]!.equityBefore === 1500,
+  );
+  ok(
+    'and reaches the same exposure from a different size — the chain restarts, it does not resume',
+    near(finals[0]!.exposureAfterPercent, finals[1]!.exposureAfterPercent, SUM_TOL),
   );
 }
 

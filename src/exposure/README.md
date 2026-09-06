@@ -6,7 +6,7 @@
 | 1 | `observe.ts` | une ligne d'observation par cycle + le contrôle d'intégrité par bougie |
 | 2 | `correct.ts` | **répartit** : §3.5 vers le plancher, §3.6 vers le plafond, la préséance, la consolidation |
 | 3 | `witness.ts` | **compare** : les deux témoins chaînés, leur pondération sous plafonds, leur plomberie |
-| 3 | `../replay/exposureBandWitnesses.ts` | le rejeu hors ligne des trois livres et ses sept critères |
+| 3 | `../replay/exposureBandWitnesses.ts` | le rejeu hors ligne des trois livres, en segments, et ses huit critères |
 
 Les tenir séparées est ce qui a rendu le point de contrôle honnête : la morsure s'est publiée,
 lue et contestée avant qu'une seule ligne de correction n'existe.
@@ -352,7 +352,7 @@ qu'aucune raison ne soit inventée pour lui.
 npm run replay:band-witnesses
 ```
 
-Hors ligne, lecture seule, sept critères, sortie non nulle si l'un échoue. L'artefact
+Hors ligne, lecture seule, huit critères, sortie non nulle si l’un échoue. L'artefact
 `out/exposure-band-witnesses/` n'est pas commité.
 
 ### Trois livres chaînés, et deux seulement sont des témoins
@@ -429,14 +429,56 @@ données sont conservées. Le **chiffre** n'est pas publié : un chiffre affaibl
 la réponse. C8 commence le jour où `application` expose réellement le modèle aux positions
 corrigées.
 
+### L'exposition que E vise est RECONSTRUITE, jamais lue
+
+`equity_snapshots` ressemblait à la réponse et n'en est pas une : le scheduler la construit
+depuis `DecideResult.portfolio`, documenté comme « le livre que l'IA a vu » — le livre **avant**
+les ordres. Prouvé sur le corpus : au cycle 1807 le bot vend sa ligne ETH entière et le snapshot
+la porte encore à sa quantité d'avant.
+
+Le livre post-cycle est donc dérivé comme la production le dérive : **le livre pré-cycle plus le
+registre souverain du même cycle** — `event_type='intent'` et `validation_status='executed'`,
+exactement le filtre de `loadLedger`. Les quantités bougent de `ledger_base_delta`, le cash du
+`ledger_quote_delta` frais compris, et le tout est valorisé aux prix **du cycle**. Les deux
+entrées sont connues à l'instant N : rien d'un cycle ultérieur n'entre dans la cible de E.
+
+**W2 vérifie cette reconstruction contre un terme indépendant** : le contexte du cycle
+**suivant**, une autre ligne écrite par un autre chemin, qui montre ce que le bot tenait à son
+réveil suivant. Comparé sur les **quantités** — un prix bouge entre deux réveils, une quantité
+détenue non. L'ancien W2 était circulaire : il confrontait la cible de E à la valeur dont il
+l'avait construite, et serait passé aussi bien sur le mauvais livre.
+
+### Un trou coupe la chaîne, il ne la comprime jamais
+
+Une chaîne qui saute un cycle irreconstructible et continue traite l'intervalle comme s'il
+n'avait pas existé. Si les témoins s'y étaient rééquilibrés, toutes les lignes suivantes
+portent des quantités, du cash et des frais qui n'ont jamais existé — et le compteur de trous
+affiche un rejeu propre.
+
+Donc un trou **interne ferme le segment**. Un nouveau s'ouvre au premier cycle complet suivant
+et **réancre** les livres sur l'equity du bot à cet instant, en cash. Aucune equity, aucun
+mouvement, aucun écart ne traverse la frontière, et chaque ligne porte son `segment_id`.
+
+W0 distingue trois places, parce qu'elles ne coûtent pas la même chose :
+
+| Place | Effet |
+|---|---|
+| antérieure au début reconstructible | aucun — la chaîne n'a pas commencé |
+| **interne** | **rupture + réancrage** |
+| terminale | aucune — rien ne reprend après |
+
+La règle vit dans `witness.ts` (`cutIntoSegments`), pure et prouvée sur des fixtures qui **ont**
+des trous : le corpus n'en porte aujourd'hui aucun d'interne, et une règle qui ne vivrait que
+dans le rejeu ne serait jamais exercée.
+
 ### Ce que ce rejeu ne mesure pas
 
 Aucun rendement, aucun drawdown, aucun écart bot-témoin. La fenêtre du pilote commence au
 passage en `application` ; ce rejeu est un **banc d'essai de la machinerie**, et son artefact
 le dit dans son propre bloc `contract.not_measured`.
 
-Ce qu'il prouve, c'est le §6 : que toutes les entrées des témoins sont **durablement
-journalisées** par le cycle vivant — prix, snapshot d'équité post-cycle, journal de régime,
+Ce qu il prouve, c est le §6 : que toutes les entrées des témoins sont **durablement
+journalisées** par le cycle vivant — prix, livre pré-cycle, registre souverain, journal de régime,
 verdicts de porte, cible bornée — et que la reconstruction se **reproduit** à l'empreinte près.
 Aucune écriture n'a été ajoutée au chemin de trading pour les témoins.
 

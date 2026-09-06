@@ -10,11 +10,15 @@ import type { TransitionGate } from '../transition/gate.js';
 import { assessBand, bandOf } from '../exposure/band.js';
 import { correctToBand } from '../exposure/correct.js';
 import {
+  cutIntoSegments,
   equalWeightUnderCaps,
   openBook,
   valueBook,
   stepWitness,
   witnessRow,
+  type ChainEntry,
+  type GapPlacement,
+  type PlacedGap,
   type WitnessBook,
   type WitnessRow,
 } from '../exposure/witness.js';
@@ -24,8 +28,8 @@ import { bookOf as portfolioOf, pricesOf, type StoredContext } from './storedCyc
 /**
  * THE WITNESSES, REPLAYED — brick 3 of the constrained-exposure pilot.
  *
- * Offline and read-only. It reads `decisions`, `transition_observations` and
- * `equity_snapshots`, writes nothing to the database, and places nothing anywhere. The choice
+ * Offline and read-only. It reads `decisions`, `transition_observations` and the sovereign
+ * ledger in `executions`, writes nothing to the database, and places nothing anywhere. The choice
  * of an offline reconstruction over an online one was the second framing answer of this
  * chantier: the data needed to rebuild both witnesses is already journaled, and an online
  * writer would add a failure mode inside the trading cycle for something that is not a
@@ -86,10 +90,11 @@ interface GateRead {
   gate: string;
 }
 
-interface SnapshotRead {
+interface LedgerRead {
   decision_id: number;
-  equity_usd: number;
-  positions: unknown;
+  symbol: string;
+  ledger_base_delta: string | number;
+  ledger_quote_delta: string | number;
 }
 
 const KNOWN_GATES: ReadonlySet<string> = new Set<TransitionGate>([
@@ -125,25 +130,61 @@ function allocationOf(raw: unknown): Record<string, number> | null {
 /**
  * THE BOT'S REAL EXPOSURE AFTER THE CYCLE — E's target, and the one number E may not guess.
  *
- * Read from `equity_snapshots`, which is written after the cycle's fills, rather than from the
- * `market_context` the cycle was SHOWN: that one is the book BEFORE the cycle traded, and E is
- * defined on what the bot ends up holding. Both are known at the same instant, so neither uses
- * information from the future.
+ * REBUILT, not read. `equity_snapshots` looked like the answer and is not: the scheduler
+ * builds it from `DecideResult.portfolio`, documented as "the virtual book the AI saw" — the
+ * book BEFORE the cycle's orders. Proven on the corpus: cycle 1807 sold its entire ETH line
+ * and the snapshot still carries that line at its pre-trade quantity. Targeting E on it made
+ * E follow the book the bot was SHOWN while every comment and every criterion said post-cycle.
  *
- * Exposure is the SUM of the non-reserve values over equity, never `100 − cash`: the two agree
- * whenever the book is complete, and when they disagree it is the sum that is honest.
+ * So the post-trade book is derived the way production derives it: the pre-trade book plus
+ * that cycle's SOVEREIGN ledger entries — `event_type='intent'` and
+ * `validation_status='executed'`, exactly `loadLedger`'s filter. Quantities move by
+ * `ledger_base_delta`, cash by the fee-inclusive `ledger_quote_delta`, and the whole thing is
+ * valued at the SAME prices the cycle carried.
+ *
+ * Both inputs are known AT instant N. Nothing from a later cycle enters E's target.
  */
-function botExposureOf(snapshot: SnapshotRead | undefined): number | null {
-  if (snapshot == null || !Number.isFinite(snapshot.equity_usd) || snapshot.equity_usd <= 0) return null;
-  if (!Array.isArray(snapshot.positions)) return null;
-  let deployed = 0;
-  for (const entry of snapshot.positions) {
-    if (!isRecord(entry)) return null;
-    const value = entry.value_usd;
-    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-    deployed += value;
+function postTradeBookOf(
+  context: StoredContext,
+  entries: readonly LedgerRead[],
+): { exposurePercent: number; equity: number; qty: Map<string, number> } | null {
+  const portfolio = context.account?.portfolio;
+  if (portfolio == null || !Number.isFinite(portfolio.equity)) return null;
+  const reserve = portfolio.reserveAsset;
+  const priceOf = pricesOf(context);
+
+  const qty = new Map<string, number>();
+  for (const position of portfolio.positions ?? []) {
+    if (!Number.isFinite(position.qty)) return null;
+    qty.set(position.asset, (qty.get(position.asset) ?? 0) + position.qty);
   }
-  return Math.round((deployed / snapshot.equity_usd) * 100 * 1e6) / 1e6;
+  let cash = portfolio.cash;
+  if (!Number.isFinite(cash)) return null;
+
+  for (const entry of entries) {
+    const asset = entry.symbol.split('/')[0];
+    if (asset == null || asset === '') return null;
+    const base = Number(entry.ledger_base_delta);
+    const quote = Number(entry.ledger_quote_delta);
+    if (!Number.isFinite(base) || !Number.isFinite(quote)) return null;
+    qty.set(asset, (qty.get(asset) ?? 0) + base);
+    cash += quote;
+  }
+
+  let deployed = 0;
+  for (const [asset, held] of qty) {
+    if (asset === reserve || held === 0) continue;
+    const price = priceOf(asset);
+    if (price == null) return null;
+    deployed += held * price.toNumber();
+  }
+  const equity = cash + deployed;
+  if (!(equity > 0)) return null;
+  return {
+    exposurePercent: Math.round((deployed / equity) * 100 * 1e6) / 1e6,
+    equity,
+    qty,
+  };
 }
 
 async function loadDecisions(
@@ -199,20 +240,33 @@ async function loadGates(
   return byDecision;
 }
 
-async function loadSnapshots(
+/**
+ * The sovereign ledger, per cycle. The filter is `loadLedger`'s, verbatim: only booked
+ * intents move the book — a testnet trace row carries a zero delta and a refused intent books
+ * nothing, and counting either would move a book the bot never moved.
+ */
+async function loadLedgerByDecision(
   supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
-): Promise<Map<number, SnapshotRead>> {
+): Promise<Map<number, LedgerRead[]>> {
   const PAGE = 1000;
-  const byDecision = new Map<number, SnapshotRead>();
+  const byDecision = new Map<number, LedgerRead[]>();
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await supabase
-      .from('equity_snapshots')
-      .select('decision_id, equity_usd, positions')
+      .from('executions')
+      .select('decision_id, symbol, ledger_base_delta, ledger_quote_delta')
+      .eq('event_type', 'intent')
+      .eq('validation_status', 'executed')
+      // Insertion order via the monotonic id, exactly as production replays it.
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
-    if (error) throw new Error(`band witnesses: could not read equity_snapshots (${error.message}).`);
-    const page = (data ?? []) as unknown as SnapshotRead[];
-    for (const row of page) if (row.decision_id != null) byDecision.set(row.decision_id, row);
+    if (error) throw new Error(`band witnesses: could not read executions (${error.message}).`);
+    const page = (data ?? []) as unknown as LedgerRead[];
+    for (const row of page) {
+      if (row.decision_id == null) continue;
+      const bucket = byDecision.get(row.decision_id) ?? [];
+      bucket.push(row);
+      byDecision.set(row.decision_id, bucket);
+    }
     if (page.length < PAGE) break;
   }
   return byDecision;
@@ -221,9 +275,23 @@ async function loadSnapshots(
 // ── The chain ─────────────────────────────────────────────────────────────────────────
 
 /** Why a cycle could not be reconstructed. Every skipped cycle carries one — none is silent. */
-type CycleGap = 'no_context' | 'no_gates' | 'no_snapshot' | 'no_target' | 'no_prices' | 'post_gate_only';
+type CycleGap = 'no_context' | 'no_gates' | 'no_book' | 'no_target' | 'no_prices' | 'post_gate_only';
+
+/**
+ * One uninterrupted stretch of reconstructible cycles, with its own freshly opened books.
+ * The cutting rule itself lives in `witness.ts` — pure, shared, and proven on fixtures that
+ * have holes, because this corpus happens not to.
+ */
+type Segment = {
+  id: number;
+  cycles: Cycle[];
+  opening: 'debut_reconstructible' | 'reancrage_apres_trou';
+  brokenBy: { id: number; cause: string } | null;
+};
 
 interface ChainRow {
+  /** Which chain this row belongs to. No figure is ever computed across two of them. */
+  segment_id: number;
   decision_id: number;
   created_at: string;
   state: string;
@@ -276,7 +344,12 @@ interface Cycle {
   decision: DecisionRead;
   reading: ControllerReading;
   gates: Map<string, TransitionGate>;
+  /** The bot's exposure AFTER this cycle's bookings — E's target. */
   botExposurePercent: number;
+  /** The bot's equity after those bookings, which is what a re-anchored book opens on. */
+  botEquityAfter: number;
+  /** The post-trade quantities, kept so W2 can check them against an independent source. */
+  botQtyAfter: Map<string, number>;
   clamped: Record<string, number>;
   raw: Record<string, number> | null;
   context: StoredContext;
@@ -289,7 +362,13 @@ interface Cycle {
  * two results compared byte for byte — a chain that could not reproduce itself would make
  * every figure below unfalsifiable.
  */
-function runChain(cycles: Cycle[], universe: string[], reserveAsset: string, openingEquity: number): ChainRow[] {
+function runChain(segment: Segment, universe: string[], reserveAsset: string): ChainRow[] {
+  const cycles = segment.cycles;
+  // THE RE-ANCHOR. Each segment opens its own books, in cash, on the bot's equity at its first
+  // cycle. Nothing is carried over a cut: a book that resumed with the quantities it held
+  // before an unreconstructible interval would be asserting it had held them through an
+  // interval nobody can reconstruct.
+  const openingEquity = cycles[0]!.botEquityAfter;
   const capOf = (asset: string): number =>
     config.execution.caps.perAsset[asset] ?? config.execution.caps.defaultPerAsset;
   const fee = config.execution.feePercent;
@@ -396,6 +475,7 @@ function runChain(cycles: Cycle[], universe: string[], reserveAsset: string, ope
     }
 
     rows.push({
+      segment_id: segment.id,
       decision_id: cycle.decision.id,
       created_at: cycle.decision.created_at,
       state: cycle.reading.state,
@@ -452,10 +532,10 @@ async function main(): Promise<void> {
   if (!supabase) throw new Error('band witnesses: Supabase is not configured.');
 
   const universe = tradableBaseAssets(config);
-  const [decisions, gatesByDecision, snapshots] = await Promise.all([
+  const [decisions, gatesByDecision, ledgerByDecision] = await Promise.all([
     loadDecisions(supabase),
     loadGates(supabase),
-    loadSnapshots(supabase),
+    loadLedgerByDecision(supabase),
   ]);
 
   console.log('='.repeat(96));
@@ -469,16 +549,23 @@ async function main(): Promise<void> {
   );
   console.log('='.repeat(96));
 
-  // ── Build the window: every cycle whose inputs are ALL journaled ──────────────────
-  const gaps: Record<string, number[]> = {};
-  const noteGap = (gap: CycleGap, id: number): void => {
-    (gaps[gap] ??= []).push(id);
-  };
-  const cycles: Cycle[] = [];
+  // ── Build the window, and CUT it wherever an input is missing ────────────────────
+  //
+  // Every decided cycle is classified: reconstructible, or a gap with a named cause AND a
+  // named placement. A gap before the first reconstructible cycle costs nothing. A gap inside
+  // the window cuts the chain — the segment closes there and a new one re-anchors at the next
+  // complete cycle. Skipping over it and carrying on, which is what this replay did before,
+  // COMPRESSES TIME: the books would jump an interval in which they might have rebalanced, and
+  // every later row would carry quantities, cash and fees that never existed.
+  const gaps: PlacedGap[] = [];
+  const classified: Array<ChainEntry<Cycle>> = [];
 
   for (const decision of decisions) {
+    const fail = (cause: CycleGap): void => {
+      classified.push({ ok: false, id: decision.id, cause });
+    };
     if (decision.applied_divergence_cause != null) {
-      noteGap('post_gate_only', decision.id);
+      fail('post_gate_only');
       continue;
     }
     let reading: ControllerReading | null = null;
@@ -490,72 +577,120 @@ async function main(): Promise<void> {
       reading = null;
     }
     if (reading == null) {
-      noteGap('no_context', decision.id);
+      fail('no_context');
       continue;
     }
     const gates = gatesByDecision.get(decision.id);
     if (gates == null || gates.size === 0) {
-      noteGap('no_gates', decision.id);
-      continue;
-    }
-    const botExposure = botExposureOf(snapshots.get(decision.id));
-    if (botExposure == null) {
-      noteGap('no_snapshot', decision.id);
+      fail('no_gates');
       continue;
     }
     const clamped = allocationOf(decision.applied_allocation);
     if (clamped == null) {
-      noteGap('no_target', decision.id);
+      fail('no_target');
       continue;
     }
     const context = decision.market_context as StoredContext;
     const priceOf = pricesOf(context);
     if (universe.some((asset) => priceOf(asset) == null)) {
-      noteGap('no_prices', decision.id);
+      fail('no_prices');
       continue;
     }
-    cycles.push({
-      decision,
-      reading,
-      gates,
-      botExposurePercent: botExposure,
-      clamped,
-      raw: allocationOf(decision.target_allocation),
-      context,
+    const after = postTradeBookOf(context, ledgerByDecision.get(decision.id) ?? []);
+    if (after == null) {
+      fail('no_book');
+      continue;
+    }
+    classified.push({
+      ok: true,
+      id: decision.id,
+      item: {
+        decision,
+        reading,
+        gates,
+        botExposurePercent: after.exposurePercent,
+        botEquityAfter: after.equity,
+        botQtyAfter: after.qty,
+        clamped,
+        raw: allocationOf(decision.target_allocation),
+        context,
+      },
     });
   }
 
-  if (cycles.length === 0) throw new Error('band witnesses: no cycle carries every required input.');
+  // THE CUT, delegated to the shared rule rather than restated here.
+  const cut = cutIntoSegments<Cycle>(classified);
+  const segments: Segment[] = cut.segments.map((segment) => ({
+    id: segment.id,
+    cycles: segment.items,
+    opening: segment.opening,
+    brokenBy: segment.brokenBy,
+  }));
+  gaps.push(...cut.gaps);
 
-  // The books open with the bot's own equity at the first cycle of the window, so the three
-  // start on the same footing. The pilot's real opening instant belongs to brick 4 — this one
-  // is a parameter of the dry run and is printed as such.
-  const openingEquity = portfolioOf(cycles[0]!.context).equity.toNumber();
-  const rows = runChain(cycles, universe, portfolioOf(cycles[0]!.context).reserveAsset, openingEquity);
+  if (segments.length === 0) throw new Error('band witnesses: no cycle carries every required input.');
+
+  // The books open with the bot's own equity at the first cycle of EACH segment. The pilot's
+  // real opening instant belongs to brick 4 — these are parameters of the dry run.
+  const reserveAsset = portfolioOf(segments[0]!.cycles[0]!.context).reserveAsset;
+  const runAll = (): ChainRow[] => segments.flatMap((segment) => runChain(segment, universe, reserveAsset));
+  const rows = runAll();
 
   console.log('');
   console.log(
-    `Fenêtre : ${rows.length} cycles reconstruits, ids ${rows[0]?.decision_id} → ` +
-      `${rows[rows.length - 1]?.decision_id}, ouverture à ${openingEquity.toFixed(2)}.`,
+    `Fenêtre : ${rows.length} cycles reconstruits en ${segments.length} segment(s), ids ` +
+      `${rows[0]?.decision_id} → ${rows[rows.length - 1]?.decision_id}.`,
   );
+  for (const segment of segments) {
+    console.log(
+      `  segment ${segment.id} · ${segment.cycles.length} cycle(s) · ids ${segment.cycles[0]!.decision.id} → ` +
+        `${segment.cycles[segment.cycles.length - 1]!.decision.id} · ouverture ` +
+        `${segment.cycles[0]!.botEquityAfter.toFixed(2)} · ${segment.opening}` +
+        (segment.brokenBy == null
+          ? ''
+          : ` (rupture au cycle ${segment.brokenBy.id}, cause ${segment.brokenBy.cause})`),
+    );
+  }
 
-  // ── W0 — every cycle is either reconstructed or carries a NAMED gap ───────────────
+  // ── W0 — every cycle is reconstructed, or named AND placed ───────────────────────────────
   {
-    const accounted = rows.length + Object.values(gaps).reduce((sum, ids) => sum + ids.length, 0);
-    record('W0', 'toutes les entrées des témoins sont durablement journalisées', accounted === decisions.length, [
-      `${decisions.length} cycles v5 décidés · ${rows.length} reconstruits · ` +
-        `${accounted - rows.length} écartés, chacun avec une raison nommée.`,
-      ...Object.entries(gaps).map(([gap, ids]) => `  ${gap} : ${ids.length} cycle(s)`),
-      'Rien n’est écarté en silence : un cycle sans raison ferait échouer ce critère.',
-      'Les entrées lues : prix du cycle, snapshot d’équité post-cycle, journal de régime,',
-      'verdicts de porte par actif, cible bornée. Toutes déjà écrites par le cycle vivant —',
-      'aucune écriture nouvelle n’a été ajoutée au chemin de trading pour les témoins.',
+    const byPlacement = (placement: GapPlacement): PlacedGap[] => gaps.filter((g) => g.placement === placement);
+    const before = byPlacement('anterieur_au_debut');
+    const internal = byPlacement('interne');
+    const terminal = byPlacement('terminal');
+    const accounted = rows.length + gaps.length;
+    const causes = (list: PlacedGap[]): string =>
+      Object.entries(
+        list.reduce<Record<string, number>>((acc, g) => {
+          acc[g.cause] = (acc[g.cause] ?? 0) + 1;
+          return acc;
+        }, {}),
+      )
+        .map(([cause, n]) => `${cause}  ${n}`)
+        .join(' · ') || 'aucun';
+    record('W0', 'chaque cycle est reconstruit, ou nommé ET situé', accounted === decisions.length, [
+      `${decisions.length} cycles v5 décidés · ${rows.length} reconstruits en ${segments.length} segment(s) · ` +
+        `${gaps.length} écartés, chacun avec une cause ET une place.`,
+      ' ',
+      `  antérieurs au début reconstructible : ${before.length} — ${causes(before)}`,
+      '    Ils ne coûtent rien : la chaîne n’a pas commencé, il n’y a pas de livre à porter.',
+      `  trous INTERNES (rupture + réancrage) : ${internal.length} — ${causes(internal)}`,
+      internal.length === 0
+        ? '    Aucun sur cette fenêtre. Le mécanisme existe et est prouvé sur fixture.'
+        : `    Cycles ${internal.map((g) => g.id).join(', ')} — chacun ferme un segment ;` +
+          ' aucune equity, aucun mouvement, aucun écart ne traverse la frontière.',
+      `  trous TERMINAUX : ${terminal.length} — ${causes(terminal)}`,
+      '    Ils ne coupent rien : aucune chaîne ne reprend après eux.',
+      ' ',
+      'Les entrées lues : prix du cycle, livre pré-cycle, registre souverain du même cycle,',
+      'journal de régime, verdicts de porte, cible bornée. Toutes déjà écrites par le cycle',
+      'vivant — aucune écriture n’a été ajoutée au chemin de trading pour les témoins.',
     ]);
   }
 
   // ── W1 — the reconstruction reproduces itself, byte for byte ──────────────────────
   {
-    const again = runChain(cycles, universe, portfolioOf(cycles[0]!.context).reserveAsset, openingEquity);
+    const again = runAll();
     const first = sha256Of(canonicalJson(rows));
     const second = sha256Of(canonicalJson(again));
     record('W1', 'le rejeu est reproductible — même entrées, mêmes livres', first === second, [
@@ -566,25 +701,85 @@ async function main(): Promise<void> {
     ]);
   }
 
-  // ── W2 — E really carries the bot's exposure ──────────────────────────────────────
+  // ── W2 — the post-trade book E aims at, checked against an INDEPENDENT source ────
+  //
+  // The old W2 was circular and said nothing: it compared E's target to the very value that
+  // target was built from, so it would have passed just as happily on the pre-trade book it
+  // was in fact reading. What has to be checked is the RECONSTRUCTION — that "pre-trade book
+  // plus this cycle's ledger" really is the book the bot ended up holding.
+  //
+  // The independent term is the NEXT cycle's own `market_context`: a different row, written by
+  // a different code path at a different moment, showing the quantities the bot actually held
+  // when it woke up again. Quantities, not values — a price moves between two wake-ups and a
+  // holding does not. It is used ONLY as a check; E's target still reads nothing but instant-N
+  // data.
+  {
+    let compared = 0;
+    let agreed = 0;
+    const drifts: Array<{ id: number; asset: string; derived: number; shown: number }> = [];
+    for (const segment of segments) {
+      for (let i = 0; i + 1 < segment.cycles.length; i += 1) {
+        const cycle = segment.cycles[i]!;
+        const next = segment.cycles[i + 1]!;
+        const shown = new Map<string, number>();
+        for (const position of next.context.account.portfolio.positions ?? []) {
+          shown.set(position.asset, (shown.get(position.asset) ?? 0) + position.qty);
+        }
+        for (const asset of universe) {
+          const derived = cycle.botQtyAfter.get(asset) ?? 0;
+          const seen = shown.get(asset) ?? 0;
+          compared += 1;
+          // Relative, because a quantity of BTC and a quantity of XRP are orders of magnitude
+          // apart and one absolute tolerance cannot serve both.
+          const scale = Math.max(Math.abs(derived), Math.abs(seen), 1e-12);
+          if (Math.abs(derived - seen) / scale <= 1e-6) agreed += 1;
+          else drifts.push({ id: cycle.decision.id, asset, derived, shown: seen });
+        }
+      }
+    }
+    const rate = compared === 0 ? 0 : (agreed / compared) * 100;
+    record('W2', 'le livre post-cycle reconstruit est bien celui que le bot a tenu', drifts.length === 0, [
+      'Terme de comparaison INDÉPENDANT : le contexte du cycle SUIVANT — une autre ligne, écrite',
+      'par un autre chemin, montrant ce que le bot tenait à son réveil suivant. Comparées sur les',
+      'QUANTITÉS : un prix bouge entre deux réveils, une quantité détenue non.',
+      `${compared} quantité(s) confrontées · ${agreed} d’accord (${rate.toFixed(3)} %).`,
+      drifts.length === 0
+        ? 'Aucune divergence : « livre pré-cycle + registre du cycle » EST le livre post-cycle.'
+        : `${drifts.length} divergence(s), dont : ` +
+          drifts
+            .slice(0, 5)
+            .map((d) => `#${d.id} ${d.asset} reconstruit ${d.derived} vs montré ${d.shown}`)
+            .join(' · '),
+      ' ',
+      'L’ANCIEN W2 était circulaire : il confrontait la cible de E à la valeur dont il l’avait',
+      'construite, donc il passait aussi bien sur le livre PRÉ-cycle qu’il lisait en réalité.',
+      'Le chiffre de fidélité de E est republié en W2b, sur la cible corrigée.',
+    ]);
+  }
+
+  // ── W2b — what E then realises, which is the plumbing and not the definition ─────
   {
     const targetErrors = rows.map((r) => Math.abs(r.E.targetExposurePercent - r.bot_exposure_percent));
-    const realisedErrors = rows.map((r) => Math.abs(r.E.realisedExposurePercent - r.bot_exposure_percent));
-    const worstTarget = Math.max(...targetErrors);
+    const realisedErrors = rows
+      .map((r) => Math.abs(r.E.realisedExposurePercent - r.bot_exposure_percent))
+      .sort((x, y) => x - y);
     const clippedCycles = rows.filter((r) => r.E.clipped.length > 0);
-    const redistributed = clippedCycles.map((r) => r.E.redistributedPoints);
-    record('W2', 'le témoin E vise exactement l’exposition réelle du bot', worstTarget <= 1e-6, [
-      `écart maximal entre la cible de E et l’exposition du bot : ${worstTarget.toFixed(9)} point`,
-      `écart RÉALISÉ moyen : ${mean(realisedErrors)?.toFixed(2)} point · maximum ` +
-        `${Math.max(...realisedErrors).toFixed(2)} — c’est la plomberie, pas la définition :`,
-      'le seuil de 2 % et les frais sont les mêmes pour E que pour le bot, par construction.',
-      `plafonds atteints sur ${clippedCycles.length} cycle(s)` +
+    record('W2b', 'E vise l’exposition post-cycle du bot, et la plomberie l’en écarte', Math.max(...targetErrors) <= 1e-6, [
+      `E vise la valeur reconstruite au point près (écart maximal ${Math.max(...targetErrors).toFixed(9)}).`,
+      `Ce qu’il RÉALISE en diffère : médiane ${median(realisedErrors)?.toFixed(2)} pt · ` +
+        `p90 ${realisedErrors[Math.floor(realisedErrors.length * 0.9)]?.toFixed(2)} pt · ` +
+        `maximum ${realisedErrors[realisedErrors.length - 1]?.toFixed(2)} pt.`,
+      'STRUCTUREL, et à connaître avant de lire quoi que ce soit : une variation d’exposition de',
+      'X points se répartit en quatre jambes de X/4, donc rien ne bouge tant que X n’atteint pas',
+      '8 points. C’est le résidu accepté que le moteur de mouvements documente (actifs × seuil),',
+      'et il est le même pour le bot. « Bot moins E à exposition identique » est donc vrai à',
+      'quelques points près, pas exactement — E publie ses trois nombres pour que ce soit lisible.',
+      `Plafonds atteints sur ${clippedCycles.length} cycle(s)` +
         (clippedCycles.length === 0
           ? ' — la redistribution n’a jamais eu à jouer sur cette fenêtre.'
-          : ` · points redistribués en moyenne : ${mean(redistributed)?.toFixed(2)}` +
-            ` · lignes écrêtées : ${[...new Set(clippedCycles.flatMap((r) => r.E.clipped))].join(', ')}`),
-      'Aucun surplus ne repart en cash tant que les plafonds peuvent tenir l’exposition :',
-      `points inplaçables sur toute la fenêtre : ${rows.reduce((s, r) => s + r.E.unplaceablePoints, 0).toFixed(2)}.`,
+          : ` · points redistribués en moyenne ${mean(clippedCycles.map((r) => r.E.redistributedPoints))?.toFixed(2)}` +
+            ` · lignes écrêtées ${[...new Set(clippedCycles.flatMap((r) => r.E.clipped))].join(', ')}`),
+      `Points implaçables sur toute la fenêtre : ${rows.reduce((sum, r) => sum + r.E.unplaceablePoints, 0).toFixed(2)}.`,
     ]);
   }
 
@@ -719,8 +914,19 @@ async function main(): Promise<void> {
       cycles: rows.length,
       from_id: rows[0]?.decision_id ?? null,
       to_id: rows[rows.length - 1]?.decision_id ?? null,
-      opening_equity: openingEquity,
-      gaps: Object.fromEntries(Object.entries(gaps).map(([gap, ids]) => [gap, ids.length])),
+      // ONE ENTRY PER SEGMENT, never a single window. A run that resumed after a cut is not
+      // one continuous history, and an artefact that flattened it into one would invite
+      // exactly the reading the cut exists to forbid.
+      segments: segments.map((segment) => ({
+        id: segment.id,
+        cycles: segment.cycles.length,
+        from_id: segment.cycles[0]!.decision.id,
+        to_id: segment.cycles[segment.cycles.length - 1]!.decision.id,
+        opening_equity: segment.cycles[0]!.botEquityAfter,
+        opening: segment.opening,
+        broken_by: segment.brokenBy,
+      })),
+      gaps: gaps.map((gap) => ({ decision_id: gap.id, cause: gap.cause, placement: gap.placement })),
     },
     contract: {
       not_measured: [
