@@ -130,6 +130,20 @@ export interface BandObservationInsert {
 
   gap: BandObservationGap | null;
   gap_detail: string | null;
+
+  /**
+   * THE PILOT'S VERDICT ON THIS CYCLE — brick 4.
+   *
+   * `pilot_hold` says why the correction did not touch the orders, and it is null ONLY when it
+   * did. In `observation` it reads `mode_inactif` on every cycle, which is both the honest
+   * answer and the continuous proof that nothing is being applied.
+   *
+   * The two numbers beside it are what the circuit breaker saw at that instant. The identity
+   * keeps only the latest state, so without them a stop could never be re-read in context.
+   */
+  pilot_hold: string | null;
+  pilot_drawdown_percent: number | null;
+  pilot_peak_equity_usd: number | null;
 }
 
 export interface ObserveBandInput {
@@ -228,6 +242,9 @@ function withoutAssessment(
     consolidation_attempts: null,
     planned_movements: null,
     suppressed_movements: null,
+    pilot_hold: null,
+    pilot_drawdown_percent: null,
+    pilot_peak_equity_usd: null,
     lines: null,
     gap,
     gap_detail: detail,
@@ -288,6 +305,9 @@ function withAssessment(
     consolidation_attempts: null,
     planned_movements: null,
     suppressed_movements: null,
+    pilot_hold: null,
+    pilot_drawdown_percent: null,
+    pilot_peak_equity_usd: null,
     lines: assessment.lines,
     gap: null,
     gap_detail: null,

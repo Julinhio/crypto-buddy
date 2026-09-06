@@ -289,6 +289,34 @@ export interface TransitionConfig {
  * measurement, not an ops knob. Changing it mid-window restarts the experiment, and a value
  * that could be changed from a dashboard would make that impossible to detect afterwards.
  */
+/**
+ * THE PILOT'S LIFECYCLE PARAMETERS — §3.8 and §3.9, plus the closure protocol's clock.
+ *
+ * Every one of these numbers is inside the pilot's contract digest, so changing any of them
+ * invalidates a running pilot rather than quietly moving its goalposts mid-window.
+ */
+export interface ExposurePilotConfig {
+  /**
+   * THE ONE FIELD A DIGEST CANNOT COMPUTE FOR YOU.
+   *
+   * The digest covers the contract's VALUES. It cannot see a change in how the band or the
+   * correction BEHAVES, and it deliberately does not include the git SHA — a comment or a
+   * rename must not kill an eight-week experiment. So a substantial behavioural change must
+   * move this string by hand, and that act is what invalidates the running pilot.
+   */
+  contractVersion: string;
+  /** §3.9 — one alert and one photograph, once for the pilot. The correction keeps applying. */
+  alertDrawdownPercent: number;
+  /** §3.9 — the band correction stops, persistently. No liquidation, no halt of the v5 bot. */
+  stopDrawdownPercent: number;
+  /** §7 — the measurement window's floor, in weeks. */
+  minWeeks: number;
+  /** §7 — its ceiling: at this point the window closes whatever the coverage. */
+  maxWeeks: number;
+  /** §7 — 4h bars required in EACH family before the window may close at `minWeeks`. */
+  requiredBarsPerFamily: number;
+}
+
 export interface ExposureBandConfig {
   /**
    * The band's identity, carried into every observation row and into the pilot's identity.
@@ -312,6 +340,7 @@ export interface AppConfig {
   regime: RegimeConfig;
   transition: TransitionConfig;
   exposureBand: ExposureBandConfig;
+  exposurePilot: ExposurePilotConfig;
   decision: DecisionConfig;
   execution: ExecutionConfig;
   scheduler: SchedulerConfig;
@@ -474,26 +503,26 @@ export function resolveTransitionMode(
  *                    as it did before this brick existed, byte for byte.
  *   `observation`  — the band is computed and journaled on every cycle. NO effect on any
  *                    order, ever. This is the mode brick 1 ships.
- *   `application`  — the correction becomes effective. NOT YET A LEGAL VALUE; it arrives
- *                    with the last brick of the pilot.
+ *   `application`  — the correction becomes effective, AND ONLY IF the pilot's persistent
+ *                    identity says so. Legal from brick 4; see below.
  */
 export type ExposureBandMode = 'off' | 'observation' | 'application';
 
 /**
- * The modes this BUILD accepts. `application` is deliberately absent.
+ * The modes this BUILD accepts. `application` became legal in brick 4 — the one that made it
+ * safe — and the three bricks it waited for are all here: the correction, the two witnesses
+ * and the persistent identity with its circuit breaker.
  *
- * The protocol makes the switch from `observation` to `application` the pilot's official
- * start: its equity, its high-water mark and its eight-week clock all begin there, and the
- * observation history counts in neither its performance nor its drawdown. That instant can
- * therefore be spent exactly once.
- *
- * Bricks 2, 3 and 4 — the correction, the two witnesses, the identity and the circuit
- * breaker — are not in this build. A bot that accepted `application` today would start the
- * experiment with no witness to compare against and no persistent drawdown to stop it, and
- * the only way back would be to admit the window was wasted. So the value is refused by the
- * BINARY rather than by discipline, and it becomes legal in the same PR that makes it safe.
+ * LEGAL IS NOT ARMED, and the distinction is the whole safety story. The protocol makes the
+ * switch to `application` the pilot's official start: its equity, its high-water mark and its
+ * eight-week clock all begin there, and that instant can be spent exactly once. So the
+ * variable alone decides nothing. The correction reaches the executor only when the pilot's
+ * PERSISTENT IDENTITY also says so, and that identity fails closed on every doubt — an
+ * unreadable row, an unwritable high-water mark, a contract that no longer matches, a pilot
+ * stopped at 50% drawdown. In every one of those cases the v5 bot continues untouched and the
+ * band simply does not act.
  */
-const EXPOSURE_BAND_MODES_THIS_BUILD: ReadonlySet<string> = new Set(['off', 'observation']);
+const EXPOSURE_BAND_MODES_THIS_BUILD: ReadonlySet<string> = new Set(['off', 'observation', 'application']);
 
 /**
  * Resolves `EXPOSURE_BAND_MODE`, and FAILS LOUD on anything it does not recognise.
@@ -503,27 +532,19 @@ const EXPOSURE_BAND_MODES_THIS_BUILD: ReadonlySet<string> = new Set(['off', 'obs
  * set on Railway to keep today's behaviour, and an environment that loses its variables comes
  * back with the band switched off rather than half-armed.
  *
- * `application` gets its OWN message rather than the generic one. Someone typing it intends
- * to start the pilot; telling them "unrecognised value" would read as a typo when the real
- * answer is "this build cannot do that yet, and here is what is missing".
+ * `application` is accepted here and gated elsewhere. This function answers "is this a value
+ * the build understands"; whether the pilot may actually correct is a question about durable
+ * state, and it is asked once per cycle by `judgePilot`.
  */
 export function resolveExposureBandMode(
   raw: string | undefined = process.env.EXPOSURE_BAND_MODE,
 ): ExposureBandMode {
   if (raw == null || raw.trim() === '') return 'off';
   const value = raw.trim();
-  if (value === 'application') {
-    throw new Error(
-      'EXPOSURE_BAND_MODE="application" is not a legal value in this build. The band correction, ' +
-        'the two witnesses and the pilot\'s circuit breaker ship in later bricks; arming the ' +
-        'application mode now would start the eight-week window with nothing to compare against ' +
-        'and no persistent drawdown to stop it. Use "observation" (compute and journal, no effect ' +
-        'on orders) or "off".',
-    );
-  }
   if (EXPOSURE_BAND_MODES_THIS_BUILD.has(value)) return value as ExposureBandMode;
   throw new Error(
-    `Invalid EXPOSURE_BAND_MODE="${raw}": expected exactly "off" or "observation" ` +
+    `Invalid EXPOSURE_BAND_MODE="${raw}": expected exactly "off", "observation" or ` +
+      '"application" ' +
       '(case-sensitive), or UNSET for the default "off". A present-but-unrecognised value is ' +
       'refused rather than defaulted: it means someone intended to change how the exposure band ' +
       'behaves, and silently running another mode would be worse than not booting.',
@@ -605,6 +626,16 @@ export const config: AppConfig = {
   // already imposes — a STRUCTURAL redundancy, published as such: no correction toward the
   // ceiling can ever occur in a constructive context, and reading "zero" there proves
   // nothing about the policy. The ceiling that actually bites is the neutral 45.
+  exposurePilot: {
+    // Moved BY HAND on a substantial change to the band or the correction. See the interface.
+    contractVersion: 'A.1',
+    alertDrawdownPercent: 40,
+    stopDrawdownPercent: 50,
+    minWeeks: 8,
+    maxWeeks: 12,
+    // Two weeks of 4h bars, i.e. 25% of the minimum window, in each family.
+    requiredBarsPerFamily: 84,
+  },
   exposureBand: {
     version: 'A',
     defensive: { lowPercent: 0, highPercent: 20 },

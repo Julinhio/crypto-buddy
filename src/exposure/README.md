@@ -1,4 +1,4 @@
-# Pilote d'exposition contrainte — briques 1 à 3
+# Pilote d'exposition contrainte — briques 1 à 4
 
 | Brique | Fichier | Ce qu'elle fait |
 |---|---|---|
@@ -7,6 +7,8 @@
 | 2 | `correct.ts` | **répartit** : §3.5 vers le plancher, §3.6 vers le plafond, la préséance, la consolidation |
 | 3 | `witness.ts` | **compare** : les deux témoins chaînés, leur pondération sous plafonds, leur plomberie |
 | 3 | `../replay/exposureBandWitnesses.ts` | le rejeu hors ligne des trois livres, en segments, et ses huit critères |
+| 4 | `pilot.ts` | **arme** : l'identité persistante, le coupe-circuit, la fermeture de la fenêtre de mesure |
+| 4 | `../persistence/exposurePilot.ts` | la lecture et les écritures obligatoires, bornées, sur le chemin de trading |
 
 Les tenir séparées est ce qui a rendu le point de contrôle honnête : la morsure s'est publiée,
 lue et contestée avant qu'une seule ligne de correction n'existe.
@@ -15,9 +17,9 @@ lue et contestée avant qu'une seule ligne de correction n'existe.
 ni rendement.** Le rejeu historique le dit dans son propre artefact (`bite.json` →
 `contract.not_measured`), pas seulement ici.
 
-**Ni l'une ni l'autre ne touche au chemin des ordres.** Le mode `application` reste refusé par
-le binaire jusqu'à la dernière brique ; jusque-là la correction est calculée, journalisée, et
-rien ne l'envoie.
+**Les briques 1 à 3 ne touchent pas au chemin des ordres**, et la brique 4 est la seule qui le
+peut — sous deux verrous, et seulement quand le pilote est armé. En `off` et en `observation`
+la correction est calculée, journalisée, et rien ne l'envoie.
 
 ---
 
@@ -101,18 +103,16 @@ dessus.
 |---|---|
 | absente / `off` | la bande n'est pas calculée et rien n'est écrit — comportement v5 strictement inchangé |
 | `observation` | calcul et journal complets, **aucun effet sur les ordres** |
-| `application` | **refusée par ce binaire** — voir ci-dessous |
+| `application` | **légale depuis la brique 4**, et armée seulement si l'identité persistante le dit aussi |
 
 **L'absence signifie sûr.** Rien à poser sur Railway pour garder le comportement actuel, et un
 environnement qui perd ses variables revient bande éteinte plutôt qu'à moitié armée.
 
-`application` est refusée **par le binaire**, pas par la discipline. Le passage
-`observation` → `application` est l'instant officiel de départ du pilote : son equity, son
-plus-haut et son horloge de huit semaines commencent là, et cet instant ne se dépense qu'une
-fois. La correction, les deux témoins, l'identité et le coupe-circuit ne sont pas dans ce
-build ; un bot qui accepterait `application` aujourd'hui démarrerait l'expérience sans témoin
-et sans drawdown persistant pour l'arrêter. La valeur devient légale dans la PR qui la rend
-sûre, et son message de refus le dit plutôt que de se lire comme une faute de frappe.
+`application` est **légale** depuis la brique 4 — la correction, les deux témoins, l'identité
+fixe et le coupe-circuit sont tous là. **Légale n'est pas armée** : la variable seule ne décide
+de rien, et la correction n'atteint l'exécuteur que si l'identité persistante le dit aussi. Le
+passage `observation` → `application` reste l'instant officiel du pilote, et il ne se dépense
+qu'une fois.
 
 ---
 
@@ -521,6 +521,182 @@ Ce qu il prouve, c est le §6 : que toutes les entrées des témoins sont **dura
 journalisées** par le cycle vivant — prix, livre pré-cycle, registre souverain, journal de régime,
 verdicts de porte, cible bornée — et que la reconstruction se **reproduit** à l'empreinte près.
 Aucune écriture n'a été ajoutée au chemin de trading pour les témoins.
+
+## L'identité du pilote et son coupe-circuit (brique 4)
+
+C'est la brique qui **arme**. Les trois précédentes calculaient et journalisaient ; celle-ci
+laisse la correction atteindre l'exécuteur — sous deux verrous indépendants.
+
+### Deux verrous, pas un
+
+| Verrou | Ce qu'il vaut |
+|---|---|
+| `EXPOSURE_BAND_MODE=application` | l'interrupteur de l'opérateur |
+| l'identité persistante du pilote | celui du code, et il **échoue fermé** |
+
+`application` est devenue une valeur légale du résolveur — les trois briques qu'elle attendait
+sont là. **Légal n'est pas armé.** La variable seule ne décide de rien : la correction n'atteint
+l'exécuteur que si l'identité le dit aussi, et l'identité refuse sur le moindre doute — ligne
+illisible, plus-haut non écrit, contrat divergent, pilote arrêté à 50 %. Dans chacun de ces cas
+le bot v5 continue **exactement** comme avant, et la cible transmise reste `clamp.applied`.
+
+### Le point d'insertion EST le contrat de préséance
+
+Entre `clamp.applied` et la porte de transition. Le garde a déjà jugé la proposition **brute** du
+modèle (§3.4.5), la correction ne repasse pas devant lui (§3.4.7), et la porte parle **après**
+elle, sur les mouvements corrigés (§3.4.2). Ce n'est pas une commodité : c'est le seul endroit du
+cycle où les sept clauses tombent juste.
+
+### L'instant officiel ne se dépense qu'une fois
+
+Le premier cycle en `application` écrit l'identité : l'instant, l'equity d'ouverture, le
+plus-haut initial. La correction s'applique **dès ce cycle** — l'alignement initial et ses frais
+comptent, §3.8 — et aucun cycle suivant ne réactive quoi que ce soit.
+
+**La base le garantit, pas la discipline** : un index unique interdit une seconde ligne. Créer un
+pilote suivant supposera de lever cet index à la main, c'est-à-dire l'acte délibéré et revu que
+l'arbitrage exige. Aucun chemin de code, aucune variable, aucune faute de frappe ne peut le
+faire.
+
+### Le coupe-circuit
+
+| Seuil | Effet |
+|---|---|
+| **40 %** | une alerte **unique** et sa photographie. **La correction continue** — ce barreau est un avertissement, et en faire un arrêt désarmerait l'expérience à l'instant où son résultat devient intéressant. |
+| **50 %** | la correction de bande s'arrête, **durablement**. Aucune liquidation, aucun verdict de stratégie, le bot v5 continue. L'identité ne peut plus se réactiver. |
+
+Le drawdown se mesure depuis le **plus-haut du pilote**, qui ne fait que monter et survit à tout :
+redémarrage, redéploiement, passage temporaire en `observation`. Un plus-haut remis à zéro
+afficherait un drawdown nul le lendemain du pire jour du pilote, et c'est exactement la panne que
+la preuve 4 de `src/test/exposurePilot.ts` met en scène.
+
+### Une interruption du mode met fin au pilote
+
+Le plus-haut n'est suivi que pendant que le pilote est armé. Un passage temporaire en
+`observation` laisserait donc un trou, et un sommet atteint dans ce trou ferait paraître tous
+les drawdowns suivants plus petits qu'ils ne sont — dans le sens qui fait mordre le
+coupe-circuit trop tard.
+
+Arbitré : **cette reprise silencieuse est refusée**. Dès qu'une identité active connaît un cycle
+décidé hors `application`, l'interruption est constatée, persistée sous `interrupted_mode`, et
+l'identité ne se réarme **jamais** — un retour de la variable n'y change rien.
+
+**La détection vient du journal, pas d'un drapeau.** Un drapeau devrait être posé par le cycle
+qui, précisément, ne faisait pas tourner ce code. Les cycles décidés, eux, sont écrits quoi
+qu'il arrive : le pilote garde le dernier qu'il a vu, et si la table en contient un plus récent,
+c'est qu'il en a manqué un. C'est ce qui fait de « aucun cycle intermédiaire ne peut être
+ignoré » une preuve et non un espoir.
+
+Un simple redémarrage ne laisse aucun trou : les cycles décidés se suivent et la reprise se fait
+normalement depuis l'état persistant. Les cycles `skipped` et `error` ne comptent pas — ils ne
+décident rien et ne déplacent aucun ordre.
+
+L'invariant acheté : **une identité encore valide a vu tous les cycles décidés depuis son
+activation**, donc aucun sommet observable ne manque à son plus-haut.
+
+### Deux natures d'écriture, et deux conséquences différentes
+
+| | Quand | Un échec fait quoi |
+|---|---|---|
+| **écritures préalables obligatoires** — activation, nouveau plus-haut, alerte, arrêt | **avant** que la correction touche un ordre | **désarme le cycle courant** : la correction ne s'applique pas, la cible reste `clamp.applied` |
+| **le battement** — le reçu de continuité | **après** la décision, une fois la ligne écrite | **invalide le pilote au cycle suivant**, irréversiblement, sans rendre dangereux le cycle déjà exécuté |
+
+La distinction est délibérée. Une écriture préalable garantit qu'aucun ordre corrigé ne part sur
+un état qu'on n'a pas su enregistrer. Le battement, lui, ne peut pas être préalable — il nomme la
+ligne de décision, qui n'existe pas encore quand la correction est calculée. Son échec ne rend
+donc pas le cycle passé dangereux : ce cycle a bien tourné sous un pilote valide. Il rend le
+**suivant** impossible, parce qu'à ce moment-là le pilote ne peut plus prouver avoir vu ce qui
+s'est passé.
+
+### Les trois instants officiels et leurs pointeurs
+
+Activation, alerte 40 % et arrêt 50 % sont tous écrits **avant** que la ligne de décision
+existe — cette ligne doit porter la cible corrigée, elle ne peut donc pas venir en premier.
+Aucun des trois ne peut donc nommer son propre cycle au moment où il se produit. Chacun
+enregistre son **instant**, durablement, et une passe de résolution remplit le cycle ensuite :
+le premier cycle décidé à cet instant ou après.
+
+Elle est **idempotente** — elle ne touche qu’un pointeur encore nul — et **récupérable** : un
+cycle qui meurt entre son événement et cette passe laisse le pointeur nul, et le cycle suivant
+le répare depuis le même instant durable.
+
+**Un événement survenu n’est jamais enjambé.** La cascade par défaut est pilotée par le fait
+que l’événement a eu lieu, pas par la présence de son pointeur : un arrêt survenu dont le cycle
+reste irrésolu fait **refuser** le rejeu officiel, il ne le fait pas glisser jusqu’au point
+courant. C’est la prolongation silencieuse que le premier jet réintroduisait par une autre
+porte.
+
+L’alerte à 40 % fait exception dans un seul sens : elle ne **borne** pas la cascade par défaut,
+parce qu’elle ne termine rien — la correction continue de s’appliquer après elle.
+
+### Un battement nul se lit, il ne dispense pas
+
+Un battement nul recouvrait deux situations. L’activation fige donc une **référence durable** :
+le dernier cycle décidé qui existait avant elle.
+
+| Situation | Réponse |
+|---|---|
+| aucun cycle décidé depuis l’activation | **reprise possible** — le pilote n’a pas encore eu de cycle à nommer |
+| au moins un cycle décidé sans battement | **statut interrompu** — il y a un trou dans le plus-haut |
+| ni battement ni référence | **statut interrompu** — le pilote ne peut rien prouver de sa continuité |
+
+Un crash **avant** toute décision tombe dans la première ligne ; un crash **après** la décision
+mais avant le battement, dans la deuxième.
+### La fenêtre officielle des témoins
+
+Le rejeu des témoins lit ses bornes dans l'identité : ouverture au cycle officiel d'activation,
+**inclusive**, sur l'**equity réellement enregistrée** à ce moment, et fermeture au cycle demandé
+— `--at=alerte_40`, `arret_50` ou `cloture`. Rien d'antérieur à l'ouverture ni de postérieur à la
+fermeture n'entre dans le résultat.
+
+**Le refus est strict, et il est nommé.** Une identité présente ne suffit pas : si son cycle
+d'activation est irrésolu ou son equity d'ouverture inutilisable, le résultat n'est pas officiel.
+Un `--at` inconnu est refusé ; un `--at` connu dont le pointeur est absent est refusé aussi — et
+**jamais prolongé jusqu'au point d'arrêt courant**, parce que « valorise au moment de l'arrêt » et
+« valorise aujourd'hui » sont deux questions différentes.
+
+Sans `--at`, le rejeu choisit **explicitement** l'instant réellement disponible — clôture, puis
+arrêt, sinon le point courant — et publie le libellé de celui qu'il a pris. Aucun libellé ne
+provient d'une chaîne vide ni d'un cast de la ligne de commande : les quatre valeurs sont closes.
+
+**Sans identité — ou sur un refus — il n'y a pas de résultat officiel**, et le rejeu l'affiche
+avec sa raison : c'est un banc d'essai de la machinerie, sa fenêtre est celle de l'historique
+disponible, et son ouverture est un paramètre, pas un instant.
+
+### Le contrat, et ce qui invalide un pilote
+
+L'identité porte une empreinte canonique de tout son contrat **en valeurs** : version de politique
+et de contrat, six bornes, univers et plafonds par actif, frais et seuil de mouvement, seuils de
+drawdown, durées et couverture requise.
+
+Elle **n'inclut pas le SHA git**. Un commentaire ou un renommage ne doit pas tuer une expérience de
+huit semaines. La contrepartie est un devoir : une modification substantielle du comportement doit
+déplacer `contractVersion` **à la main**, parce qu'aucune empreinte de valeurs ne voit un
+changement de code.
+
+Une divergence **invalide durablement** le pilote, arrête la correction et alerte une fois. Un
+retour ultérieur à l'ancienne configuration ne le réactive pas. Le contrat est jugé **avant** tout
+drawdown : des seuils qu'on ne reconnaît plus ne sont pas des seuils.
+
+### La fenêtre de mesure se ferme ; la bande, non
+
+Arbitré, et la distinction est tout. À huit semaines la fenêtre se ferme si la couverture requise
+est atteinte — 84 bougies dans chaque famille — sinon elle court jusqu'à douze, où elle se ferme
+dans tous les cas avec son libellé. Aucun cycle postérieur n'entre dans les résultats officiels,
+**C8 compris**.
+
+La correction, elle, **continue** après la clôture, en attendant notre décision. Elle ne se
+désarme que sur le coupe-circuit ou sur un contrat invalide. Se désarmer sur une date
+réarrangerait le portefeuille à un instant arbitraire, pour une raison qui n'a rien à voir avec le
+risque.
+
+### Ce qui est journalisé, cycle par cycle
+
+`pilot_hold` dit pourquoi la correction n'a pas touché les ordres, et il n'est nul que quand elle
+les a touchés. En `observation` il vaut `mode_inactif` partout : c'est la réponse honnête, et
+c'est aussi la preuve continue que rien ne s'applique. À côté, le drawdown et le plus-haut que le
+coupe-circuit voyait à cet instant — l'identité ne garde que le dernier état, et sans eux un arrêt
+ne se relirait jamais dans son contexte.
 
 ## Passage de relais vers la brique 4
 

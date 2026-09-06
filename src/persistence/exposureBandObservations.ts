@@ -39,6 +39,8 @@ const WRITE_DEADLINE_MS = 5_000;
  *
  * Returns whether the write landed, for the caller's log — never for control flow.
  */
+const COVERAGE_DEADLINE_MS = 5000;
+
 export async function saveBandObservation(
   supabase: SupabaseClient | null,
   row: BandObservationInsert,
@@ -68,4 +70,54 @@ export async function saveBandObservation(
     console.error(JSON.stringify(row));
     return false;
   }
+}
+
+/**
+ * THE COVERAGE, counted the way §7 counts it: one observation per 4h bar, the FIRST cycle that
+ * used it, and absent or unclassifiable data in neither family.
+ *
+ * Read here rather than derived on the trading path: it is a measurement question, it only
+ * matters once the window is old enough to close, and it must never be able to weigh on an
+ * order. Best-effort by construction — a miss simply means the window is evaluated again next
+ * cycle.
+ */
+export async function readWindowCoverage(
+  supabase: SupabaseClient | null,
+  activatedAt: string,
+): Promise<{ constructiveBars: number; nonConstructiveBars: number } | null> {
+  if (!supabase) return null;
+  type CoverageRow = { bar_at: string | null; state: string | null; decision_id: number };
+  let rows: CoverageRow[] = [];
+  try {
+    await runBoundedWrite(async (signal) => {
+      const res = await supabase
+        .from('exposure_band_observations')
+        .select('bar_at, state, decision_id')
+        .gte('created_at', activatedAt)
+        .not('bar_at', 'is', null)
+        .not('state', 'is', null)
+        .order('decision_id', { ascending: true })
+        .limit(20000)
+        .abortSignal(signal);
+      rows = (res.data ?? []) as unknown as CoverageRow[];
+      return { error: res.error };
+    }, COVERAGE_DEADLINE_MS);
+  } catch {
+    return null;
+  }
+
+  const firstOfBar = new Map<string, string>();
+  for (const row of rows) {
+    if (row.bar_at == null || row.state == null) continue;
+    // FIRST wins — the rows arrive in decision order, and §7 makes the first cycle of a bar
+    // the unit of analysis. A later cycle of the same bar may not overwrite it.
+    if (!firstOfBar.has(row.bar_at)) firstOfBar.set(row.bar_at, row.state);
+  }
+  let constructiveBars = 0;
+  let nonConstructiveBars = 0;
+  for (const state of firstOfBar.values()) {
+    if (state === 'constructive') constructiveBars += 1;
+    else if (state === 'neutral' || state === 'defensive') nonConstructiveBars += 1;
+  }
+  return { constructiveBars, nonConstructiveBars };
 }

@@ -20,8 +20,28 @@ import {
   toObservationRow,
 } from '../persistence/transitionObservations.js';
 import { observeBand } from '../exposure/observe.js';
-import { correctToBand } from '../exposure/correct.js';
-import { saveBandObservation } from '../persistence/exposureBandObservations.js';
+import { correctToBand, type CorrectionOutcome } from '../exposure/correct.js';
+import { assessBand } from '../exposure/band.js';
+import { readContext, type ContextState } from '../calibration/exposure/controller.js';
+import {
+  contractDigest,
+  judgePilot,
+  judgeWindowClosure,
+  pilotAlertMessage,
+  pilotContractOf,
+  type PilotHold,
+  type PilotIdentity,
+} from '../exposure/pilot.js';
+import {
+  applyPilotWrite,
+  closeMeasurementWindow,
+  markDrawdownAlertDelivered,
+  markPilotSawDecision,
+  readLatestDecidedDecisionId,
+  readPilotIdentity,
+  resolvePilotEventCycles,
+} from '../persistence/exposurePilot.js';
+import { saveBandObservation, readWindowCoverage } from '../persistence/exposureBandObservations.js';
 import { saveBandCorrections, toCorrectionRows } from '../persistence/exposureBandCorrections.js';
 import { buildMarketContext, marketHealthOf, type MarketContext } from '../context/build.js';
 import { recordMarketDataOutage } from '../market/outage.js';
@@ -603,6 +623,50 @@ export async function decide(): Promise<DecideResult> {
    * (§3.4.2). Assessing the post-gate value would measure the band against a target that, on a
    * refused cycle, is last cycle's vector — a number the band was never meant to constrain.
    */
+  /**
+   * THE MEASUREMENT WINDOW, evaluated once the clock allows it.
+   *
+   * It closes the WINDOW and nothing else: no status changes, no correction is disarmed, no
+   * order is touched. The coverage read only happens once the window is old enough to close,
+   * so nothing pays for it in the meantime.
+   */
+  const closeWindowIfDue = async (
+    identity: PilotIdentity | null,
+    decisionId: number | null,
+  ): Promise<void> => {
+    if (identity == null || identity.status !== 'active') return;
+    // ALREADY CLOSED — nothing left to decide. Without this the coverage scan ran on every
+    // cycle for the rest of the pilot, re-logged a closure that had already happened and issued
+    // an update that matched no row. The state is persisted; reading it is the point of
+    // persisting it.
+    if (identity.windowClosedAt != null) return;
+    const now = new Date();
+    const elapsedWeeks = (now.getTime() - Date.parse(identity.activatedAt)) / (7 * 24 * 3600 * 1000);
+    if (!Number.isFinite(elapsedWeeks) || elapsedWeeks < config.exposurePilot.minWeeks) return;
+    const coverage = await readWindowCoverage(supabase, identity.activatedAt);
+    if (coverage == null) return;
+    const closure = judgeWindowClosure({
+      activatedAt: identity.activatedAt,
+      now,
+      minWeeks: config.exposurePilot.minWeeks,
+      maxWeeks: config.exposurePilot.maxWeeks,
+      requiredBarsPerFamily: config.exposurePilot.requiredBarsPerFamily,
+      constructiveBars: coverage.constructiveBars,
+      nonConstructiveBars: coverage.nonConstructiveBars,
+    });
+    if (!closure.closed || closure.label == null) return;
+    console.warn(
+      `[pilot] measurement window CLOSED after ${closure.weeksElapsed.toFixed(1)} weeks — ${closure.label}. ` +
+        'No cycle after this instant enters the official results. The correction keeps applying.',
+    );
+    await closeMeasurementWindow(supabase, {
+      label: closure.label,
+      decisionId,
+      constructiveBars: coverage.constructiveBars,
+      nonConstructiveBars: coverage.nonConstructiveBars,
+      now,
+    });
+  };
   const observeExposureBand = async (opts: {
     decisionId: number | null;
     /** The clamped target the chain retained. Null on every cycle that produced none. */
@@ -629,6 +693,16 @@ export async function decide(): Promise<DecideResult> {
      */
     bookedLedger?: LedgerEntry[];
     portfolioAfter?: VirtualPortfolio | null;
+    /**
+     * THE CORRECTION THE ORDER PATH ACTUALLY USED, when it used one (brick 4).
+     *
+     * Handed down rather than recomputed. The two would agree — same pure function, same
+     * inputs — right up until the day they did not, and a journal that disagreed with the
+     * orders it describes would be worse than no journal at all.
+     */
+    applied?: CorrectionOutcome | null;
+    /** The pilot's verdict on this cycle, so the journal says why the band did or did not act. */
+    pilot?: { hold: PilotHold | null; drawdownPercent: number | null; peakEquityQuote: number | null };
   }): Promise<void> => {
     // THE OFF-SWITCH IS THE FIRST STATEMENT, before even destructuring the options. Not for
     // the microseconds — so that "off computes nothing" is a property a reader can check by
@@ -681,7 +755,9 @@ export async function decide(): Promise<DecideResult> {
      * `correctToBand` is pure and total, so this cannot throw on a live trading path.
      */
     const correction =
-      assessment == null || targetAllocation == null
+      opts.applied != null
+        ? opts.applied
+        : assessment == null || targetAllocation == null
         ? null
         : correctToBand({
             assessment,
@@ -707,6 +783,12 @@ export async function decide(): Promise<DecideResult> {
       // knows whether the bound was actually reachable line by line, and brick 1's label was
       // computed before the 2% floor had had its say.
       row.label = correction.label;
+    }
+
+    if (opts.pilot != null) {
+      row.pilot_hold = opts.pilot.hold;
+      row.pilot_drawdown_percent = opts.pilot.drawdownPercent;
+      row.pilot_peak_equity_usd = opts.pilot.peakEquityQuote;
     }
 
     if (row.label != null && row.label !== 'aucune_correction') {
@@ -1330,6 +1412,165 @@ export async function decide(): Promise<DecideResult> {
   const { clamp, movements: proposedMovements } = evaluated;
 
   /**
+   * ── THE BAND CORRECTION, ON THE ORDER PATH — brick 4, and the one reviewable diff ──────
+   *
+   * Bricks 1 to 3 computed the correction inside an observational closure that ran AFTER the
+   * orders and returned `void`, which is what made "the band cannot change what the bot does"
+   * a structural claim rather than a promise. This is where that changes, deliberately, in one
+   * place, under two independent locks:
+   *
+   *   1. `EXPOSURE_BAND_MODE` must be `application` — the operator's switch;
+   *   2. the pilot's PERSISTENT IDENTITY must say so — the code's own.
+   *
+   * The second is not a formality. It fails closed on every doubt: an unreadable row, an
+   * unwritable high-water mark, a contract that no longer matches, a pilot stopped at 50%
+   * drawdown. In every one of those cases `correctedAllocation` stays `clamp.applied` and the
+   * cycle proceeds exactly as it does today — the v5 bot never waits on this, never fails
+   * because of it, and never liquidates anything on its account.
+   *
+   * The placement is the precedence contract, not a convenience: the coherence guard has
+   * already judged the model's RAW proposal (§3.4.5), the correction does not re-enter it
+   * (§3.4.7), and the transition gate speaks AFTER it, on the corrected movements (§3.4.2).
+   */
+  const pilotContract = pilotContractOf(config, tradableBaseAssets(config), reserveStable);
+  const pilotContractSha256 = contractDigest(pilotContract);
+  // The read only happens in `application`. In every other mode `judgePilot` answers
+  // `mode_inactif` without looking at anything, so observation adds no query to the cycle.
+  const pilotRead =
+    EXPOSURE_BAND_MODE === 'application' ? await readPilotIdentity(supabase) : null;
+  // THE NEWEST DECIDED CYCLE THE JOURNAL HOLDS, read before this one is written. Compared
+  // against the pilot's own mark, it is what makes an interruption PROVABLE: a decided cycle
+  // more recent than the one the pilot saw can only exist if the pilot did not run on it.
+  const latestDecidedDecisionId =
+    EXPOSURE_BAND_MODE === 'application' ? await readLatestDecidedDecisionId(supabase) : null;
+  const pilotJudgement = judgePilot({
+    mode: EXPOSURE_BAND_MODE,
+    identity: pilotRead != null && pilotRead.ok ? pilotRead.identity : null,
+    identityReadFailed: pilotRead != null && !pilotRead.ok,
+    contractSha256: pilotContractSha256,
+    contractVersion: config.exposurePilot.contractVersion,
+    equityQuote: portfolio.equity.toNumber(),
+    drawdown: {
+      alertPercent: config.exposurePilot.alertDrawdownPercent,
+      stopPercent: config.exposurePilot.stopDrawdownPercent,
+    },
+    latestDecidedDecisionId,
+  });
+  if (pilotRead != null && !pilotRead.ok) {
+    console.warn(`[pilot] identity unreadable — the band correction stands down (${pilotRead.reason}).`);
+  }
+
+  let pilotHold: PilotHold | null = pilotJudgement.hold;
+  let mayCorrect = pilotJudgement.mayCorrect;
+
+  // THE MANDATORY WRITE, BEFORE ANY ORDER. Activation, a new high-water mark, the 40% latch,
+  // the 50% stop: each must be durable before the correction is allowed to act on it. A write
+  // that does not land disarms the correction for this cycle rather than letting it trade on a
+  // drawdown nobody recorded.
+  if (pilotJudgement.write != null) {
+    const landed = await applyPilotWrite(supabase, pilotJudgement.write, {
+      // NULL, AND NECESSARILY SO: this write happens before the decision row exists, because
+      // that row has to carry the corrected target. The exact cycle is filled in afterwards by
+      // `resolvePilotEventCycles`, which is idempotent and repairs a previous miss.
+      decisionId: null,
+      latestDecidedDecisionId,
+      equityQuote: portfolio.equity.toNumber(),
+      contractSha256: pilotContractSha256,
+      contractVersion: config.exposurePilot.contractVersion,
+      bandVersion: config.exposureBand.version,
+      now: new Date(),
+    });
+    if (!landed.ok) {
+      mayCorrect = false;
+      pilotHold = 'ecriture_obligatoire_impossible';
+      console.warn(`[pilot] a mandatory write did not land — the band correction stands down (${landed.reason}).`);
+    } else if (pilotJudgement.write.kind === 'activation') {
+      console.warn(
+        `[pilot] ACTIVATED — opening equity ${pilotJudgement.write.openingEquityQuote.toFixed(2)}. ` +
+          'The official instant, the high-water mark and the eight-week clock start here.',
+      );
+    } else if (pilotJudgement.write.kind === 'stop_drawdown') {
+      console.warn(
+        `[pilot] CIRCUIT BREAKER — drawdown ${(pilotJudgement.drawdownPercent ?? 0).toFixed(2)}%. ` +
+          'The band correction is disarmed, persistently. No liquidation; the v5 bot continues.',
+      );
+    }
+  }
+
+  // THE ALERTS. Best-effort by construction — a Telegram outage may not disarm an experiment,
+  // and the latch is already durable, so a missed send is visible in the identity rather than
+  // silently repeated on the next cycle.
+  if (pilotJudgement.alert != null && pilotHold !== 'ecriture_obligatoire_impossible') {
+    // ONE FUNCTION, TOTAL OVER THE UNION. This was a chain of ternaries, and a chain of
+    // ternaries has a last branch that silently catches whatever nobody wrote a case for —
+    // `mode_interrupted` fell into it and announced a contract divergence, sending anyone reading
+    // the alert to look for a configuration change that had not happened.
+    const text = pilotAlertMessage(pilotJudgement.alert, {
+      drawdownPercent: pilotJudgement.drawdownPercent,
+      lastSeenDecisionId:
+        pilotRead != null && pilotRead.ok ? (pilotRead.identity?.lastSeenDecisionId ?? null) : null,
+      latestDecidedDecisionId,
+    });
+    const delivered = await sendTelegram(text);
+    if (pilotJudgement.alert === 'drawdown_40' && delivered) {
+      await markDrawdownAlertDelivered(supabase);
+    }
+  }
+
+  /**
+   * THE CORRECTED TARGET. Identical to `clamp.applied` on every cycle the pilot does not arm —
+   * which is every cycle today, and every cycle of this deployment.
+   */
+  let bandCorrection: CorrectionOutcome | null = null;
+  let correctedAllocation = clamp.applied;
+  let correctedMovements = proposedMovements;
+  // THE CONTEXT, read through production's own function. A regime it cannot classify THROWS
+  // on purpose, so that a new label is never silently counted as neutral — and on this path
+  // that throw simply means there is no band to correct against. It is a gap in the band, not
+  // a fault of the pilot: `pilot_hold` stays null and the observation row names the gap.
+  let bandState: ContextState | null = null;
+  if (mayCorrect && context.regimePoint != null) {
+    try {
+      bandState = readContext(context.regimePoint, tradableBaseAssets(config)).state;
+    } catch (err) {
+      console.warn(`[pilot] no usable context this cycle — the band has no bound to apply (${String(err)}).`);
+    }
+  }
+  if (mayCorrect && bandState != null) {
+    const assessment = assessBand({
+      policyVersion: config.exposureBand.version,
+      policy: config.exposureBand,
+      state: bandState,
+      targetAllocation: clamp.applied,
+      rawAllocation: v.targetAllocation,
+      bookExposurePercent: portfolio.deployedPercent.toNumber(),
+      reserveAsset: reserveStable,
+      gateByAsset: new Map(transitionVerdicts.map((verdict) => [verdict.asset, verdict.gate])),
+      capOf: (asset) => config.execution.caps.perAsset[asset] ?? config.execution.caps.defaultPerAsset,
+      maxDeployablePercent: 100 - config.execution.caps.minCashPercent,
+      equityQuote: portfolio.equity.toNumber(),
+      movementFloorQuote: movementFloor(portfolio.equity, config.execution.minMovementPercent).toNumber(),
+      stoppedWeightSurvives: TRANSITION_MODE === 'observe',
+    });
+    bandCorrection = correctToBand({
+      assessment,
+      clampedAllocation: clamp.applied,
+      rawAllocation: v.targetAllocation,
+      reserveAsset: reserveStable,
+      portfolio,
+      priceOf,
+      feePercent: config.execution.feePercent,
+      minMovementPercent: config.execution.minMovementPercent,
+    });
+    correctedAllocation = bandCorrection.correctedAllocation;
+    correctedMovements = bandCorrection.movements;
+    console.log(
+      `[pilot] band correction applied — ${bandCorrection.label}, ` +
+        `${bandCorrection.movements.length} leg(s), exposure ${bandCorrection.correctedExposurePercent.toFixed(2)}%.`,
+    );
+  }
+
+  /**
    * THE GATE, APPLIED. The one place in the cycle where `observe` and `enforce` diverge.
    *
    * Judged on the movements the model's target PRODUCES, before any of them executes —
@@ -1343,7 +1584,7 @@ export async function decide(): Promise<DecideResult> {
    * and the guard would be marking the code's homework instead of the model's.
    */
   const gateJudgement = judgeVector(
-    proposedMovements.map((m) => ({ asset: m.asset, side: m.side, notional: m.notional })),
+    correctedMovements.map((m) => ({ asset: m.asset, side: m.side, notional: m.notional })),
     verdictsByAsset,
   );
   /**
@@ -1364,10 +1605,12 @@ export async function decide(): Promise<DecideResult> {
 
   const gateOutcome = applyGate({
     mode: TRANSITION_MODE,
-    movements: proposedMovements,
+    // THE CORRECTED VECTOR when the pilot is armed, the model's own otherwise. The gate wins
+    // over both bounds (§3.4.2), so it speaks last and on what would really be sent.
+    movements: correctedMovements,
     judgement: gateJudgement,
     stopExits,
-    clampedAllocation: clamp.applied,
+    clampedAllocation: correctedAllocation,
     reserveAsset: reserveStable,
     // The last ACCEPTED applied vector, read at the top of this cycle — what the BOOK was
     // pursuing, which is the only thing a revert may fall back to. Deliberately NOT the
@@ -1503,7 +1746,48 @@ export async function decide(): Promise<DecideResult> {
     // and that difference is the measurement.
     bookedLedger,
     portfolioAfter,
+    // The correction the ORDERS used, when they used one, so the journal describes what
+    // happened rather than a second computation of what should have.
+    applied: bandCorrection,
+    pilot: {
+      hold: pilotHold,
+      drawdownPercent: pilotJudgement.drawdownPercent,
+      peakEquityQuote: pilotJudgement.peakEquityQuote,
+    },
   });
+
+  // THE ACTIVATION'S DECISION ID, backfilled. The identity is written BEFORE the decision row
+  // exists — the row has to carry the corrected target, so it cannot come first — and the
+  // official INSTANT is durable from that moment. This fills in the pointer a heartbeat later,
+  // best-effort and idempotent: if it misses, the replay still finds the opening cycle from
+  // `activated_at`, which is the fact that matters.
+  // THE THREE EVENT POINTERS, RESOLVED AND REPAIRED. Activation, the 40% alert and the 50%
+  // stop are all written before the decision row exists, so none of them can name its own
+  // cycle at the time. This pass fills every one that is still missing, from the instant each
+  // event durably recorded — so it is idempotent, and a cycle that died before running it is
+  // repaired by the next one rather than leaving a window nobody can ever bound.
+  if (EXPOSURE_BAND_MODE === 'application') {
+    await resolvePilotEventCycles(supabase);
+  }
+
+  // THE HEARTBEAT. Records that this pilot saw this decided cycle — on EVERY application
+  // cycle, whether or not the correction applied. Its absence is exactly what the next cycle
+  // reads as an interruption, so a write that does not land ends the pilot rather than leaving
+  // a hole nobody can see. Conservative on purpose: a cycle the pilot cannot prove it saw is a
+  // cycle whose peak it cannot vouch for.
+  if (EXPOSURE_BAND_MODE === 'application' && id != null && pilotJudgement.statusAfter === 'active') {
+    await markPilotSawDecision(supabase, id);
+  }
+
+  // THE MEASUREMENT WINDOW, closed by the clock and the coverage — never by the breaker, and
+  // never with any power over the orders. Arbitrated: at eight weeks the window closes if the
+  // required coverage is met, otherwise it runs to twelve where it closes in every case with
+  // its label. The correction KEEPS APPLYING afterwards, pending our decision: disarming on a
+  // calendar date would rearrange the portfolio for a reason that has nothing to do with risk.
+  //
+  // Post-execution and best-effort, like every other measurement in this file. A miss simply
+  // means the window is evaluated again on the next cycle.
+  await closeWindowIfDue(pilotRead != null && pilotRead.ok ? pilotRead.identity : null, id);
 
   /**
    * THE REFUSED-INTENTION LEDGER — opened here, resolved here, read by nobody in this file.
