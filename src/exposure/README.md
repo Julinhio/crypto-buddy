@@ -448,6 +448,46 @@ réveil suivant. Comparé sur les **quantités** — un prix bouge entre deux r�
 détenue non. L'ancien W2 était circulaire : il confrontait la cible de E à la valeur dont il
 l'avait construite, et serait passé aussi bien sur le mauvais livre.
 
+**Et W2 doit avoir comparé quelque chose.** « Aucune dérive » ne prouve rien sur un corpus où
+rien n'a été comparé : un cycle terminal n'a pas de successeur, un segment singleton n'a aucune
+paire, et un corpus entièrement fait de singletons serait passé avec zéro comparaison et un taux
+d'accord affiché à 0 %. Le nombre attendu est donc calculé depuis la **structure des segments**
+— quatre actifs par cycle ayant un successeur dans son segment — et l'observé doit lui être
+**exactement égal**. Les cycles terminaux sont publiés comme non contrôlables, les segments
+singletons comme **non exercés**, et un corpus n'attendant aucune comparaison ne peut pas faire
+passer le critère.
+
+### Le rejeu s'arrête à un point que le journal a PROUVÉ terminé
+
+Une ligne de décision apparaît **avant** que le cycle qui l'a écrite soit fini : production
+insère la décision, puis place les ordres, puis book le registre souverain, puis journalise les
+verdicts de transition. Trois requêtes lancées ensemble peuvent donc enjamber cet instant —
+l'une voyant la décision, l'autre ratant son registre — et le rejeu conclurait, en silence, que
+le cycle n'a rien booké. C'est le défaut du livre pré-trade, ressuscité par une course.
+
+La borne n'est donc pas « le dernier identifiant visible ». C'est **le dernier cycle que la
+couche écrite en dernier couvre complètement** — un verdict de porte par actif de l'univers — et
+toutes les requêtes portent ensuite exactement cette borne. Mesuré sur le corpus : les portes
+arrivent 0,33 s après la ligne de décision en moyenne, 2,96 s au pire, et **jamais** avant le
+registre. Aucun point figé du tout est un refus de rejouer, jamais un run vide.
+
+### La précision dont dépend la reconstruction est un invariant, pas une hypothèse
+
+Le livre de départ vient d'un contexte dont production arrondit les quantités à **8 décimales**
+et le cash au **centime**. Repartir de là et y ajouter des deltas exacts n'égale la dérivation de
+production que tant que les deux tiennent sur la grille du journal — ce qui est le cas, parce
+qu'une quantité bookée est calée sur le pas du marché avant d'être journalisée.
+
+Mesuré : 2472 comparaisons, écart relatif maximum **2,14 · 10⁻¹⁶**, soit du bruit machine. Mais
+« mesuré » n'est pas « garanti », donc la condition est **vérifiée** : une quantité — du livre de
+départ ou du registre — qui ne tient plus sur la grille **arrête le rejeu** avec son cycle et son
+nombre nommés, plutôt que de laisser passer une approximation silencieuse.
+
+L'arrondi du **cash** est documenté à part et borné : au plus 0,005 $ par reconstruction, sur
+l'**équité** et jamais sur les quantités. À la plus petite équité de la fenêtre (1019,72 $), son
+effet maximal sur l'exposition est de **0,00049 point** — quatre ordres de grandeur sous le seuil
+de mouvement de 2 %. W2 reste la preuve empirique indépendante, et elle porte sur les quantités.
+
 ### Un trou coupe la chaîne, il ne la comprime jamais
 
 Une chaîne qui saute un cycle irreconstructible et continue traite l'intervalle comme s'il

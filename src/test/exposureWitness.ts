@@ -7,6 +7,9 @@ import type { PriceLookup } from '../portfolio/derive.js';
 import {
   cutIntoSegments,
   equalWeightUnderCaps,
+  expectedComparisons,
+  isRepresentableAtJournalPrecision,
+  settledCutoff,
   openBook,
   readAdoption,
   stepWitness,
@@ -425,6 +428,136 @@ console.log('\nProof 7 — a gap cuts the chain and re-anchors it, never compres
   ok(
     'and reaches the same exposure from a different size — the chain restarts, it does not resume',
     near(finals[0]!.exposureAfterPercent, finals[1]!.exposureAfterPercent, SUM_TOL),
+  );
+}
+
+// ── PROOF 8 — the replay stops at a point the journal has PROVEN finished ─────────
+//
+// A decision row appears before the cycle that wrote it has finished: production inserts it,
+// THEN places the orders, THEN books the sovereign ledger, THEN journals the transition
+// verdicts. Three queries fired together can therefore straddle that moment — one seeing the
+// decision, another missing its ledger — and the replay would conclude, in silence, that the
+// cycle booked nothing. That is the pre-trade-book defect, resurrected by a race.
+//
+// So the bound is not "the last id anyone can see". It is the last cycle the LAST-WRITTEN layer
+// covers COMPLETELY, and every query is bounded by that same number.
+console.log('\nProof 8 — a partially written cycle above the bound never enters the replay:');
+{
+  // Cycle 100 is finished: four verdicts, one per asset. 101 was caught mid-write — two
+  // verdicts of four — and 102 has not reached the gate layer at all, though its decision row
+  // and even its ledger are already visible.
+  const coverage = new Map<number, Set<string>>([
+    [98, new Set(['BTC', 'ETH', 'BNB', 'XRP'])],
+    [100, new Set(['BTC', 'ETH', 'BNB', 'XRP'])],
+    [101, new Set(['BTC', 'ETH'])],
+  ]);
+  const cutoff = settledCutoff(coverage, UNIVERSE);
+  ok('[borne] the bound is the last COMPLETELY covered cycle', cutoff === 100);
+  ok(
+    'a partial batch does not settle anything — 101 is above the bound',
+    cutoff != null && 101 > cutoff && 102 > cutoff,
+  );
+
+  // AND NONE OF THEIR DATA ENTERS. The filter every query applies is `id <= cutoff`, so it is
+  // applied here to all three inputs at once.
+  const decisions = [98, 100, 101, 102];
+  const ledger = [
+    { decision_id: 100, symbol: 'BTC/USDT' },
+    { decision_id: 101, symbol: 'ETH/USDT' },
+    { decision_id: 102, symbol: 'XRP/USDT' },
+  ];
+  const keptDecisions = decisions.filter((id) => id <= cutoff!);
+  const keptLedger = ledger.filter((row) => row.decision_id <= cutoff!);
+  const keptGates = [...coverage.keys()].filter((id) => id <= cutoff!);
+  ok('no decision above the bound is replayed', keptDecisions.join(',') === '98,100');
+  ok('no ledger row above the bound is read', keptLedger.map((r) => r.decision_id).join(',') === '100');
+  ok('and no gate above the bound either', keptGates.join(',') === '98,100');
+  ok(
+    'so the half-written cycle contributes NOTHING — not even a gap',
+    !keptDecisions.includes(101) && !keptLedger.some((r) => r.decision_id === 101),
+  );
+
+  // THE REFUSAL. No settled point at all is a refusal to replay, never an empty run: an empty
+  // window would publish "0 cycle, all criteria green".
+  ok('nothing complete means no bound', settledCutoff(new Map([[7, new Set(['BTC'])]]), UNIVERSE) === null);
+  ok('and an empty journal means no bound', settledCutoff(new Map(), UNIVERSE) === null);
+  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandWitnesses.ts'), 'utf8');
+  ok(
+    'the replay refuses rather than running on a torn journal',
+    /no point in the journal is provably settled|Refusing to replay/.test(replay),
+  );
+  ok(
+    'and every query carries the same bound',
+    replay.includes(".lte('id', cutoffId)") && replay.includes(".lte('decision_id', cutoffId)"),
+  );
+}
+
+// ── PROOF 9 — the precision the reconstruction depends on is CHECKED ─────────────
+//
+// The post-trade book is seeded from a context whose quantities production rounds to eight
+// decimals, then moved by the ledger's own deltas. That is equivalent to production's exact
+// derivation only while both sit on the journal's grid — which they do, because a booked
+// quantity is snapped to the venue step before it is journaled. Measured on the corpus: 2472
+// comparisons, worst relative deviation 2.14e-16, i.e. machine noise.
+//
+// Measured is not guaranteed, so the assumption is an invariant that FAILS the run.
+console.log('\nProof 9 — the journal precision is an invariant, not an assumption:');
+{
+  ok('a whole quantity fits', isRepresentableAtJournalPrecision(109.8));
+  ok('so does one at the last journaled digit', isRepresentableAtJournalPrecision(0.00000001));
+  ok('and a typical BTC size', isRepresentableAtJournalPrecision(0.00091234));
+  ok(
+    'a NINTH decimal does not',
+    !isRepresentableAtJournalPrecision(0.000000001) && !isRepresentableAtJournalPrecision(0.123456789),
+  );
+  ok('neither does a non-finite value', !isRepresentableAtJournalPrecision(Number.NaN));
+  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandWitnesses.ts'), 'utf8');
+  ok(
+    'the replay THROWS on a quantity that no longer fits, rather than approximating',
+    /does not fit the journal|no longer exact/.test(replay) && /throw new Error\(/.test(replay),
+  );
+  ok(
+    'and it checks the ledger deltas too, not only the seed book',
+    (replay.match(/isRepresentableAtJournalPrecision\(/g) ?? []).length >= 2,
+  );
+}
+
+// ── PROOF 10 — a criterion that compared nothing may not call itself green ─────────
+//
+// W2 used to pass on "no drift" alone. A terminal cycle has no successor and a singleton
+// segment has no pair at all, so a corpus made entirely of singletons would have passed with
+// zero comparisons and a 0% agreement rate on display — the same family of emptiness as the
+// circular version it replaced.
+console.log('\nProof 10 — W2 owes a number of comparisons, computed from the segments:');
+{
+  ok('[fenêtre réelle] one segment of 619 owes 618 pairs × 4 assets', expectedComparisons([619], 4) === 2472);
+  ok(
+    'two segments owe one pair less than one segment of the same total',
+    expectedComparisons([300, 319], 4) === 2468 && expectedComparisons([619], 4) === 2472,
+  );
+  ok('[singleton] a segment of one owes nothing', expectedComparisons([1], 4) === 0);
+  ok(
+    'and a corpus of singletons owes nothing at all — W2 cannot pass on it',
+    expectedComparisons([1, 1, 1, 1], 4) === 0,
+  );
+  ok('an empty universe owes nothing either', expectedComparisons([619], 0) === 0);
+
+  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandWitnesses.ts'), 'utf8');
+  ok(
+    'W2 requires the observed count to EQUAL the expected one',
+    /const covered = expected > 0 && compared === expected;/.test(replay),
+  );
+  ok(
+    'and it cannot pass without coverage, whatever the drifts say',
+    /covered && drifts\.length === 0/.test(replay),
+  );
+  ok(
+    'terminal cycles are published as uncheckable rather than assumed fine',
+    /non contr\u00f4lables par W2/.test(replay),
+  );
+  ok(
+    'and singleton segments are named NOT EXERCISED',
+    /NON EXERC\u00c9S/.test(replay),
   );
 }
 

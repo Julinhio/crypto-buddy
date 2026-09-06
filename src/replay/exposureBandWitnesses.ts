@@ -12,7 +12,11 @@ import { correctToBand } from '../exposure/correct.js';
 import {
   cutIntoSegments,
   equalWeightUnderCaps,
+  expectedComparisons,
+  isRepresentableAtJournalPrecision,
+  JOURNAL_QTY_DECIMALS,
   openBook,
+  settledCutoff,
   valueBook,
   stepWitness,
   witnessRow,
@@ -156,6 +160,17 @@ function postTradeBookOf(
   const qty = new Map<string, number>();
   for (const position of portfolio.positions ?? []) {
     if (!Number.isFinite(position.qty)) return null;
+    // THE INVARIANT, CHECKED. Seeding from a rounded book and moving it by exact deltas is
+    // only equivalent to production's derivation while both sit on the journal's precision
+    // grid. They do today; the day they stop, this run must fail loudly rather than publish a
+    // silent approximation.
+    if (!isRepresentableAtJournalPrecision(position.qty)) {
+      throw new Error(
+        `band witnesses: the pre-cycle book carries ${position.asset} at ${position.qty}, which does ` +
+          `not fit the journal's ${JOURNAL_QTY_DECIMALS} decimals. The reconstruction "rounded book ` +
+          '+ exact ledger" is no longer exact, and continuing would bias every exposure it feeds.',
+      );
+    }
     qty.set(position.asset, (qty.get(position.asset) ?? 0) + position.qty);
   }
   let cash = portfolio.cash;
@@ -167,6 +182,12 @@ function postTradeBookOf(
     const base = Number(entry.ledger_base_delta);
     const quote = Number(entry.ledger_quote_delta);
     if (!Number.isFinite(base) || !Number.isFinite(quote)) return null;
+    if (!isRepresentableAtJournalPrecision(base)) {
+      throw new Error(
+        `band witnesses: the sovereign ledger books ${asset} by ${base}, which does not fit the ` +
+          `journal's ${JOURNAL_QTY_DECIMALS} decimals. See the invariant above.`,
+      );
+    }
     qty.set(asset, (qty.get(asset) ?? 0) + base);
     cash += quote;
   }
@@ -189,6 +210,7 @@ function postTradeBookOf(
 
 async function loadDecisions(
   supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  cutoffId: number,
 ): Promise<DecisionRead[]> {
   const PAGE = 500;
   const rows: DecisionRead[] = [];
@@ -201,6 +223,10 @@ async function loadDecisions(
       )
       .eq('prompt_version', 'v5')
       .eq('status', 'decided')
+      // THE SETTLED BOUND, on every query without exception. A row above it may belong to a
+      // cycle still being written, and one query seeing it while another does not is exactly
+      // how a torn read gets in.
+      .lte('id', cutoffId)
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw new Error(`band witnesses: could not read decisions (${error.message}).`);
@@ -247,6 +273,7 @@ async function loadGates(
  */
 async function loadLedgerByDecision(
   supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  cutoffId: number,
 ): Promise<Map<number, LedgerRead[]>> {
   const PAGE = 1000;
   const byDecision = new Map<number, LedgerRead[]>();
@@ -256,6 +283,7 @@ async function loadLedgerByDecision(
       .select('decision_id, symbol, ledger_base_delta, ledger_quote_delta')
       .eq('event_type', 'intent')
       .eq('validation_status', 'executed')
+      .lte('decision_id', cutoffId)
       // Insertion order via the monotonic id, exactly as production replays it.
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
@@ -532,10 +560,31 @@ async function main(): Promise<void> {
   if (!supabase) throw new Error('band witnesses: Supabase is not configured.');
 
   const universe = tradableBaseAssets(config);
-  const [decisions, gatesByDecision, ledgerByDecision] = await Promise.all([
-    loadDecisions(supabase),
-    loadGates(supabase),
-    loadLedgerByDecision(supabase),
+  // ── THE SETTLED POINT, TAKEN FIRST AND IMPOSED ON EVERYTHING ELSE ────────────────
+  //
+  // The three reads used to fire together, and a cycle finishing mid-run could be seen by one
+  // and missed by another: production writes the decision row, THEN places the orders, THEN
+  // books the ledger, THEN journals the transition verdicts. A decisions query that caught the
+  // row while the ledger query ran a moment too early would hand this replay a cycle that
+  // "booked nothing" — reviving, silently and for one cycle, the exact defect the previous
+  // revision fixed.
+  //
+  // So the gates are read FIRST, the cutoff is the last cycle they cover COMPLETELY, and every
+  // other query is bounded by that same number. The gate layer is the one written last, so its
+  // full coverage proves the decision, the orders and the ledger of that cycle are already
+  // there. Measured on the corpus: gates land 0.33 s after the decision row on average (2.96 s
+  // at worst) and never before the ledger.
+  const gatesByDecision = await loadGates(supabase);
+  const cutoffId = settledCutoff(gatesByDecision, universe);
+  if (cutoffId == null) {
+    throw new Error(
+      'band witnesses: no cycle carries a complete set of transition verdicts, so no point in ' +
+        'the journal is provably settled. Refusing to replay rather than reading a torn journal.',
+    );
+  }
+  const [decisions, ledgerByDecision] = await Promise.all([
+    loadDecisions(supabase, cutoffId),
+    loadLedgerByDecision(supabase, cutoffId),
   ]);
 
   console.log('='.repeat(96));
@@ -639,7 +688,7 @@ async function main(): Promise<void> {
   console.log('');
   console.log(
     `Fenêtre : ${rows.length} cycles reconstruits en ${segments.length} segment(s), ids ` +
-      `${rows[0]?.decision_id} → ${rows[rows.length - 1]?.decision_id}.`,
+      `${rows[0]?.decision_id} → ${rows[rows.length - 1]?.decision_id} · point d’arrêt figé ${cutoffId}.`,
   );
   for (const segment of segments) {
     console.log(
@@ -701,22 +750,28 @@ async function main(): Promise<void> {
     ]);
   }
 
-  // ── W2 — the post-trade book E aims at, checked against an INDEPENDENT source ────
+  // ── W2 — the post-trade book, checked against an INDEPENDENT source, with coverage ─
   //
-  // The old W2 was circular and said nothing: it compared E's target to the very value that
-  // target was built from, so it would have passed just as happily on the pre-trade book it
-  // was in fact reading. What has to be checked is the RECONSTRUCTION — that "pre-trade book
-  // plus this cycle's ledger" really is the book the bot ended up holding.
+  // The first W2 was circular: it compared E's target to the value that target was built from,
+  // so it would have passed just as happily on the pre-trade book it was in fact reading. The
+  // independent term is the NEXT cycle's own `market_context`: a different row, written by a
+  // different code path at a different moment, showing the quantities the bot actually held at
+  // its next wake-up. Quantities, not values — a price moves between two wake-ups, a holding
+  // does not. Used ONLY as a check; E's target still reads nothing but instant-N data.
   //
-  // The independent term is the NEXT cycle's own `market_context`: a different row, written by
-  // a different code path at a different moment, showing the quantities the bot actually held
-  // when it woke up again. Quantities, not values — a price moves between two wake-ups and a
-  // holding does not. It is used ONLY as a check; E's target still reads nothing but instant-N
-  // data.
+  // AND THE COVERAGE IS PART OF THE VERDICT. "No drift" is not a proof if nothing was compared:
+  // a terminal cycle has no successor, a singleton segment has no pair at all, and a corpus of
+  // singletons would have passed with zero comparisons and a 0% agreement rate on display. So
+  // the expected count is computed from the SHAPE of the segments and the observed count must
+  // equal it exactly — and a corpus expecting nothing cannot pass.
   {
+    const expected = expectedComparisons(segments.map((segment) => segment.cycles.length), universe.length);
+    const singletons = segments.filter((segment) => segment.cycles.length === 1);
+    const terminals = segments.map((segment) => segment.cycles[segment.cycles.length - 1]!.decision.id);
     let compared = 0;
     let agreed = 0;
     const drifts: Array<{ id: number; asset: string; derived: number; shown: number }> = [];
+    let worstRelative = 0;
     for (const segment of segments) {
       for (let i = 0; i + 1 < segment.cycles.length; i += 1) {
         const cycle = segment.cycles[i]!;
@@ -732,17 +787,28 @@ async function main(): Promise<void> {
           // Relative, because a quantity of BTC and a quantity of XRP are orders of magnitude
           // apart and one absolute tolerance cannot serve both.
           const scale = Math.max(Math.abs(derived), Math.abs(seen), 1e-12);
-          if (Math.abs(derived - seen) / scale <= 1e-6) agreed += 1;
+          const relative = Math.abs(derived - seen) / scale;
+          if (relative > worstRelative) worstRelative = relative;
+          if (relative <= 1e-6) agreed += 1;
           else drifts.push({ id: cycle.decision.id, asset, derived, shown: seen });
         }
       }
     }
+    const covered = expected > 0 && compared === expected;
     const rate = compared === 0 ? 0 : (agreed / compared) * 100;
-    record('W2', 'le livre post-cycle reconstruit est bien celui que le bot a tenu', drifts.length === 0, [
+
+    // THE CASH BOUND, published rather than assumed. The seed book carries its cash rounded to
+    // the cent, so each reconstruction can be off by at most half a cent — on the EQUITY, never
+    // on the quantities, which W2 has just checked against an independent source.
+    const smallestEquity = Math.min(...segments.flatMap((seg) => seg.cycles.map((c) => c.botEquityAfter)));
+    const cashBoundPoints = (0.005 / smallestEquity) * 100;
+
+    record('W2', 'le livre post-cycle reconstruit est celui que le bot a tenu, et la couverture est complète', covered && drifts.length === 0, [
       'Terme de comparaison INDÉPENDANT : le contexte du cycle SUIVANT — une autre ligne, écrite',
       'par un autre chemin, montrant ce que le bot tenait à son réveil suivant. Comparées sur les',
       'QUANTITÉS : un prix bouge entre deux réveils, une quantité détenue non.',
-      `${compared} quantité(s) confrontées · ${agreed} d’accord (${rate.toFixed(3)} %).`,
+      `${compared} comparaison(s) attendues ${expected} — ${covered ? 'couverture exacte' : 'COUVERTURE INCOMPLÈTE'}`,
+      `${agreed} d’accord (${rate.toFixed(3)} %) · écart relatif maximum ${worstRelative.toExponential(2)}`,
       drifts.length === 0
         ? 'Aucune divergence : « livre pré-cycle + registre du cycle » EST le livre post-cycle.'
         : `${drifts.length} divergence(s), dont : ` +
@@ -751,9 +817,19 @@ async function main(): Promise<void> {
             .map((d) => `#${d.id} ${d.asset} reconstruit ${d.derived} vs montré ${d.shown}`)
             .join(' · '),
       ' ',
-      'L’ANCIEN W2 était circulaire : il confrontait la cible de E à la valeur dont il l’avait',
-      'construite, donc il passait aussi bien sur le livre PRÉ-cycle qu’il lisait en réalité.',
-      'Le chiffre de fidélité de E est republié en W2b, sur la cible corrigée.',
+      'COUVERTURE. « Aucune dérive » ne prouve rien si rien n’a été comparé : le nombre attendu',
+      'est calculé depuis la STRUCTURE des segments — quatre actifs par cycle ayant un successeur',
+      'dans son segment — et l’observé doit lui être exactement égal.',
+      `  cycles terminaux, non contrôlables par W2 : ${terminals.join(', ')} (un par segment)`,
+      singletons.length === 0
+        ? '  segments singletons : aucun'
+        : `  segments singletons, marqués NON EXERCÉS : ${singletons.map((seg) => seg.id).join(', ')}`,
+      'Un corpus n’attendant aucune comparaison ne peut pas faire passer ce critère.',
+      ' ',
+      `ARRONDI DU CASH, borné et publié à part : le livre de départ porte son cash au centime,`,
+      `donc au plus 0,005 $ d’écart par reconstruction — sur l’ÉQUITÉ, jamais sur les quantités.`,
+      `Effet maximal sur l’exposition, à la plus petite équité de la fenêtre (${smallestEquity.toFixed(2)} $) : ` +
+        `${cashBoundPoints.toFixed(6)} point — quatre ordres de grandeur sous le seuil de mouvement de 2 %.`,
     ]);
   }
 
@@ -911,6 +987,7 @@ async function main(): Promise<void> {
     caps: config.execution.caps,
     execution: { feePercent: config.execution.feePercent, minMovementPercent: config.execution.minMovementPercent },
     window: {
+      settled_cutoff_id: cutoffId,
       cycles: rows.length,
       from_id: rows[0]?.decision_id ?? null,
       to_id: rows[rows.length - 1]?.decision_id ?? null,

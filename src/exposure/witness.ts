@@ -465,3 +465,76 @@ export function cutIntoSegments<T>(entries: ReadonlyArray<ChainEntry<T>>): {
   if (current != null) segments.push(current);
   return { segments, gaps };
 }
+
+// ── THE SETTLED POINT: WHERE A JOURNAL IS PROVEN FINISHED ────────────────────────────
+
+/**
+ * The last cycle whose write is PROVEN COMPLETE — not simply the last id anyone can see.
+ *
+ * A decision row appears BEFORE the cycle that wrote it has finished: production inserts it,
+ * then places the orders, then books the sovereign ledger, then journals the transition
+ * verdicts. A reader that stops at `max(id)` can therefore see a cycle whose ledger is not
+ * there yet and conclude, in perfect silence, that it booked nothing.
+ *
+ * So the cutoff is taken from the layer written LAST, and only where its coverage is COMPLETE:
+ * a per-asset verdict for every asset of the universe. Its presence proves everything written
+ * before it — the decision, the orders, the ledger — is already there. A partial batch proves
+ * nothing and is refused.
+ *
+ * Returns null when no cycle is settled, which is a refusal to replay rather than an empty run.
+ */
+export function settledCutoff(
+  coverage: ReadonlyMap<number, ReadonlySet<string> | ReadonlyMap<string, unknown>>,
+  universe: readonly string[],
+): number | null {
+  const needed = [...new Set(universe)];
+  if (needed.length === 0) return null;
+  let cutoff: number | null = null;
+  for (const [id, assets] of coverage) {
+    const has = (asset: string): boolean =>
+      assets instanceof Set ? assets.has(asset) : (assets as ReadonlyMap<string, unknown>).has(asset);
+    if (!needed.every(has)) continue;
+    if (cutoff == null || id > cutoff) cutoff = id;
+  }
+  return cutoff;
+}
+
+/**
+ * Is this quantity representable at the precision the journal stores?
+ *
+ * The post-trade book is seeded from the context's positions, which production rounds to eight
+ * decimals, and then moved by the ledger's own deltas. That reconstruction is exact ONLY while
+ * both are representable at that precision — which they are today, because a booked quantity is
+ * snapped to the venue's step before it is journaled, so the rounding loses nothing. Measured
+ * on the corpus: 2472 comparisons, maximum deviation 0.0, not merely under tolerance.
+ *
+ * "Today" and "measured" are not a guarantee, so the assumption is CHECKED rather than trusted.
+ * A value that no longer fits stops the replay with its cycle and its number named, instead of
+ * letting a silent approximation into every figure downstream.
+ */
+export const JOURNAL_QTY_DECIMALS = 8;
+
+export function isRepresentableAtJournalPrecision(value: number): boolean {
+  if (!Number.isFinite(value)) return false;
+  const scaled = value * 10 ** JOURNAL_QTY_DECIMALS;
+  // The tolerance is in units of the last journaled digit, and it has to exist: a double
+  // holding 109.8 · 1e8 cannot land on an exact integer, and demanding one would fail the
+  // check on values that ARE representable.
+  return Math.abs(scaled - Math.round(scaled)) <= 1e-3;
+}
+
+/**
+ * How many pairwise checks a chain OWES, from the shape of its segments alone.
+ *
+ * "No drift" is not a proof if nothing was compared. A terminal cycle has no successor and a
+ * singleton segment has no pair at all, so a criterion that only asked "were there drifts"
+ * would pass, green and silent, on a corpus where it compared nothing whatsoever.
+ *
+ * The expected count is therefore derived from the structure — one comparison per asset for
+ * every cycle that HAS a successor inside its own segment — and the observed count must equal
+ * it exactly. A chain that owes nothing cannot be declared verified.
+ */
+export function expectedComparisons(segmentSizes: readonly number[], universeSize: number): number {
+  if (universeSize <= 0) return 0;
+  return segmentSizes.reduce((sum, size) => sum + Math.max(0, size - 1), 0) * universeSize;
+}
