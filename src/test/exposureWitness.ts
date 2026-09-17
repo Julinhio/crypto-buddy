@@ -26,7 +26,9 @@ import {
 } from '../exposure/adoption.js';
 import {
   allocationsAgree,
+  bandJournalStart,
   bandSettledCutoff,
+  gateCoverageComplete,
   attributeLegs,
   journaledClampedAllocation,
   judgeW4,
@@ -384,47 +386,47 @@ console.log('\nProof 6 — C8 reads an executed episode, in its direction, and n
     { id: 103, status: 'decided', targetAllocation: { BNB: 0, XRP: 15, USDT: 85 } },
   ];
   const noGate = (): string | null => 'actionable';
-  const built = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gateOf: noGate }).episodes;
+  const built = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: noGate });
   ok('one executed leg → one episode', built.length === 1);
   const episode = built[0]!;
   ok('the reaction is read at 102, the first DECIDED cycle after it', episode.reaction?.decisionId === 102);
   ok('101 is named as skipped and is NOT a reaction', episode.skippedCycles.length === 1 && episode.skippedCycles[0]!.id === 101 && episode.skippedCycles[0]!.status === 'guard_failed');
   ok('the episode reads maintien on 102\'s 15, not on 103\'s later 0', episode.reading === 'maintien');
   // A planned-but-not-booked leg is NOT an episode; a model line is not one either.
-  ok('a planned leg that never booked is not an episode', buildEpisodes({ lines: [line({ bookedSide: null, bookedNotionalQuote: null })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gateOf: noGate }).episodes.length === 0);
-  ok('nor is a line the band did not move', buildEpisodes({ lines: [line({ origin: 'modele', correctionPoints: 0, correctedWeightPercent: 0 })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gateOf: noGate }).episodes.length === 0);
+  ok('a planned leg that never booked is not an episode', buildEpisodes({ lines: [line({ bookedSide: null, bookedNotionalQuote: null })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: noGate }).length === 0);
+  ok('nor is a line the band did not move', buildEpisodes({ lines: [line({ origin: 'modele', correctionPoints: 0, correctedWeightPercent: 0 })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: noGate }).length === 0);
   // A later event breaks the attribution.
-  const stopped = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gateOf: (id, asset) => (id === 102 && asset === 'BNB' ? 'stop_exit' : 'actionable') }).episodes;
+  const stopped = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: (id, asset) => (id === 102 && asset === 'BNB' ? 'stop_exit' : 'actionable') });
   ok('the code\'s stop on that line AT the reaction cycle makes it non_attribuable', stopped[0]!.reading === 'non_attribuable' && /stop_exit/.test(stopped[0]!.because ?? ''));
   // A stop verdict journaled on the FAILED cycle in between is an observation: no order, no
   // model consulted. It must not discard a valid reaction (first review round).
-  const observedOnFailed = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gateOf: (id, asset) => (id === 101 && asset === 'BNB' ? 'stop_exit' : 'actionable') }).episodes;
+  const observedOnFailed = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: (id, asset) => (id === 101 && asset === 'BNB' ? 'stop_exit' : 'actionable') });
   ok('but a stop verdict on the failed cycle in between is an observation and leaves the reading intact', observedOnFailed[0]!.reading === 'maintien');
   // UNDER `observe` A VERDICT ACTS ON NOTHING: `applyGate` is a no-op and the model is told
   // nothing, so even a stop AT the reaction cycle leaves the reaction free (second review round).
-  const observedMode = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'observe', correctionAllowed: () => true, gateOf: (id, asset) => (id === 102 && asset === 'BNB' ? 'stop_exit' : 'actionable') }).episodes;
+  const observedMode = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'observe', correctionAllowed: () => true, gatesComplete: () => true, gateOf: (id, asset) => (id === 102 && asset === 'BNB' ? 'stop_exit' : 'actionable') });
   ok('under `observe` the same stop at the reaction cycle is observational and the reading stays maintien', observedMode[0]!.reading === 'maintien');
   // A BOOKING ON A HELD CYCLE IS THE MODEL'S. The journal records the computed correction and
   // the real bookings even when the pilot held the correction back; a band-origin line with a
   // booked side there is the uncorrected bot's own trade, not an episode (third review round).
-  const held = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => false, gateOf: noGate }).episodes;
+  const held = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => false, gatesComplete: () => true, gateOf: noGate });
   ok('a booking on a cycle where the correction was not allowed to act is not an episode', held.length === 0);
   // THE HOLDING MUST HAVE MOVED BECAUSE OF THE BAND (fourth review round). `false` means the
   // corrected and uncorrected plans booked the same holding — the booking is the model's plan.
   // Null is unreadable: reported, never dropped in silence, and refused in the official window.
-  const unmoved = buildEpisodes({ lines: [line({ correctionMovesHolding: false })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gateOf: noGate });
-  ok('correction_moves_holding = false excludes the line from the episodes', unmoved.episodes.length === 0 && unmoved.unreadable.length === 0);
-  const unread = buildEpisodes({ lines: [line({ correctionMovesHolding: null })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gateOf: noGate });
-  ok('an unreadable correction_moves_holding is reported, not excluded in silence', unread.episodes.length === 0 && unread.unreadable.length === 1 && unread.unreadable[0]!.decisionId === 100 && unread.unreadable[0]!.asset === 'BNB');
-  const refusedOfficial = judgeC8({ episodes: unread.episodes, decisions, fromDecisionId: 100, toDecisionId: 103, windowClosed: false, claimsOfficial: false, unreadable: unread.unreadable, official: true });
-  ok('and in the official window the judge REFUSES, explicitly', refusedOfficial.status === 'fail' && /REFUS : correction_moves_holding illisible/.test(refusedOfficial.problems[0] ?? ''));
-  const benchUnread = judgeC8({ episodes: unread.episodes, decisions, fromDecisionId: 100, toDecisionId: 103, windowClosed: false, claimsOfficial: false, unreadable: unread.unreadable, official: false });
-  ok('on the bench it is not a refusal — the line is named and left out', benchUnread.status !== 'fail');
+  const unmoved = buildEpisodes({ lines: [line({ correctionMovesHolding: false })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: noGate });
+  ok('correction_moves_holding = false excludes the line from the episodes', unmoved.length === 0);
+  const unread = buildEpisodes({ lines: [line({ correctionMovesHolding: null })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: noGate });
+  ok('an unreadable correction_moves_holding is an ILLISIBLE episode naming the column, not a silent exclusion', unread.length === 1 && unread[0]!.reading === 'illisible' && /correction_moves_holding/.test(unread[0]!.because ?? ''));
+  const refusedOfficial = judgeC8({ episodes: unread, decisions, fromDecisionId: 100, toDecisionId: 103, windowClosed: false, claimsOfficial: false, official: true });
+  ok('and in the official window the judge REFUSES, explicitly', refusedOfficial.status === 'fail' && /REFUS : 1 épisode\(s\) illisible\(s\) en fenêtre officielle/.test(refusedOfficial.problems[0] ?? ''));
+  const benchUnread = judgeC8({ episodes: unread, decisions, fromDecisionId: 100, toDecisionId: 103, windowClosed: false, claimsOfficial: false, official: false });
+  ok('on the bench it is not a refusal — the episode is named and left out of the readable count', benchUnread.status !== 'fail' && benchUnread.readable === 0 && benchUnread.byReading.illisible === 1);
   // A band correction AT the reaction cycle does not break the attribution: the model proposed
   // before the band acted there, and that proposal is its reaction to this episode.
-  const again = buildEpisodes({ lines: [line({}), line({ decisionId: 102, bookedSide: null })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gateOf: noGate }).episodes;
+  const again = buildEpisodes({ lines: [line({}), line({ decisionId: 102, bookedSide: null })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: noGate });
   ok('a band correction at the reaction cycle itself leaves the reading attributable', again.find((e) => e.decisionId === 100)!.reading === 'maintien');
-  ok('an episode with no decided cycle after it is non_mesurable', buildEpisodes({ lines: [line({ decisionId: 103 })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gateOf: noGate }).episodes[0]!.reading === 'non_mesurable');
+  ok('an episode with no decided cycle after it is non_mesurable', buildEpisodes({ lines: [line({ decisionId: 103 })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: noGate })[0]!.reading === 'non_mesurable');
 
   // (f) THE READINGS STAY DESCRIPTIVE UNTIL THE CLOSURE, and the replay does not decide that.
   const open = judgeC8({ episodes: built, decisions, fromDecisionId: 100, toDecisionId: 103, windowClosed: false, claimsOfficial: false });
@@ -826,7 +828,7 @@ console.log('\nProof 12 — the semantics of the three allocations, established 
   // (d) THE REAL JOURNAL keeps planned and executed apart, and names why a planned leg did not
   // book — the journaled causes first, in order, and the inference last.
   const unbooked1926: JournalCorrectionLine = { ...journal1839[0]!, decisionId: 1926, asset: 'BTC', origin: 'correction_de_bande', correctionPoints: -1.25, correctedWeightPercent: 8.75, plannedSide: 'sell', plannedNotionalQuote: 21.56, bookedSide: null, bookedNotionalQuote: null };
-  type Facts = { gateRefusal: string | null; pilotHold: string | null; correctionAllowed: boolean };
+  type Facts = { gateRefusal: string | null; pilotHold: string | null; correctionAllowed: boolean | null };
   const noFacts = (): Facts => ({ gateRefusal: null, pilotHold: null, correctionAllowed: true });
   // The cause of the one wanted leg, whichever bucket it lands in (planned-not-executed, or
   // suppressed by the corrector).
@@ -849,6 +851,10 @@ console.log('\nProof 12 — the semantics of the three allocations, established 
   ok('a booking on a held cycle is not an executed band leg, and the cause says whose booking it was', heldBooking.executed.length === 0 && heldBooking.plannedNotExecuted.length === 1 && /le booking sell est celui du modèle/.test(heldBooking.plannedNotExecuted[0]!.notExecutedBecause ?? ''));
   const observationBooking = realBandLegs([{ ...unbooked1926, bookedSide: 'sell', bookedNotionalQuote: 21.5 }], 1839, 2000, () => null, () => ({ gateRefusal: null, pilotHold: null, correctionAllowed: false }));
   ok('and so is one made in observation mode', observationBooking.executed.length === 0 && /mode observation/.test(observationBooking.plannedNotExecuted[0]!.notExecutedBecause ?? ''));
+  // SIXTH REVIEW ROUND: with no observation row the fact is unknown — the leg is neither
+  // executed nor not executed, it is named unreadable.
+  const unknownBooking = realBandLegs([{ ...unbooked1926, bookedSide: 'sell', bookedNotionalQuote: 21.5 }], 1839, 2000, () => null, () => ({ gateRefusal: null, pilotHold: null, correctionAllowed: null }));
+  ok('a booked band leg on a cycle with no band observation is UNREADABLE — not executed, not "not executed"', unknownBooking.executed.length === 0 && unknownBooking.plannedNotExecuted.length === 0 && unknownBooking.unreadable.length === 1 && /observation de bande absente/.test(unknownBooking.unreadable[0]!.notExecutedBecause ?? ''));
 }
 
 // ── PROOF 13 — W4, W5 and W6 can really fail, and never pass on nothing ─────────────
@@ -952,6 +958,14 @@ console.log('\nProof 13b — the corrections journal has its own settled point, 
   ok('the first expected observation missing settles nothing', bandSettledCutoff(expected, obs([[101, true], [102, true]]), new Map([[101, 4], [102, 4]]), 4) === null);
   ok('and the answer does not depend on the order the data arrives in', bandSettledCutoff([102, 101, 100], obs([[102, true], [100, true]]), new Map([[102, 4], [100, 4]]), 4) === 100 && bandSettledCutoff([101, 102, 100], obs([[102, true], [101, true]]), new Map([[102, 4], [101, 4]]), 4) === null);
   ok('a complete observation later never carries the point past the hole', bandSettledCutoff([100, 101, 102, 103], obs([[100, true], [102, true], [103, true]]), new Map([[100, 4], [102, 4], [103, 4]]), 4) === 100);
+  // SIXTH REVIEW ROUND: the journal's start is the UNION of its two layers. A first observation
+  // that failed to write while its corrections landed is a hole at the start, not a cycle
+  // before the journal — and the expected sequence must begin on it.
+  ok('[début] the start is the earliest cycle EITHER layer covers', bandJournalStart([101, 102], [100, 101, 102]) === 100 && bandJournalStart([100], []) === 100 && bandJournalStart([], []) === null);
+  ok('so a first corrections batch without its observation settles nothing', bandSettledCutoff([100, 101, 102], obs([[101, true], [102, true]]), new Map([[100, 4], [101, 4], [102, 4]]), 4) === null);
+  ok('and the order the layers arrive in changes nothing', bandJournalStart([102, 101], [102, 100]) === 100);
+  const replay2 = readFileSync(path.join(ROOT, 'src/replay/exposureBandWitnesses.ts'), 'utf8');
+  ok('the replay derives the start from both layers', /bandJournalStart\(bandMarkers\.keys\(\), bandRowsByDecision\.keys\(\)\)/.test(replay2));
   const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandWitnesses.ts'), 'utf8').replace(/\r\n/g, '\n');
   ok('the replay takes the smaller of the gate point and the band point', /const cutoffId = Math\.min\(gateCutoffId, bandCutoffId\);/.test(replay));
   ok('and walks the band point on the DECISIONS expected since the journal began, not on the rows present', /allDecisionSummaries\.map\(\(d\) => d\.id\)\.filter\(\(id\) => id >= firstJournaledId\)/.test(replay) && /bandSettledCutoff\(\s*\n\s*expectedBandCycles,/.test(replay));
@@ -985,8 +999,81 @@ console.log('\nProof 14 — the replay feeds B̂ the intention, judges through t
   // FINALITY FOLLOWS THE RESOLVED INSTANT. A closed pilot replayed at `--at=alerte_40` is a
   // snapshot cut before the closure; its C8 must stay descriptive (first review round).
   ok('C8 is official only when the window was resolved on the `cloture` instant, never on the pilot row alone', /const closedAtSelectedInstant = pilotWindow\.official && pilotWindow\.instant === 'cloture';/.test(replay) && /windowClosed: closedAtSelectedInstant,/.test(replay) && !/windowClosed: pilotWindow\.official && windowClosed,/.test(replay));
-  ok('and a planned leg\'s cause reads the gate refusal and the pilot hold before inferring', /gateRefusal: divergenceOf\.get\(id\) \?\? null,\s*\n\s*pilotHold: marker\?\.pilotHold \?\? null,\s*\n\s*correctionAllowed: marker\?\.correctionAllowed \?\? false,/.test(replay));
+  ok('and a planned leg\'s cause reads the gate refusal and the pilot hold before inferring', /gateRefusal: divergenceOf\.get\(id\) \?\? null,\s*\n\s*pilotHold: marker\?\.pilotHold \?\? null,\s*\n\s*correctionAllowed: marker == null \? null : marker\.correctionAllowed,/.test(replay));
   ok('the reference cycle 1839 is asserted whenever it is in the window', /decisionId: 1839, bandAssets: \['BNB', 'ETH'\], untouchedAssets: \['XRP'\]/.test(replay));
+}
+
+// ── PROOF 15 — every best-effort layer: absent at the start, in the middle, on the reaction ─
+//
+// THE CLASS, closed rather than patched (sixth review round). Production writes three layers
+// this replay interprets on a best-effort basis: the gate verdicts, the band observation, the
+// band corrections. An absence in any of them is not a fact. It must become a named gap, an
+// `illisible` reading, or a refusal — never `false`, never "free", never "not applied", never
+// "no correction". Each layer is walked here at the three places an absence can fall.
+console.log('\nProof 15 — an absent best-effort layer is named, refused or cut — never a value:');
+{
+  const universe4 = ['BTC', 'ETH', 'BNB', 'XRP'];
+  const gatesOf = (assets: string[]) => new Map(assets.map((a) => [a, 'actionable']));
+
+  // ── (1) THE GATE JOURNAL ──────────────────────────────────────────────────────────
+  ok('[porte] a map covering the whole universe is complete', gateCoverageComplete(gatesOf(universe4), universe4));
+  ok('[porte] a map missing one asset is NOT — a partial map is not a smaller map', !gateCoverageComplete(gatesOf(['BTC', 'ETH', 'BNB']), universe4));
+  ok('[porte] no map at all is not', !gateCoverageComplete(undefined, universe4) && !gateCoverageComplete(null, universe4));
+  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandWitnesses.ts'), 'utf8').replace(/\r\n/g, '\n');
+  // start / middle: a cycle with an incomplete gate journal is a NAMED GAP for B̂ — it cuts the
+  // chain (proof 7) instead of being reconstructed with a line the real cycle never froze.
+  ok('[porte, début ou milieu] an incomplete gate journal makes the cycle a named gap for B̂', /if \(!gateCoverageComplete\(gates, universe\)\) \{\s*\n\s*fail\('gates_incomplete'\);/.test(replay) && /'gates_incomplete'/.test(replay));
+  // reaction cycle: under `enforce` the episode is illisible; under `observe` the gate is a
+  // no-op and the reaction stays free.
+  const line = (over: Partial<JournalCorrectionLine>): JournalCorrectionLine => ({
+    decisionId: 100, asset: 'BNB', origin: 'allocation_de_secours', cause: 'aucune', rawWeightPercent: 0, clampedWeightPercent: 0, baseWeightPercent: 0,
+    correctionPoints: 15, correctedWeightPercent: 15, plannedSide: 'buy', plannedNotionalQuote: 164, suppressedReason: null, suppressedNotionalQuote: null,
+    bookedSide: 'buy', bookedNotionalQuote: 163.67, postCycleWeightPercent: 15.2, correctionMovesHolding: true, ...over,
+  });
+  const decisions: DecisionSummary[] = [
+    { id: 100, status: 'decided', targetAllocation: { BNB: 0, USDT: 100 } },
+    { id: 101, status: 'guard_failed', targetAllocation: null },
+    { id: 102, status: 'decided', targetAllocation: { BNB: 15, USDT: 85 } },
+  ];
+  const build = (over: Partial<Parameters<typeof buildEpisodes>[0]>) =>
+    buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 102, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: () => 'actionable', ...over });
+  const gatesGoneAtReaction = build({ gatesComplete: (id) => id !== 102 });
+  ok('[porte, cycle de réaction, enforce] an incomplete gate journal there makes the episode ILLISIBLE, not a free reaction', gatesGoneAtReaction[0]!.reading === 'illisible' && /verdicts de porte incomplets au cycle de réaction 102/.test(gatesGoneAtReaction[0]!.because ?? ''));
+  ok('[porte, cycle de réaction, observe] the same absence leaves the reaction free — the gate acts on nothing there', build({ gatesComplete: (id) => id !== 102, transitionMode: 'observe' })[0]!.reading === 'maintien');
+  ok('[porte, cycle intermédiaire en échec] an incomplete gate journal on 101 changes nothing — no order, no model there', build({ gatesComplete: (id) => id !== 101 })[0]!.reading === 'maintien');
+  ok('[porte] an official C8 REFUSES on it', judgeC8({ episodes: gatesGoneAtReaction, decisions, fromDecisionId: 100, toDecisionId: 102, windowClosed: false, claimsOfficial: false, official: true }).status === 'fail');
+  ok('[porte] and the bench names it without refusing', judgeC8({ episodes: gatesGoneAtReaction, decisions, fromDecisionId: 100, toDecisionId: 102, windowClosed: false, claimsOfficial: false, official: false }).byReading.illisible === 1);
+
+  // ── (2) THE BAND OBSERVATION ──────────────────────────────────────────────────────
+  const obs = (entries: Array<[number, boolean]>) => new Map(entries.map(([id, computed]) => [id, { correctionComputed: computed }]));
+  const rows4 = (ids: number[]) => new Map(ids.map((id) => [id, 4]));
+  ok('[observation, début] the first expected cycle without its row settles nothing', bandSettledCutoff([100, 101, 102], obs([[101, true], [102, true]]), rows4([100, 101, 102]), 4) === null);
+  ok('[observation, milieu] a missing row stops the point on the cycle before it, for ever', bandSettledCutoff([100, 101, 102, 103], obs([[100, true], [102, true], [103, true]]), rows4([100, 101, 102, 103]), 4) === 100);
+  // on the episode cycle: the fact "was the correction allowed" is unreadable → illisible.
+  const obsGoneAtEpisode = build({ correctionAllowed: (id) => (id === 100 ? null : true) });
+  ok('[observation, cycle de l’épisode] its absence makes the episode ILLISIBLE, never "not allowed"', obsGoneAtEpisode[0]!.reading === 'illisible' && /observation de bande absente/.test(obsGoneAtEpisode[0]!.because ?? ''));
+  ok('[observation] an official C8 REFUSES on it', judgeC8({ episodes: obsGoneAtEpisode, decisions, fromDecisionId: 100, toDecisionId: 102, windowClosed: false, claimsOfficial: false, official: true }).status === 'fail');
+  // on the reaction cycle: the settled point stops before it, so the reaction falls outside the
+  // window and the episode is non_mesurable — its reason names the window, not a guess.
+  const cutoffBeforeReaction = bandSettledCutoff([100, 101, 102], obs([[100, true], [101, false]]), rows4([100]), 4);
+  ok('[observation, cycle de réaction] the point stops before the reaction cycle', cutoffBeforeReaction === 101);
+  const reactionOutside = build({ toDecisionId: cutoffBeforeReaction! });
+  ok('and the episode is non_mesurable, with the window as its reason', reactionOutside[0]!.reading === 'non_mesurable' && /aucun cycle décidé ne suit/.test(reactionOutside[0]!.because ?? ''));
+  ok('[observation] the replay never defaults the fact — null is passed through', /correctionAllowed: marker == null \? null : marker\.correctionAllowed,/.test(replay) && !/correctionAllowed: marker\?\.correctionAllowed \?\? false/.test(replay));
+
+  // ── (3) THE BAND CORRECTIONS ──────────────────────────────────────────────────────
+  ok('[corrections, début] a first batch without its observation is a hole at the start — nothing settles', bandJournalStart([101], [100, 101]) === 100 && bandSettledCutoff([100, 101], obs([[101, true]]), rows4([100, 101]), 4) === null);
+  ok('[corrections, milieu] a partial batch stops the point before it', bandSettledCutoff([100, 101, 102], obs([[100, true], [101, true], [102, true]]), new Map([[100, 4], [101, 2], [102, 4]]), 4) === 100);
+  ok('[corrections, cycle de réaction] a missing batch there stops the point before the reaction', bandSettledCutoff([100, 101, 102], obs([[100, true], [101, false], [102, true]]), new Map([[100, 4]]), 4) === 101);
+  ok('[corrections, cycle de l’épisode] a null correction_moves_holding is ILLISIBLE, never false', build({ lines: [line({ correctionMovesHolding: null })] })[0]!.reading === 'illisible');
+  ok('[corrections] B̂ in the official window refuses a cycle without its journal rather than recomputing', /fail\(pilotWindow\.official \? 'no_corrections_journal' : 'no_target'\)/.test(replay));
+
+  // ── THE AGGREGATE never omits an illisible episode in silence ──────────────────────
+  const mixed = [...build({}), ...gatesGoneAtReaction.map((e) => ({ ...e, decisionId: 100, asset: 'ETH' }))];
+  const officialMixed = judgeC8({ episodes: mixed, decisions, fromDecisionId: 100, toDecisionId: 102, windowClosed: true, claimsOfficial: true, official: true });
+  ok('[agrégat] one readable and one illisible episode: the official reading is REFUSED, not published on the readable one', officialMixed.status === 'fail' && officialMixed.official === false && /REFUS/.test(officialMixed.problems[0] ?? ''));
+  const benchMixed = judgeC8({ episodes: mixed, decisions, fromDecisionId: 100, toDecisionId: 102, windowClosed: false, claimsOfficial: false, official: false });
+  ok('and the bench publishes the readable one while naming the other', benchMixed.status === 'pass' && benchMixed.readable === 1 && benchMixed.byReading.illisible === 1);
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────────

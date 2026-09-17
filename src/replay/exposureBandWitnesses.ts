@@ -13,7 +13,9 @@ import { clampAllocation } from '../risk/clamp.js';
 import { resolvePilotWindow, type PilotWindowResolution } from '../exposure/pilot.js';
 import {
   attributeLegs,
+  bandJournalStart,
   bandSettledCutoff,
+  gateCoverageComplete,
   judgeW4,
   judgeW5,
   modelIntentionFor,
@@ -618,6 +620,8 @@ type CycleGap =
   | 'no_target'
   | 'no_prices'
   | 'post_gate_only'
+  /** The gate journal covers only some of the universe: not a smaller map, an unreadable cycle. */
+  | 'gates_incomplete'
   /** In the official window B̂'s input is the journaled clamp, and a cycle without it is not reconstructed. */
   | 'no_corrections_journal';
 
@@ -995,7 +999,9 @@ async function main(): Promise<void> {
   // Walked as a sequence, so a MISSING observation row stops the point on the cycle before it
   // — a scan over the rows present could not see the absence (fifth review round).
   const allDecisionSummaries = await loadDecisionSummaries(supabase, gateCutoffId);
-  const firstJournaledId = bandMarkers.size === 0 ? null : Math.min(...bandMarkers.keys());
+  // The start is the UNION of the two band layers: a first observation that failed to write
+  // while its corrections landed must be a hole in the sequence, not a cycle before it.
+  const firstJournaledId = bandJournalStart(bandMarkers.keys(), bandRowsByDecision.keys());
   const expectedBandCycles =
     firstJournaledId == null ? [] : allDecisionSummaries.map((d) => d.id).filter((id) => id >= firstJournaledId);
   const bandCutoffId = bandSettledCutoff(
@@ -1123,6 +1129,13 @@ async function main(): Promise<void> {
     const gates = gatesByDecision.get(decision.id);
     if (gates == null || gates.size === 0) {
       fail('no_gates');
+      continue;
+    }
+    // COMPLETE OR NOTHING. The corrector fails closed on a line the layer never judged, so a
+    // partial map would reconstruct a cycle with a frozen line the real cycle did not have —
+    // an invented fact. The cycle is a named gap instead (sixth review round).
+    if (!gateCoverageComplete(gates, universe)) {
+      fail('gates_incomplete');
       continue;
     }
     const applied = allocationOf(decision.applied_allocation);
@@ -1439,13 +1452,14 @@ async function main(): Promise<void> {
   const refusedIntents = await loadRefusedIntents(supabase, plannedCycleIds);
   const divergenceOf = new Map(decisions.map((d) => [d.id, typeof d.applied_divergence_cause === 'string' ? d.applied_divergence_cause : null]));
   // THE CYCLE'S OWN FACTS, from its observation row: a correction the pilot held, or computed
-  // in observation mode, never reached the orders — whatever the bot booked on that line.
+  // in observation mode, never reached the orders — whatever the bot booked on that line. With
+  // no observation row the fact is NULL — unreadable — never "not allowed" by default.
   const cycleFacts = (id: number) => {
     const marker = bandMarkers.get(id);
     return {
       gateRefusal: divergenceOf.get(id) ?? null,
       pilotHold: marker?.pilotHold ?? null,
-      correctionAllowed: marker?.correctionAllowed ?? false,
+      correctionAllowed: marker == null ? null : marker.correctionAllowed,
     };
   };
   const real = realBandLegs(
@@ -1481,6 +1495,13 @@ async function main(): Promise<void> {
   );
   for (const leg of real.executed) console.log(`    ${legLine(leg)}`);
   for (const leg of real.plannedNotExecuted) console.log(`    ${legLine(leg)}`);
+  if (real.unreadable.length > 0) {
+    console.log(
+      `  ${real.unreadable.length} jambe(s) de bande ILLISIBLE(S) — observation de bande absente sur leur cycle : ` +
+        real.unreadable.map((l) => `#${l.decisionId} ${l.asset}`).join(', ') +
+        (pilotWindow.official ? ' — REFUS : la fenêtre officielle ne peut pas les interpréter' : ' — nommées, ni exécutées ni non passées'),
+    );
+  }
   if (real.wanted.length === 0) console.log('    aucune jambe de bande dans le journal sur cette fenêtre');
 
   // ── W4 — no leg the band creates touches a frozen line, and there was something to test ──
@@ -1560,16 +1581,18 @@ async function main(): Promise<void> {
   // ── W6 — C8 on the real executed episodes, descriptive until the closure ──────────
   {
     const gateOf = (id: number, asset: string): string | null => gatesByDecision.get(id)?.get(asset) ?? null;
-    const built = buildEpisodes({
+    const episodes = buildEpisodes({
       lines: journalInScope,
       decisions: decisionSummaries,
       fromDecisionId: scopeFromId,
       toDecisionId: scopeToId,
       gateOf,
+      // The reaction cycle's gate journal must be COMPLETE under `enforce`, or the episode is
+      // illisible: its writer is best-effort, and an absent verdict is not a free reaction.
+      gatesComplete: (id) => gateCoverageComplete(gatesByDecision.get(id), universe),
       transitionMode: chainTransitionMode,
       correctionAllowed: (id) => cycleFacts(id).correctionAllowed,
     });
-    const episodes = built.episodes;
     // FINALITY FOLLOWS THE INSTANT THE WINDOW WAS RESOLVED ON, not the pilot row. A closed
     // pilot replayed with `--at=alerte_40` is a snapshot cut BEFORE the closure, and its C8 is
     // as descriptive as an open window's; only the `cloture` instant carries the official
@@ -1583,9 +1606,8 @@ async function main(): Promise<void> {
       toDecisionId: scopeToId,
       windowClosed: closedAtSelectedInstant,
       claimsOfficial,
-      // A line whose `correction_moves_holding` could not be read is a REFUSAL of the official
+      // An `illisible` episode — a best-effort layer absent — is a REFUSAL of the official
       // reading, never a silent exclusion; on the bench it is named below and left out.
-      unreadable: built.unreadable,
       official: pilotWindow.official,
     });
     const episodeLine = (e: (typeof episodes)[number]): string =>
@@ -1609,11 +1631,13 @@ async function main(): Promise<void> {
       `${verdict.population} épisode(s) exécuté(s) dans la fenêtre · ${verdict.readable} lisible(s) · ` +
         Object.entries(verdict.byReading).filter(([, n]) => n > 0).map(([k, n]) => `${k} ${n}`).join(' · '),
       'Un épisode exige `correction_moves_holding = true` : la bande a changé la position exécutable,',
-      'pas seulement la cible. Une valeur fausse exclut la ligne ; une valeur illisible est refusée.',
-      built.unreadable.length === 0
+      'pas seulement la cible. Une valeur fausse exclut la ligne. Une couche best-effort absente —',
+      'observation de bande du cycle, correction_moves_holding, verdicts de porte du cycle de réaction',
+      'sous enforce — rend l’épisode ILLISIBLE : nommé ici, et refusé en fenêtre officielle.',
+      verdict.byReading.illisible === 0
         ? ''
-        : `  ${built.unreadable.length} ligne(s) de bande à correction_moves_holding illisible : ${built.unreadable.map((u) => `#${u.decisionId} ${u.asset}`).join(', ')}` +
-          (pilotWindow.official ? ' — REFUS en fenêtre officielle' : ' — écartées sur le banc, et nommées'),
+        : `  ${verdict.byReading.illisible} épisode(s) illisible(s)` +
+          (pilotWindow.official ? ' — REFUS en fenêtre officielle' : ' — écartés sur le banc, et nommés'),
       ...episodes.map((e) => `  ${episodeLine(e)}`),
       verdict.population === 0 ? '  aucun épisode exécuté : C8 n’est pas mesurable sur cette fenêtre.' : '',
       '',
@@ -1631,7 +1655,7 @@ async function main(): Promise<void> {
       'il ne prouve pas une adoption consciente de la bande d’exposition.',
       ...verdict.problems.map((problem) => `  PROBLÈME : ${problem}`),
     ].filter((line) => line !== ''));
-    c8Artefact = { episodes, unreadable: built.unreadable, judgement: verdict, official: verdict.official, window_closed: windowClosed, resolved_instant: pilotWindow.official ? pilotWindow.instant : null };
+    c8Artefact = { episodes, judgement: verdict, official: verdict.official, window_closed: windowClosed, resolved_instant: pilotWindow.official ? pilotWindow.instant : null };
   }
 
   // ── The artefact ─────────────────────────────────────────────────────────────────
@@ -1667,6 +1691,7 @@ async function main(): Promise<void> {
     real_journal: {
       scope: { from_id: scopeFromId, to_id: scopeToId },
       wanted_band_legs: real.wanted.length,
+      unreadable: real.unreadable,
       suppressed_by_corrector: real.suppressedByCorrector,
       planned_band_legs: real.planned,
       executed_band_legs: real.executed,

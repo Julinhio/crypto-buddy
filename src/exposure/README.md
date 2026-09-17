@@ -495,7 +495,33 @@ rapport le dit comme une **déduction**, pas comme un fait.
 l'observation de bande, puis les lignes de corrections : le point prouvé par les portes ne
 prouve pas le journal des corrections. Le rejeu prend le plus petit des deux — portes
 complètes, clôture de bande complète (ligne d'observation, et ses lignes de corrections quand
-elle dit qu'une correction a été calculée) — et refuse sans clôture de bande complète.
+elle dit qu'une correction a été calculée) — et refuse sans clôture de bande complète. Le point
+de la bande est parcouru sur la **séquence des cycles attendus** (toutes les décisions depuis le
+premier cycle couvert par l'une ou l'autre des deux couches) : dès qu'un cycle attendu n'a
+aucune observation, ou des corrections incomplètes, le point s'arrête au cycle précédent et
+une clôture complète ultérieure ne franchit jamais le trou.
+
+### Les couches best-effort, et ce qu'une absence devient
+
+Une mesure officielle ne peut utiliser un cycle, une jambe ou une réaction que si toutes les
+couches nécessaires à son interprétation sont prouvées présentes et complètes. **Une absence
+n'est jamais une valeur** — ni `false`, ni « libre », ni « non appliqué », ni « aucune
+correction ». Inventaire des couches que B̂, C7, C8 et W0 à W6 consomment :
+
+| Couche | Écrite | Consommée par | Complète quand | Trou au début / au milieu | Trou sur le cycle lu |
+|---|---|---|---|---|---|
+| `decisions` (statut, proposition, `applied`, `regime`, `market_context`) | ancre du cycle, pas best-effort | tout | la ligne existe | sans objet | sans objet |
+| `executions` (registre souverain) | pas best-effort : aucun ordre sans booking durable | livre post-cycle (E, W2), W0 | par construction | sans objet | sans objet |
+| `executions` (intentions refusées) | best-effort | cause d'une jambe non passée | — | la cause est **déduite** et dite telle, jamais affirmée | idem |
+| `transition_observations` (verdicts de porte) | best-effort | point d'arrêt des portes, classification, B̂ (gels, stops), C8 (cycle de réaction sous `enforce`) | un verdict par actif de l'univers | cycle = **trou nommé** (`no_gates`, `gates_incomplete`), la chaîne est coupée — jamais reconstruit avec une ligne gelée que le cycle réel n'avait pas | réaction **illisible** sous `enforce` ; sous `observe` la porte n'agit pas, la réaction reste libre |
+| `exposure_band_observations` | best-effort | point d'arrêt de la bande, `mode` et `pilot_hold` (correction autorisée ?), C8, faits réels | la ligne existe | le point s'arrête **avant** le trou | épisode **illisible** (« correction autorisée ? » inconnu), jamais « non appliqué » |
+| `exposure_band_corrections` | best-effort | entrée de B̂, C7, faits réels, C8 (`correction_moves_holding`) | une ligne par actif quand l'observation dit qu'une correction a été calculée | le point s'arrête avant le trou ; en fenêtre officielle un cycle sans journal est un trou nommé, jamais un recalcul | `correction_moves_holding` illisible → épisode **illisible** |
+| `exposure_pilot` | lecture obligatoire du chemin de trading | fenêtre officielle, mode figé | identité résolue, mode figé présent | pas de fenêtre officielle | refus |
+
+Un épisode `illisible` porte la couche absente en clair. **En fenêtre officielle, un seul
+épisode illisible refuse tout le C8** — un agrégat qui l'omettrait publierait un chiffre sur un
+journal qu'il ne sait pas interpréter. Sur le banc, il est nommé et laissé hors du compte
+lisible. Preuve 15 de `src/test/exposureWitness.ts` parcourt chaque couche aux trois endroits.
 
 Le C8 n'est officiel que si la fenêtre a été **résolue sur l'instant `cloture`** : un pilote
 clos rejoué à `--at=alerte_40` est une coupe antérieure à la clôture, et ses lectures restent

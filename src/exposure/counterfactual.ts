@@ -172,8 +172,10 @@ export interface CycleExecutionFacts {
    * Was the correction allowed to reach the orders — `mode = application` and no hold? When it
    * was not, a `booked_side` on a band-origin line is the uncorrected MODEL's own booking, and
    * the leg counts as planned-not-executed, never as executed by the band (third review round).
+   * NULL when the cycle's band observation is absent: the fact is unreadable, and the leg is
+   * reported as such — never as "not allowed" by default (sixth review round).
    */
-  correctionAllowed: boolean;
+  correctionAllowed: boolean | null;
 }
 
 export function realBandLegs(
@@ -187,6 +189,12 @@ export function realBandLegs(
 ): {
   /** Every leg the band WANTED — the line moved — whether it was planned, suppressed or booked. */
   wanted: RealBandLeg[];
+  /**
+   * Legs whose execution status cannot be read: the cycle's band observation is absent, so
+   * whether the correction was allowed to act — and therefore whose booking it is — is unknown.
+   * Named, and never counted as executed or as not executed.
+   */
+  unreadable: RealBandLeg[];
   /** The journal's own "planned": a `planned_side` — the corrector's floor let the leg through. */
   planned: RealBandLeg[];
   /** Wanted, and deleted by the corrector's own floor before any plan existed. */
@@ -205,10 +213,12 @@ export function realBandLegs(
     if (line.plannedSide == null && line.bookedSide == null && !suppressed) continue;
     const facts = cycleFacts(line.decisionId);
     // EXECUTED BY THE BAND only when the correction was allowed to act: on a held cycle the
-    // booking, if any, is the model's own.
-    const executedByBand = line.bookedSide != null && facts.correctionAllowed;
+    // booking, if any, is the model's own. When that fact is UNREADABLE the leg is neither.
+    const executedByBand = line.bookedSide != null && facts.correctionAllowed === true;
     let notExecutedBecause: string | null = null;
-    if (!executedByBand) {
+    if (facts.correctionAllowed == null && !suppressed) {
+      notExecutedBecause = 'observation de bande absente sur ce cycle — impossible de dire si la correction a agi ni à qui est le booking';
+    } else if (!executedByBand) {
       const refused = refusedIntentReason(line.decisionId, line.asset);
       notExecutedBecause =
         line.suppressedReason != null
@@ -236,14 +246,52 @@ export function realBandLegs(
   }
   const sorted = wanted.sort((a, b) => a.decisionId - b.decisionId || (a.asset < b.asset ? -1 : 1));
   const suppressedByCorrector = sorted.filter((leg) => leg.notExecutedBecause?.startsWith('supprimée par le correcteur') ?? false);
-  const planned = sorted.filter((leg) => !suppressedByCorrector.includes(leg));
+  const unreadable = sorted.filter((leg) => leg.notExecutedBecause?.startsWith('observation de bande absente') ?? false);
+  const planned = sorted.filter((leg) => !suppressedByCorrector.includes(leg) && !unreadable.includes(leg));
   return {
     wanted: sorted,
+    unreadable,
     planned,
     suppressedByCorrector,
     executed: planned.filter((leg) => leg.bookedSide != null),
     plannedNotExecuted: planned.filter((leg) => leg.bookedSide == null),
   };
+}
+
+// ── COVERAGE OF THE BEST-EFFORT LAYERS ────────────────────────────────────────────────
+//
+// Every layer the replay interprets is written best-effort by production, and an absence is
+// not a fact: it must become a named gap, an `illisible` reading or a refusal — never a value.
+// The helpers below say, for each layer, what "complete" means.
+
+/**
+ * The gate journal of a cycle is complete when EVERY asset of the universe has a verdict. A
+ * partial map is not a smaller map: the corrector fails closed on an unjudged line, so a
+ * cycle reconstructed on a partial map would freeze a line the real cycle did not.
+ */
+export function gateCoverageComplete(
+  gates: ReadonlyMap<string, unknown> | undefined | null,
+  universe: readonly string[],
+): boolean {
+  if (gates == null) return false;
+  return universe.every((asset) => gates.has(asset));
+}
+
+/**
+ * WHERE THE BAND JOURNAL BEGINS — the first cycle either of its two layers ever covered. Taken
+ * from the observations alone, a first observation that failed to write while its corrections
+ * landed would push the start past that cycle and drop it from the expected sequence, letting
+ * the settled point advance over a hole (sixth review round). The union sees it.
+ */
+export function bandJournalStart(
+  observationIds: Iterable<number>,
+  correctionIds: Iterable<number>,
+): number | null {
+  let start: number | null = null;
+  for (const id of [...observationIds, ...correctionIds]) {
+    if (start == null || id < start) start = id;
+  }
+  return start;
 }
 
 // ── THE SETTLED POINT OF THE BAND LAYER ───────────────────────────────────────────────

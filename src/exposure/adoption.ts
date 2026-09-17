@@ -98,7 +98,14 @@ export type EpisodeReading =
   /** A later event on that line makes the reaction unattributable to this episode. */
   | 'non_attribuable'
   /** No decided cycle followed inside the window, or the model's own weight is unknown. */
-  | 'non_mesurable';
+  | 'non_mesurable'
+  /**
+   * A BEST-EFFORT LAYER the reading needs is absent or incomplete — the band observation of
+   * the episode's cycle, its `correction_moves_holding`, the gate verdicts of the reaction
+   * cycle under `enforce`. Never folded into a business value: the absence is named, and an
+   * official C8 REFUSES on it rather than omitting the episode (sixth review round).
+   */
+  | 'illisible';
 
 export interface AdoptionEpisode {
   decisionId: number;
@@ -176,41 +183,59 @@ export interface BuildEpisodesInput {
    * The journal computes and records the correction on every cycle, held or not, and
    * `booked_side` records what the bot REALLY booked on the asset. On a held cycle a booking
    * on a band-origin line is the uncorrected model's own trade: not an episode (third review
-   * round).
+   * round). NULL when the cycle's band observation is absent — the fact is unreadable, and the
+   * line becomes `illisible`, never "not allowed" by default (sixth review round).
    */
-  correctionAllowed: (decisionId: number) => boolean;
-}
-
-export interface BuiltEpisodes {
-  episodes: AdoptionEpisode[];
+  correctionAllowed: (decisionId: number) => boolean | null;
   /**
-   * Band lines that would have been episodes but whose `correction_moves_holding` could not be
-   * read. Never excluded in silence: the caller refuses an official result on them.
+   * Does the cycle carry a gate verdict for EVERY asset of the universe? The transition writer
+   * is best-effort; under `enforce` a reaction cycle without complete coverage cannot be read
+   * as a free reaction, and the episode is `illisible` (sixth review round).
    */
-  unreadable: Array<{ decisionId: number; asset: string }>;
+  gatesComplete: (decisionId: number) => boolean;
 }
 
 /**
- * THE EPISODES, built from the journal — executed band legs only, each with its reaction.
+ * THE EPISODES, built from the journal — executed band legs only, each with its reaction. A
+ * line whose interpretation needs a layer that is absent is returned as `illisible` with the
+ * layer named, never dropped.
  */
-export function buildEpisodes(input: BuildEpisodesInput): BuiltEpisodes {
+export function buildEpisodes(input: BuildEpisodesInput): AdoptionEpisode[] {
   const decisions = [...input.decisions].sort((a, b) => a.id - b.id);
-  const unreadable: Array<{ decisionId: number; asset: string }> = [];
 
   const episodes: AdoptionEpisode[] = [];
   for (const line of input.lines) {
     if (line.origin === 'modele' || line.bookedSide == null) continue;
     if (line.decisionId < input.fromDecisionId || line.decisionId > input.toDecisionId) continue;
     if (line.correctionPoints === 0) continue;
-    if (!input.correctionAllowed(line.decisionId)) continue;
-    // THE HOLDING MUST HAVE MOVED BECAUSE OF THE BAND. False: the booking was the model's own
-    // plan, no episode. Null: unreadable — reported, never dropped in silence.
-    if (line.correctionMovesHolding == null) {
-      unreadable.push({ decisionId: line.decisionId, asset: line.asset });
+    const direction: EpisodeDirection = line.correctionPoints > 0 ? 'hausse' : 'baisse';
+    const allowed = input.correctionAllowed(line.decisionId);
+    // A LAYER THE EPISODE NEEDS IS ABSENT: the line is returned as illisible, with the layer
+    // named. False is a fact (the booking was the model's), and excludes; null is not a fact.
+    let unreadableBecause: string | null = null;
+    if (allowed == null) unreadableBecause = 'observation de bande absente sur le cycle de l’épisode — mode et pilot_hold illisibles';
+    else if (!allowed) continue;
+    else if (line.correctionMovesHolding == null) unreadableBecause = 'correction_moves_holding illisible sur la ligne';
+    else if (line.correctionMovesHolding === false) continue;
+    if (unreadableBecause != null) {
+      episodes.push({
+        decisionId: line.decisionId,
+        asset: line.asset,
+        origin: line.origin,
+        direction,
+        modelWeightPercent: line.rawWeightPercent,
+        clampedWeightPercent: line.clampedWeightPercent,
+        imposedWeightPercent: line.correctedWeightPercent,
+        realisedWeightPercent: line.postCycleWeightPercent,
+        bookedSide: line.bookedSide,
+        bookedNotionalQuote: line.bookedNotionalQuote,
+        reaction: null,
+        skippedCycles: [],
+        reading: 'illisible',
+        because: unreadableBecause,
+      });
       continue;
     }
-    if (line.correctionMovesHolding === false) continue;
-    const direction: EpisodeDirection = line.correctionPoints > 0 ? 'hausse' : 'baisse';
 
     // The reaction: the first DECIDED cycle after the episode, inside the window. Everything
     // non-decided in between is named and not read.
@@ -243,7 +268,13 @@ export function buildEpisodes(input: BuildEpisodesInput): BuiltEpisodes {
         reactionGate === 'stop_exit' || reactionGate === 'risk_off_reduction'
           ? { id: reactionDecision.id, gate: reactionGate }
           : null;
-      if (intervening != null) {
+      // UNDER `enforce` THE REACTION CYCLE'S GATE JOURNAL MUST BE COMPLETE. Its writer is
+      // best-effort; a verdict that never landed does not mean the gate did not act, and a
+      // reaction read as free on that basis would be an invented fact. Named, not defaulted.
+      if (input.transitionMode === 'enforce' && !input.gatesComplete(reactionDecision.id)) {
+        reading = 'illisible';
+        because = `verdicts de porte incomplets au cycle de réaction ${reactionDecision.id} sous enforce — la réaction ne peut pas être lue comme libre`;
+      } else if (intervening != null) {
         reading = 'non_attribuable';
         because = `la porte a pris la ligne ${line.asset} (${intervening.gate}) au cycle ${intervening.id}`;
       } else {
@@ -279,10 +310,7 @@ export function buildEpisodes(input: BuildEpisodesInput): BuiltEpisodes {
       because,
     });
   }
-  return {
-    episodes: episodes.sort((a, b) => a.decisionId - b.decisionId || (a.asset < b.asset ? -1 : 1)),
-    unreadable,
-  };
+  return episodes.sort((a, b) => a.decisionId - b.decisionId || (a.asset < b.asset ? -1 : 1));
 }
 
 // ── THE JUDGE — W6 ────────────────────────────────────────────────────────────────────
@@ -317,16 +345,19 @@ export function judgeC8(input: {
   windowClosed: boolean;
   /** What the report is about to publish. The judge refuses an official claim on an open window. */
   claimsOfficial: boolean;
-  /** Band lines whose `correction_moves_holding` could not be read — see `BuiltEpisodes`. */
-  unreadable?: ReadonlyArray<{ decisionId: number; asset: string }>;
-  /** In an official window an unreadable line is a REFUSAL of the whole reading. */
+  /**
+   * In an official window an `illisible` episode is a REFUSAL of the whole reading: an
+   * official aggregate that quietly omitted it would be publishing a number on a journal it
+   * cannot interpret. On the bench the episode is named and left out.
+   */
   official?: boolean;
 }): C8Judgement {
   const problems: string[] = [];
-  if (input.official && (input.unreadable?.length ?? 0) > 0) {
+  const illisible = input.episodes.filter((e) => e.reading === 'illisible');
+  if (input.official && illisible.length > 0) {
     problems.push(
-      `REFUS : correction_moves_holding illisible en fenêtre officielle sur ${input.unreadable!.length} ligne(s) — ` +
-        input.unreadable!.map((u) => `#${u.decisionId} ${u.asset}`).join(', ') +
+      `REFUS : ${illisible.length} épisode(s) illisible(s) en fenêtre officielle — ` +
+        illisible.map((e) => `#${e.decisionId} ${e.asset} (${e.because ?? 'couche absente'})`).join(' · ') +
         ' ; aucune lecture C8 ne peut être publiée sur ce journal',
     );
   }
@@ -337,6 +368,7 @@ export function judgeC8(input: {
     lutte: 0,
     non_attribuable: 0,
     non_mesurable: 0,
+    illisible: 0,
   };
   const decided = [...input.decisions].filter((d) => d.status === 'decided').sort((a, b) => a.id - b.id);
 
@@ -355,10 +387,13 @@ export function judgeC8(input: {
           `le premier cycle décidé suivant est ${firstDecidedAfter?.id ?? 'absent'}`,
       );
     }
-    if (episode.reaction == null && episode.reading !== 'non_mesurable') {
+    if (episode.reaction == null && episode.reading !== 'non_mesurable' && episode.reading !== 'illisible') {
       problems.push(`épisode ${episode.decisionId} ${episode.asset} : lecture ${episode.reading} sans cycle de réaction`);
     }
-    if (episode.reaction != null && episode.reading !== 'non_attribuable') {
+    if (episode.reading === 'illisible' && episode.because == null) {
+      problems.push(`épisode ${episode.decisionId} ${episode.asset} : illisible sans couche nommée`);
+    }
+    if (episode.reaction != null && episode.reading !== 'non_attribuable' && episode.reading !== 'illisible') {
       const recomputed = readEpisodeReaction({
         direction: episode.direction,
         modelWeightPercent: episode.modelWeightPercent,
@@ -376,7 +411,7 @@ export function judgeC8(input: {
     problems.push('un verdict officiel est publié alors que la fenêtre de mesure est ouverte');
   }
 
-  const readable = input.episodes.filter((e) => e.reading !== 'non_mesurable' && e.reading !== 'non_attribuable').length;
+  const readable = input.episodes.filter((e) => e.reading !== 'non_mesurable' && e.reading !== 'non_attribuable' && e.reading !== 'illisible').length;
   const status: CriterionStatus = problems.length > 0 ? 'fail' : readable === 0 ? 'non_mesurable' : 'pass';
   return {
     status,
