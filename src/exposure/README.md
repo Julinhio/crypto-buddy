@@ -593,6 +593,14 @@ atteint un livre souverain, **avant l'appel au modèle** — donc avant de savoi
 finira. Rien dans le jugement ne dépend de la réponse du modèle, c'est ce qui permet de le
 déplacer sans changer un seul verdict sur un cycle décidé.
 
+**Le jugement est pur ; rien n'est écrit avant le modèle.** Les deux lectures du pilote
+(identité, dernier cycle décidé) voyagent dans le lot de lectures que le cycle attend déjà
+(état de position, référence du garde) : aucune latence ajoutée, aucun déplacement de la porte
+de budget de la relance du garde — la règle que `validateOutageBudget` énonce pour la trace
+d'incident vaut pour le pilote. L'écriture et l'alerte qu'elle annonce se posent à la
+**clôture** (`settlePilot`) : après le garde sur le chemin décidé, exactement là où le bloc
+vivait avant ce correctif, et en queue de chaque chemin en échec, une fois la ligne insérée.
+
 Une valorisation est **admissible** quand :
 
 * elle vient du ledger souverain — le livre fabriqué par un **journal** illisible n'atteint jamais
@@ -608,7 +616,7 @@ Sur une valorisation admissible, quel que soit le sort du cycle ensuite :
 
 | Ce qui se passe | Où |
 |---|---|
-| le plus-haut monte, l'alerte 40 % se décide et se persiste, l'arrêt 50 % se décide et se persiste | **avant l'appel au modèle**, écriture préalable obligatoire comme avant |
+| le plus-haut monte, l'alerte 40 % se décide et se persiste, l'arrêt 50 % se décide et se persiste | **jugé avant le modèle**, écrit à la clôture — avant tout ordre sur le chemin décidé, en queue d'un chemin en échec |
 | aucun ordre stratégique ni ordre de bande | un cycle en échec retourne avant l'exécuteur, qui n'est atteint que depuis un seul endroit, après l'insertion de la ligne `decided` |
 | le journal dit ce qui a été jugé | `pilot_hold = cycle_non_decide`, avec le plus-haut et le drawdown que le coupe-circuit voyait |
 

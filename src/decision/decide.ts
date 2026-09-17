@@ -317,9 +317,25 @@ export async function decide(): Promise<DecideResult> {
   // wake-up — the bot runs one process per cycle under Cron Schedule, so there is no
   // in-memory "last target" to carry, and a module-level cache would read null forever
   // while looking like it worked.
-  const [stateRead, referenceRead] = await Promise.all([
+  //
+  // THE PILOT'S TWO READS RIDE IN THE SAME BATCH. They are inputs to this cycle exactly as
+  // the two above are, they depend on nothing computed since, and running them here — in
+  // parallel with reads the cycle already waits on — is what keeps them off the coherence
+  // guard's retry allowance: `remaining` is measured from `cycleStart`, and a bounded read
+  // placed sequentially before the model would shift that gate's boundary by its deadline,
+  // costing a cycle the retry it used to get (the third review round, and the same rule
+  // `validateOutageBudget` states for the outage trace). Both are gated on `application`,
+  // so observation adds no query to the cycle. Their judgement is made further down, once
+  // the fabricated-book refusal has been passed.
+  const [stateRead, referenceRead, pilotRead, latestDecidedDecisionId] = await Promise.all([
     loadPositionStates(supabase),
     loadReferenceAllocations(supabase, reserveStable),
+    // The identity, or null outside `application` (never read there).
+    EXPOSURE_BAND_MODE === 'application' ? readPilotIdentity(supabase) : Promise.resolve(null),
+    // THE NEWEST DECIDED CYCLE THE JOURNAL HOLDS, read before this one is written. Compared
+    // against the pilot's own mark, it is what makes an interruption PROVABLE: a decided cycle
+    // more recent than the one the pilot saw can only exist if the pilot did not run on it.
+    EXPOSURE_BAND_MODE === 'application' ? readLatestDecidedDecisionId(supabase) : Promise.resolve(null),
   ]);
 
   /**
@@ -911,14 +927,12 @@ export async function decide(): Promise<DecideResult> {
    * answer, which is exactly why it can move above the call without changing a single verdict
    * on a decided cycle.
    *
-   * What lands here, and what waits:
-   *
-   *   * a new high-water mark, the 40% latch, the 50% stop, an interruption, a diverged
-   *     contract — durable facts about the book or the journal, written NOW, so a cycle that
-   *     fails a moment later has still recorded them;
-   *   * the ACTIVATION — deferred to the decided path. It spends the official instant and
-   *     promises that the correction applies from that very cycle, and a cycle with no target
-   *     cannot keep that promise. (Unreachable in this deployment: the identity exists.)
+   * Only the JUDGEMENT is made here, and it is pure. Nothing is written before the model: a
+   * new high-water mark, the 40% latch, the 50% stop, an interruption, a diverged contract are
+   * durable facts a failing model cannot un-happen, and they land in `settlePilot` — after the
+   * guard on the decided path, at the tail of every failure path — so that no bounded I/O of
+   * the pilot's sits inside the prefix the guard's retry gate measures. The activation lands on
+   * the decided path only. (Unreachable in this deployment: the identity exists.)
    *
    * What does NOT change: the heartbeat is still written only on `decided` cycles, and the
    * interruption is still judged only against `decided` cycles. Those two define "a cycle the
@@ -941,15 +955,9 @@ export async function decide(): Promise<DecideResult> {
    */
   const pilotContract = pilotContractOf(config, tradableBaseAssets(config), reserveStable, TRANSITION_MODE);
   const pilotContractSha256 = contractDigest(pilotContract);
-  // The read only happens in `application`. In every other mode `judgePilot` answers
-  // `mode_inactif` without looking at anything, so observation adds no query to the cycle.
-  const pilotRead =
-    EXPOSURE_BAND_MODE === 'application' ? await readPilotIdentity(supabase) : null;
-  // THE NEWEST DECIDED CYCLE THE JOURNAL HOLDS, read before this one is written. Compared
-  // against the pilot's own mark, it is what makes an interruption PROVABLE: a decided cycle
-  // more recent than the one the pilot saw can only exist if the pilot did not run on it.
-  const latestDecidedDecisionId =
-    EXPOSURE_BAND_MODE === 'application' ? await readLatestDecidedDecisionId(supabase) : null;
+  // The two reads were made up front, in the same batch as the lifecycle's — see there. In
+  // every mode but `application` they are null and `judgePilot` answers `mode_inactif`
+  // without looking at anything.
   const pilotJudgement = judgePilot({
     mode: EXPOSURE_BAND_MODE,
     identity: pilotRead != null && pilotRead.ok ? pilotRead.identity : null,
@@ -980,22 +988,40 @@ export async function decide(): Promise<DecideResult> {
   let pilotHold: PilotHold | null = pilotJudgement.hold;
   let mayCorrect = pilotJudgement.mayCorrect;
 
+  const activationPending = pilotJudgement.write?.kind === 'activation';
+
   /**
-   * THE MANDATORY WRITE, before anything is built on it. A new high-water mark, the 40% latch,
-   * the 50% stop, an interruption, a diverged contract: each must be durable before the
-   * correction is allowed to act on it — and each is a fact about the book or the journal that
-   * a failing model cannot un-happen, so it lands now, on every cycle. A write that does not
-   * land disarms the correction for this cycle rather than letting it trade on a drawdown
-   * nobody recorded.
+   * THE SETTLEMENT — the mandatory write, then the alert it announces. One closure, called
+   * from exactly two kinds of place, and NEVER before the model:
    *
-   * The ACTIVATION is the exception and waits for the decided path — see `landPilotWrite`.
+   *   * on the decided path, after the coherence guard and right before the correction —
+   *     where the whole block used to live. The write must be durable before the correction
+   *     is allowed to act on it, and a write that does not land disarms the correction for
+   *     this cycle rather than letting it trade on a drawdown nobody recorded;
+   *   * on every failure path, at the tail, once the cycle's row exists — a peak, a 40% latch,
+   *     a 50% stop, an interruption or a diverged contract are facts a failing model cannot
+   *     un-happen, so they land there too. Nothing is built on them on those paths.
+   *
+   * WHY NOT RIGHT AFTER THE JUDGEMENT. The judgement is made before the model is called, and
+   * a bounded write (5s) plus a Telegram send (5s, on threshold cycles) placed there would sit
+   * inside the prefix the guard's retry gate measures — shifting that gate's boundary by up to
+   * 10s and costing a cycle a retry it used to get. That is the boundary-shift the outage
+   * trace was moved off the pre-model path to avoid, and the third review round caught this
+   * block reintroducing it. Both call sites sit past that gate; the decided one is exactly
+   * where the write was before this fix, so its timing is unchanged.
+   *
+   * The ACTIVATION lands only on the decided path: it spends the official instant and
+   * promises that the correction applies from that very cycle, which a cycle with no target
+   * cannot honour. (Unreachable in this deployment: the identity exists.)
    */
-  const landPilotWrite = async (): Promise<void> => {
+  const settlePilot = async (correctionReached: boolean): Promise<void> => {
     if (pilotJudgement.write == null) return;
+    if (activationPending && !correctionReached) return;
     const landed = await applyPilotWrite(supabase, pilotJudgement.write, {
-      // NULL, AND NECESSARILY SO: this write happens before the decision row exists, because
-      // that row has to carry the corrected target. The exact cycle is filled in afterwards by
-      // `resolvePilotEventCycles`, which is idempotent and repairs a previous miss.
+      // NULL, AND NECESSARILY SO on the decided path: this write happens before the decision
+      // row exists, because that row has to carry the corrected target. The exact cycle is
+      // filled in afterwards by `resolvePilotEventCycles`, which is idempotent and repairs a
+      // previous miss — and which the failure paths run right after this settlement.
       decisionId: null,
       latestDecidedDecisionId,
       equityQuote: portfolio.equity.toNumber(),
@@ -1022,30 +1048,28 @@ export async function decide(): Promise<DecideResult> {
     } else if (pilotJudgement.write.kind === 'peak') {
       console.log(`[pilot] new high-water mark — ${pilotJudgement.write.peakEquityQuote.toFixed(2)}.`);
     }
-  };
-  const activationPending = pilotJudgement.write?.kind === 'activation';
-  if (!activationPending) await landPilotWrite();
 
-  // THE ALERTS. Best-effort by construction — a Telegram outage may not disarm an experiment,
-  // and the latch is already durable, so a missed send is visible in the identity rather than
-  // silently repeated on the next cycle. Sent from here, whatever the cycle goes on to do: a
-  // 40% crossing seen on a cycle the guard then refuses is still a 40% crossing.
-  if (pilotJudgement.alert != null && pilotHold !== 'ecriture_obligatoire_impossible') {
-    // ONE FUNCTION, TOTAL OVER THE UNION. This was a chain of ternaries, and a chain of
-    // ternaries has a last branch that silently catches whatever nobody wrote a case for —
-    // `mode_interrupted` fell into it and announced a contract divergence, sending anyone reading
-    // the alert to look for a configuration change that had not happened.
-    const text = pilotAlertMessage(pilotJudgement.alert, {
-      drawdownPercent: pilotJudgement.drawdownPercent,
-      lastSeenDecisionId:
-        pilotRead != null && pilotRead.ok ? (pilotRead.identity?.lastSeenDecisionId ?? null) : null,
-      latestDecidedDecisionId,
-    });
-    const delivered = await sendTelegram(text);
-    if (pilotJudgement.alert === 'drawdown_40' && delivered) {
-      await markDrawdownAlertDelivered(supabase);
+    // THE ALERTS. Best-effort by construction — a Telegram outage may not disarm an experiment,
+    // and the latch is already durable, so a missed send is visible in the identity rather than
+    // silently repeated on the next cycle. Sent whatever the cycle went on to do: a 40% crossing
+    // seen on a cycle the guard then refused is still a 40% crossing.
+    if (pilotJudgement.alert != null && landed.ok) {
+      // ONE FUNCTION, TOTAL OVER THE UNION. This was a chain of ternaries, and a chain of
+      // ternaries has a last branch that silently catches whatever nobody wrote a case for —
+      // `mode_interrupted` fell into it and announced a contract divergence, sending anyone
+      // reading the alert to look for a configuration change that had not happened.
+      const text = pilotAlertMessage(pilotJudgement.alert, {
+        drawdownPercent: pilotJudgement.drawdownPercent,
+        lastSeenDecisionId:
+          pilotRead != null && pilotRead.ok ? (pilotRead.identity?.lastSeenDecisionId ?? null) : null,
+        latestDecidedDecisionId,
+      });
+      const delivered = await sendTelegram(text);
+      if (pilotJudgement.alert === 'drawdown_40' && delivered) {
+        await markDrawdownAlertDelivered(supabase);
+      }
     }
-  }
+  };
 
   /**
    * THE VERDICT AS THE JOURNAL WILL CARRY IT, for whichever path ends this cycle.
@@ -1100,6 +1124,9 @@ export async function decide(): Promise<DecideResult> {
     // Still NO persistLifecycle: the stored state is the very thing that could not be read.
     // The book, on the other hand, is real, so its exposure is published like any other
     // cycle's — only the fabricated book of the first half is withheld.
+    // The valuation was judged before the model; what it decided lands now, at the tail, past
+    // every budget gate — see `settlePilot`. Then the row carries the verdict.
+    await settlePilot(false);
     await observeExposureBand({
       decisionId: id,
       targetAllocation: null,
@@ -1125,6 +1152,9 @@ export async function decide(): Promise<DecideResult> {
     const { persisted, id } = await insertDecision(supabase, row);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
+    // The valuation was judged before the model; what it decided lands now, at the tail, past
+    // every budget gate — see `settlePilot`. Then the row carries the verdict.
+    await settlePilot(false);
     await observeExposureBand({
       decisionId: id,
       targetAllocation: null,
@@ -1304,6 +1334,9 @@ export async function decide(): Promise<DecideResult> {
     await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
+    // The valuation was judged before the model; what it decided lands now, at the tail, past
+    // every budget gate — see `settlePilot`. Then the row carries the verdict.
+    await settlePilot(false);
     await observeExposureBand({
       decisionId: id,
       targetAllocation: null,
@@ -1366,6 +1399,9 @@ export async function decide(): Promise<DecideResult> {
     guardEvents.push(event);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
+    // The valuation was judged before the model; what it decided lands now, at the tail, past
+    // every budget gate — see `settlePilot`. Then the row carries the verdict.
+    await settlePilot(false);
     await observeExposureBand({
       decisionId: id,
       targetAllocation: null,
@@ -1438,6 +1474,9 @@ export async function decide(): Promise<DecideResult> {
     await flushGuardEvents(id);
     await persistLifecycle(portfolio, []);
     await observeTransition(id, [], []);
+    // The valuation was judged before the model; what it decided lands now, at the tail, past
+    // every budget gate — see `settlePilot`. Then the row carries the verdict.
+    await settlePilot(false);
     await observeExposureBand({
       decisionId: id,
       targetAllocation: null,
@@ -1692,13 +1731,13 @@ export async function decide(): Promise<DecideResult> {
    * (§3.4.7), and the transition gate speaks AFTER it, on the corrected movements (§3.4.2).
    */
   /**
-   * THE ACTIVATION, IF THIS CYCLE IS THE FIRST. The judgement was made above, before the model
-   * was called; its write was held back because the activation spends the official instant and
-   * promises that the correction applies from that very cycle — and only a decided cycle can
-   * keep that promise. Landing it here, before any order, keeps the rule that no corrected
-   * order leaves on an identity nobody managed to record. Unreachable in this deployment.
+   * THE SETTLEMENT, on the decided path — the judgement was made before the model was called;
+   * its write and its alert land HERE, past the guard's retry gate and before any order, which
+   * is exactly where the whole block lived before this fix. The activation included: it spends
+   * the official instant and promises that the correction applies from this very cycle, and
+   * only a decided cycle can keep that promise. See `settlePilot`.
    */
-  if (activationPending) await landPilotWrite();
+  await settlePilot(true);
 
   /**
    * THE CORRECTED TARGET. Identical to `clamp.applied` on every cycle the pilot does not arm —

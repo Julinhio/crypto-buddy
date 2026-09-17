@@ -262,7 +262,7 @@ console.log('\nProof 6 — an unreadable identity, an unusable equity: the band 
   );
   ok(
     'the identity is only read in `application` — observation adds no query to the cycle',
-    /EXPOSURE_BAND_MODE === 'application' \? await readPilotIdentity\(supabase\) : null/.test(decide),
+    /EXPOSURE_BAND_MODE === 'application' \? readPilotIdentity\(supabase\) : Promise\.resolve\(null\)/.test(decide),
   );
   ok('the hold is journaled per cycle, not merely logged', /row\.pilot_hold = opts\.pilot\.hold;/.test(decide));
 }
@@ -408,7 +408,7 @@ console.log('\nProof 9 — a cycle the pilot did not see ends it, and nothing br
   );
   ok(
     'and the journal is read before the verdict, in application only',
-    /EXPOSURE_BAND_MODE === 'application' \? await readLatestDecidedDecisionId\(supabase\) : null/.test(decide),
+    /EXPOSURE_BAND_MODE === 'application' \? readLatestDecidedDecisionId\(supabase\) : Promise\.resolve\(null\)/.test(decide),
   );
   const persistence = readFileSync(path.join(ROOT, 'src/persistence/exposurePilot.ts'), 'utf8');
   ok(
@@ -968,10 +968,30 @@ console.log('\nProof 15 — a failed cycle with a reliable valuation still feeds
   ok('and BEFORE the model is called', judgementAt < llmCallAt);
   ok('it is made exactly once per cycle', (decide.match(/judgePilot\(\{/g) ?? []).length === 1);
   ok('the fallback-priced lines are passed from the book\'s own flag', /fallbackPricedAssets: portfolio\.positions\.filter\(\(p\) => p\.priceStale\)/.test(decide));
-  ok('every write but the activation lands before the model is called', at('if (!activationPending) await landPilotWrite();') < llmCallAt);
-  const activationLanding = at('if (activationPending) await landPilotWrite();');
-  ok('the activation waits for the decided path', activationLanding > at('const { clamp, movements: proposedMovements } = evaluated;'));
-  ok('and still lands before any order', activationLanding < at('let correctedAllocation = clamp.applied;'));
+  // THE THIRD REVIEW ROUND. Nothing of the pilot's is written before the model: the two reads
+  // ride in the lifecycle's own batch (no added latency, no shifted retry gate), and the write
+  // plus its alert land in `settlePilot` — after the guard on the decided path, exactly where
+  // the block lived before this fix, and at the tail of every failure path.
+  const batchAt = at('const [stateRead, referenceRead, pilotRead, latestDecidedDecisionId] = await Promise.all([');
+  ok('the two reads ride in the lifecycle batch, before the judgement', batchAt < judgementAt && batchAt < fabricatedBookRefusal);
+  // Between the judgement and the model call, the only pilot I/O is inside `settlePilot`'s
+  // DEFINITION, and the only calls to it sit in terminal skip branches that return before the
+  // model. Checked by position rather than by stripping text, so a stray call cannot hide.
+  const preModel = decide.slice(judgementAt, llmCallAt);
+  const settleDef = { from: preModel.indexOf('const settlePilot = async'), to: preModel.indexOf('\n  };', preModel.indexOf('const settlePilot = async')) };
+  const inside = (idx: number): boolean => idx > settleDef.from && idx < settleDef.to;
+  const positions = (needle: string): number[] => [...preModel.matchAll(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))].map((m) => m.index!);
+  ok('the write itself is issued from one place, the settlement', (decide.match(/await applyPilotWrite\(/g) ?? []).length === 1 && positions('await applyPilotWrite(').every(inside));
+  ok('every settlement before the model sits in a skip branch that returns', positions('await settlePilot(false);').length === 2 && positions('await settlePilot(false);').every((idx) => {
+    const branchEnd = preModel.indexOf('\n  }', idx);
+    return preModel.slice(idx, branchEnd).includes("return emptyResult('skipped'");
+  }));
+  ok('and the only Telegram send before the model is the settlement\'s own', positions('await sendTelegram(').length === 1 && positions('await sendTelegram(').every(inside));
+  const settlementAt = at('await settlePilot(true);');
+  ok('the decided path settles after the guard, where the block used to live', settlementAt > at('const { clamp, movements: proposedMovements } = evaluated;'));
+  ok('and before any order', settlementAt < at('let correctedAllocation = clamp.applied;'));
+  ok('the activation lands on the decided path only', /if \(activationPending && !correctionReached\) return;/.test(decide));
+  ok('every failure path settles at its tail, before its observation', (decide.match(/await settlePilot\(false\);\s*\n\s*await observeExposureBand\(\{/g) ?? []).length === 5);
   const observations = decide.match(/observeExposureBand\(\{[\s\S]*?\}\);/g) ?? [];
   ok(`every observation row carries a verdict (${observations.length} call sites)`, observations.length >= 7 && observations.every((call) => /pilot: (pilotJournal\(|\{)/.test(call)));
   ok('the failure paths journal the valuation as not judged', (decide.match(/pilot: pilotJournal\(false\)/g) ?? []).length >= 5);
