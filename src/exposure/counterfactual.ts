@@ -268,15 +268,26 @@ export function realBandLegs(
  * failed (`saveBandCorrections` swallows its error and later cycles carry on) would have left
  * that cycle INSIDE the replay window while `real_journal` and C8 silently omitted its lines
  * (fourth review round).
+ *
+ * AND IT IS WALKED ON THE CYCLES EXPECTED, not on the observations present. A scan over the
+ * observation rows alone cannot see a row that is MISSING: `saveBandObservation` is
+ * best-effort and production carries on to the corrections, so a cycle can hold its corrections
+ * rows and no observation. Such a cycle is unsettled — its facts (mode, hold) are unreadable
+ * and its executed legs would be reported as the model's — so the point stops on the cycle
+ * before it, and a complete observation later never carries it past (fifth review round).
  */
 export function bandSettledCutoff(
+  /** Every cycle the band layer is EXPECTED to have written — the decisions since the journal began. */
+  expectedCycleIds: readonly number[],
   observations: ReadonlyMap<number, { correctionComputed: boolean }>,
   correctionsRowsByDecision: ReadonlyMap<number, number>,
   universeSize: number,
 ): number | null {
   if (universeSize <= 0) return null;
   let cutoff: number | null = null;
-  for (const [id, observation] of [...observations].sort(([a], [b]) => a - b)) {
+  for (const id of [...new Set(expectedCycleIds)].sort((a, b) => a - b)) {
+    const observation = observations.get(id);
+    if (observation == null) break;
     const rows = correctionsRowsByDecision.get(id) ?? 0;
     if (observation.correctionComputed && rows < universeSize) break;
     cutoff = id;

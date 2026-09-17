@@ -936,17 +936,25 @@ console.log('\nProof 13 — the three criteria have a population, and each one c
 console.log('\nProof 13b — the corrections journal has its own settled point, and a stop only acts under enforce:');
 {
   const obs = (entries: Array<[number, boolean]>) => new Map(entries.map(([id, computed]) => [id, { correctionComputed: computed }]));
-  ok('a cycle whose correction rows are all there is settled', bandSettledCutoff(obs([[100, true]]), new Map([[100, 4]]), 4) === 100);
-  ok('a cycle still writing its corrections is NOT — the point stays on the previous cycle', bandSettledCutoff(obs([[100, true], [101, true]]), new Map([[100, 4], [101, 2]]), 4) === 100);
+  const expected = [100, 101, 102];
+  ok('a cycle whose correction rows are all there is settled', bandSettledCutoff([100], obs([[100, true]]), new Map([[100, 4]]), 4) === 100);
+  ok('a cycle still writing its corrections is NOT — the point stays on the previous cycle', bandSettledCutoff([100, 101], obs([[100, true], [101, true]]), new Map([[100, 4], [101, 2]]), 4) === 100);
   // FOURTH REVIEW ROUND: a complete cycle AFTER an incomplete one never carries the point past
   // the hole. 100 complete, 101 incomplete, 102 complete → 100.
-  ok('[100 complet, 101 incomplet, 102 complet] the point stops at 100', bandSettledCutoff(obs([[100, true], [101, true], [102, true]]), new Map([[100, 4], [101, 2], [102, 4]]), 4) === 100);
-  ok('whatever order the rows arrive in', bandSettledCutoff(obs([[102, true], [100, true], [101, true]]), new Map([[100, 4], [101, 2], [102, 4]]), 4) === 100);
-  ok('and an incomplete FIRST cycle settles nothing at all', bandSettledCutoff(obs([[100, true], [101, true]]), new Map([[100, 1], [101, 4]]), 4) === null);
-  ok('a cycle that computed no correction owes no rows', bandSettledCutoff(obs([[100, true], [101, false]]), new Map([[100, 4]]), 4) === 101);
-  ok('and with no complete cycle at all the answer is a refusal, not zero', bandSettledCutoff(obs([[100, true]]), new Map(), 4) === null && bandSettledCutoff(new Map(), new Map(), 4) === null);
+  ok('[100 complet, 101 incomplet, 102 complet] the point stops at 100', bandSettledCutoff(expected, obs([[100, true], [101, true], [102, true]]), new Map([[100, 4], [101, 2], [102, 4]]), 4) === 100);
+  ok('whatever order the rows arrive in', bandSettledCutoff([102, 100, 101], obs([[102, true], [100, true], [101, true]]), new Map([[100, 4], [101, 2], [102, 4]]), 4) === 100);
+  ok('and an incomplete FIRST cycle settles nothing at all', bandSettledCutoff([100, 101], obs([[100, true], [101, true]]), new Map([[100, 1], [101, 4]]), 4) === null);
+  ok('a cycle that computed no correction owes no rows', bandSettledCutoff([100, 101], obs([[100, true], [101, false]]), new Map([[100, 4]]), 4) === 101);
+  ok('and with no complete cycle at all the answer is a refusal, not zero', bandSettledCutoff([100], obs([[100, true]]), new Map(), 4) === null && bandSettledCutoff([], new Map(), new Map(), 4) === null);
+  // FIFTH REVIEW ROUND: the point is walked on the cycles EXPECTED, so a MISSING observation
+  // row stops it — a scan over the rows present could not see the absence.
+  ok('[obs 100 et 102 complètes, 101 absente] the point stops at 100', bandSettledCutoff(expected, obs([[100, true], [102, true]]), new Map([[100, 4], [102, 4]]), 4) === 100);
+  ok('the first expected observation missing settles nothing', bandSettledCutoff(expected, obs([[101, true], [102, true]]), new Map([[101, 4], [102, 4]]), 4) === null);
+  ok('and the answer does not depend on the order the data arrives in', bandSettledCutoff([102, 101, 100], obs([[102, true], [100, true]]), new Map([[102, 4], [100, 4]]), 4) === 100 && bandSettledCutoff([101, 102, 100], obs([[102, true], [101, true]]), new Map([[102, 4], [101, 4]]), 4) === null);
+  ok('a complete observation later never carries the point past the hole', bandSettledCutoff([100, 101, 102, 103], obs([[100, true], [102, true], [103, true]]), new Map([[100, 4], [102, 4], [103, 4]]), 4) === 100);
   const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandWitnesses.ts'), 'utf8').replace(/\r\n/g, '\n');
   ok('the replay takes the smaller of the gate point and the band point', /const cutoffId = Math\.min\(gateCutoffId, bandCutoffId\);/.test(replay));
+  ok('and walks the band point on the DECISIONS expected since the journal began, not on the rows present', /allDecisionSummaries\.map\(\(d\) => d\.id\)\.filter\(\(id\) => id >= firstJournaledId\)/.test(replay) && /bandSettledCutoff\(\s*\n\s*expectedBandCycles,/.test(replay));
   ok('and refuses when the band layer is settled nowhere', /no cycle carries a complete band closure/.test(replay));
   ok('the corrections journal is read below the final bound only', /const correctionsByDecision = new Map\(\[\.\.\.bandRowsByDecision\]\.filter\(\(\[id\]\) => id <= upperBound\)\);/.test(replay));
   ok('B̂ follows the real bot on a stop cycle under `enforce`, never under `observe`', /transitionMode === 'enforce' \|\|/.test(replay) && /transitionMode == null &&/.test(replay) && /\(cycle\.applied\[asset\] \?\? 0\) === 0 && \(cycle\.raw\?\.\[asset\] \?\? 0\) > 0/.test(replay));

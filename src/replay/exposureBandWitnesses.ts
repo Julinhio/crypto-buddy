@@ -990,7 +990,16 @@ async function main(): Promise<void> {
   // of the two proven points, and the corrections journal is read below that alone.
   const bandMarkers = await loadBandObservationMarkers(supabase, gateCutoffId);
   const bandRowsByDecision = await loadCorrectionsJournal(supabase, gateCutoffId);
+  // THE CYCLES THE BAND LAYER IS EXPECTED TO HAVE WRITTEN: every decision, whatever its
+  // status, from the first cycle the band journal ever covered up to the gate-settled point.
+  // Walked as a sequence, so a MISSING observation row stops the point on the cycle before it
+  // — a scan over the rows present could not see the absence (fifth review round).
+  const allDecisionSummaries = await loadDecisionSummaries(supabase, gateCutoffId);
+  const firstJournaledId = bandMarkers.size === 0 ? null : Math.min(...bandMarkers.keys());
+  const expectedBandCycles =
+    firstJournaledId == null ? [] : allDecisionSummaries.map((d) => d.id).filter((id) => id >= firstJournaledId);
   const bandCutoffId = bandSettledCutoff(
+    expectedBandCycles,
     bandMarkers,
     new Map([...bandRowsByDecision].map(([id, lines]) => [id, lines.length])),
     universe.length,
@@ -1038,11 +1047,12 @@ async function main(): Promise<void> {
   const upperBound =
     pilotWindow.official && pilotWindow.toDecisionId != null ? pilotWindow.toDecisionId : cutoffId;
 
-  const [decisions, ledgerByDecision, decisionSummaries] = await Promise.all([
+  const [decisions, ledgerByDecision] = await Promise.all([
     loadDecisions(supabase, upperBound),
     loadLedgerByDecision(supabase, upperBound),
-    loadDecisionSummaries(supabase, upperBound),
   ]);
+  // Already read up to the gate-settled point; bounded like everything else by the final one.
+  const decisionSummaries = allDecisionSummaries.filter((d) => d.id <= upperBound);
   // The corrections journal, bounded like everything else by the final upper bound.
   const correctionsByDecision = new Map([...bandRowsByDecision].filter(([id]) => id <= upperBound));
 
