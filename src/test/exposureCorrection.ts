@@ -616,9 +616,11 @@ console.log('\nProof 13 — the correction reaches the orders only through the t
         decide.slice(m.index!, m.index! + 20).includes('false'),
       ),
   );
+  // The read rides in the lifecycle's pre-model batch since the high-water-mark fix (so it
+  // never shifts the guard's retry gate), hence the promise form rather than a bare await.
   ok(
     'and the identity is only read in application mode',
-    /EXPOSURE_BAND_MODE === 'application' \? await readPilotIdentity\(supabase\) : null/.test(decide),
+    /EXPOSURE_BAND_MODE === 'application' \? readPilotIdentity\(supabase\) : Promise\.resolve\(null\)/.test(decide),
   );
 
   // (c) THE PRECEDENCE CONTRACT, unchanged around the new call. The guard judged the model's
