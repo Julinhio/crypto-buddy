@@ -634,7 +634,10 @@ désormais la **seule** valorisation admissible que le pilote peut manquer, et l
 demanderait un second reçu de continuité sur tous les cycles non `skipped` : un chantier séparé.
 
 Un seuil franchi sur un cycle en échec résout son pointeur (`alert_drawdown_decision_id`,
-`stopped_decision_id`) sur **la ligne de ce cycle-là**, quel que soit son statut : le résolveur
+`stopped_decision_id`) sur **la ligne de ce cycle-là**, quel que soit son statut, et **dès ce
+cycle** : la passe de résolution tourne sur chaque chemin qui a inséré une ligne après le
+jugement, pas seulement sur le chemin décidé — sinon un arrêt suivi d'une bascule du mode
+laisserait un pointeur nul pour toujours, la passe étant gardée par `application`. Le résolveur
 cherche la première ligne à cet instant ou après, sans filtre `decided` pour ces deux pointeurs.
 Ce filtre était un artefact de l'ancien emplacement du bloc — l'écriture ne pouvait tomber que
 sur un cycle décidé — et le garder aurait pointé la fenêtre officielle un cycle **au-delà** du

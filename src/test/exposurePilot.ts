@@ -681,8 +681,18 @@ console.log('\nProof 12 — an unresolved pointer refuses; it never lets the win
   const decide = readFileSync(path.join(ROOT, 'src/decision/decide.ts'), 'utf8');
   ok(
     'the pass runs on every application cycle, not only on the activation',
-    /EXPOSURE_BAND_MODE === 'application'\) \{\s*\n\s*await resolvePilotEventCycles\(supabase\);/.test(decide),
+    /EXPOSURE_BAND_MODE !== 'application'\) return;\s*\n\s*await resolvePilotEventCycles\(supabase\);/.test(decide),
   );
+  // ON EVERY PATH THAT INSERTED A ROW AFTER THE JUDGEMENT, not the decided one alone. A
+  // threshold is crossed before the model is called, so its cycle may end failed — and a
+  // pointer left null until the next decided cycle is a permanent hole if the mode is switched
+  // off in between (the pass is gated on `application`). The outage trace is the reference set
+  // of persisted terminal paths; the one path without the pass is the fabricated-book refusal,
+  // where the pilot never judged. (Second review round.)
+  const outageCalls = (decide.match(/await observeMarketDataOutage\(/g) ?? []).length;
+  const resolveCalls = (decide.match(/await resolvePilotEvents\(\);/g) ?? []).length;
+  ok(`and on every persisted path after the judgement (${resolveCalls} of ${outageCalls} terminal paths)`, outageCalls >= 7 && resolveCalls === outageCalls - 1);
+  ok('the one path without it is the fabricated-book refusal, above the judgement', decide.indexOf('await resolvePilotEvents();') > decide.indexOf('refusing to trade on a book we cannot derive'));
   ok('and the old one-shot backfill is gone', !decide.includes('backfillActivationDecision'));
 }
 

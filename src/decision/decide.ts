@@ -1066,6 +1066,26 @@ export async function decide(): Promise<DecideResult> {
     peakEquityQuote: activationPending && !correctionReached ? null : pilotJudgement.peakEquityQuote,
   });
 
+  /**
+   * THE EVENT POINTERS, RESOLVED ON EVERY PATH THAT INSERTED A ROW — not only the decided one.
+   *
+   * A threshold is judged before the model is called, so the cycle that crosses it may end
+   * `error`, `guard_failed`, `parse_failed` or `skipped`, and its row is inserted on THAT path.
+   * The pass used to run on the decided path alone, which left such a pointer null until the
+   * next decided cycle — a latency during an outage, and a permanent hole if the operator
+   * switched the mode off after the stop alert, since the pass is gated on `application`: the
+   * official window would then have refused for ever. The second review round caught it.
+   *
+   * Idempotent, bounded, best-effort, and it only touches a pointer that is still null, so
+   * running it once more per failed cycle costs one read and repairs whatever an earlier cycle
+   * left behind. Not on the fabricated-book path above: the pilot never judged there, and the
+   * journal read that failed is the same database this pass would be asking.
+   */
+  const resolvePilotEvents = async (): Promise<void> => {
+    if (EXPOSURE_BAND_MODE !== 'application') return;
+    await resolvePilotEventCycles(supabase);
+  };
+
   // Edge case 0, second half — the LIFECYCLE could not be read: the stored position state, or
   // the guard's reference target. The book is sovereign and its valuation has just been
   // judged; the cycle still refuses to trade, for the reasons given above the first half.
@@ -1089,6 +1109,8 @@ export async function decide(): Promise<DecideResult> {
       // its verdict travels with the row.
       pilot: pilotJournal(false),
     });
+    // A threshold crossed on this cycle names THIS row, now — see `resolvePilotEvents`.
+    await resolvePilotEvents();
     await observeMarketDataOutage(id);
     return emptyResult('skipped', persisted, id, row, portfolio, marketData);
   }
@@ -1112,6 +1134,8 @@ export async function decide(): Promise<DecideResult> {
       // its verdict travels with the row.
       pilot: pilotJournal(false),
     });
+    // A threshold crossed on this cycle names THIS row, now — see `resolvePilotEvents`.
+    await resolvePilotEvents();
     await observeMarketDataOutage(id);
     return emptyResult('skipped', persisted, id, row, portfolio, marketData);
   }
@@ -1289,6 +1313,8 @@ export async function decide(): Promise<DecideResult> {
       // its verdict travels with the row.
       pilot: pilotJournal(false),
     });
+    // A threshold crossed on this cycle names THIS row, now — see `resolvePilotEvents`.
+    await resolvePilotEvents();
     await observeMarketDataOutage(id);
     // The stop may have been armed on this book. Nothing is placed here — the alert only
     // makes the gap visible. See alertArmedStopNotFired.
@@ -1349,6 +1375,8 @@ export async function decide(): Promise<DecideResult> {
       // its verdict travels with the row.
       pilot: pilotJournal(false),
     });
+    // A threshold crossed on this cycle names THIS row, now — see `resolvePilotEvents`.
+    await resolvePilotEvents();
     await observeMarketDataOutage(id);
     // After persistLifecycle, so anything it queued is written too. It cannot queue a
     // refusal here (it is called with no notes), but the ordering is the same on every
@@ -1419,6 +1447,8 @@ export async function decide(): Promise<DecideResult> {
       // its verdict travels with the row.
       pilot: pilotJournal(false),
     });
+    // A threshold crossed on this cycle names THIS row, now — see `resolvePilotEvents`.
+    await resolvePilotEvents();
     await observeMarketDataOutage(id);
     await alertArmedStopNotFired('parse_failed');
     return emptyResult('parse_failed', persisted, id, row, portfolio, marketData);
@@ -1906,19 +1936,13 @@ export async function decide(): Promise<DecideResult> {
     pilot: pilotJournal(true),
   });
 
-  // THE ACTIVATION'S DECISION ID, backfilled. The identity is written BEFORE the decision row
-  // exists — the row has to carry the corrected target, so it cannot come first — and the
-  // official INSTANT is durable from that moment. This fills in the pointer a heartbeat later,
-  // best-effort and idempotent: if it misses, the replay still finds the opening cycle from
-  // `activated_at`, which is the fact that matters.
   // THE THREE EVENT POINTERS, RESOLVED AND REPAIRED. Activation, the 40% alert and the 50%
   // stop are all written before the decision row exists, so none of them can name its own
   // cycle at the time. This pass fills every one that is still missing, from the instant each
   // event durably recorded — so it is idempotent, and a cycle that died before running it is
-  // repaired by the next one rather than leaving a window nobody can ever bound.
-  if (EXPOSURE_BAND_MODE === 'application') {
-    await resolvePilotEventCycles(supabase);
-  }
+  // repaired by the next one rather than leaving a window nobody can ever bound. The same pass
+  // runs on every failure path too, since a threshold may be crossed there — see the closure.
+  await resolvePilotEvents();
 
   // THE HEARTBEAT. Records that this pilot saw this decided cycle — on EVERY application
   // cycle, whether or not the correction applied. Its absence is exactly what the next cycle
