@@ -982,16 +982,24 @@ console.log('\nProof 15 — a failed cycle with a reliable valuation still feeds
   const inside = (idx: number): boolean => idx > settleDef.from && idx < settleDef.to;
   const positions = (needle: string): number[] => [...preModel.matchAll(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))].map((m) => m.index!);
   ok('the write itself is issued from one place, the settlement', (decide.match(/await applyPilotWrite\(/g) ?? []).length === 1 && positions('await applyPilotWrite(').every(inside));
-  ok('every settlement before the model sits in a skip branch that returns', positions('await settlePilot(false);').length === 2 && positions('await settlePilot(false);').every((idx) => {
+  ok('every settlement before the model sits in a skip branch that returns', positions('await settlePilot(false, id);').length === 2 && positions('await settlePilot(false, id);').every((idx) => {
     const branchEnd = preModel.indexOf('\n  }', idx);
     return preModel.slice(idx, branchEnd).includes("return emptyResult('skipped'");
   }));
   ok('and the only Telegram send before the model is the settlement\'s own', positions('await sendTelegram(').length === 1 && positions('await sendTelegram(').every(inside));
-  const settlementAt = at('await settlePilot(true);');
+  const settlementAt = at('await settlePilot(true, null);');
   ok('the decided path settles after the guard, where the block used to live', settlementAt > at('const { clamp, movements: proposedMovements } = evaluated;'));
   ok('and before any order', settlementAt < at('let correctedAllocation = clamp.applied;'));
   ok('the activation lands on the decided path only', /if \(activationPending && !correctionReached\) return;/.test(decide));
-  ok('every failure path settles at its tail, before its observation', (decide.match(/await settlePilot\(false\);\s*\n\s*await observeExposureBand\(\{/g) ?? []).length === 5);
+  ok('every failure path settles at its tail, before its observation', (decide.match(/await settlePilot\(false, id\);\s*\n\s*await observeExposureBand\(\{/g) ?? []).length === 5);
+  // THE FOURTH REVIEW ROUND. A failure path settles AFTER its row exists, so the event's instant
+  // is later than the row's `created_at` and the instant-based repair could never find it. The
+  // row's id is known there, and it is written into the pointer outright; only the decided path
+  // — where the row does not exist yet — leaves it null for the repair pass.
+  ok('a failure path names its own row in the write', (decide.match(/await settlePilot\(false, id\);/g) ?? []).length === 5 && /const settlePilot = async \(correctionReached: boolean, decisionId: number \| null\)/.test(decide) && /decisionId,\s*\n\s*latestDecidedDecisionId,/.test(decide));
+  ok('and the decided path, whose row does not exist yet, leaves it to the repair', /await settlePilot\(true, null\);/.test(decide));
+  const persistenceSrc = readFileSync(path.join(ROOT, 'src/persistence/exposurePilot.ts'), 'utf8');
+  ok('the write puts that id on the alert, the stop and the peak pointers', persistenceSrc.includes('patch.alert_drawdown_decision_id = ctx.decisionId;') && persistenceSrc.includes('patch.stopped_decision_id = ctx.decisionId;') && persistenceSrc.includes('patch.peak_decision_id = ctx.decisionId;'));
   const observations = decide.match(/observeExposureBand\(\{[\s\S]*?\}\);/g) ?? [];
   ok(`every observation row carries a verdict (${observations.length} call sites)`, observations.length >= 7 && observations.every((call) => /pilot: (pilotJournal\(|\{)/.test(call)));
   ok('the failure paths journal the valuation as not judged', (decide.match(/pilot: pilotJournal\(false\)/g) ?? []).length >= 5);

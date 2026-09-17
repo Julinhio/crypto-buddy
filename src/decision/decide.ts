@@ -1014,15 +1014,19 @@ export async function decide(): Promise<DecideResult> {
    * promises that the correction applies from that very cycle, which a cycle with no target
    * cannot honour. (Unreachable in this deployment: the identity exists.)
    */
-  const settlePilot = async (correctionReached: boolean): Promise<void> => {
+  const settlePilot = async (correctionReached: boolean, decisionId: number | null): Promise<void> => {
     if (pilotJudgement.write == null) return;
     if (activationPending && !correctionReached) return;
     const landed = await applyPilotWrite(supabase, pilotJudgement.write, {
-      // NULL, AND NECESSARILY SO on the decided path: this write happens before the decision
-      // row exists, because that row has to carry the corrected target. The exact cycle is
-      // filled in afterwards by `resolvePilotEventCycles`, which is idempotent and repairs a
-      // previous miss — and which the failure paths run right after this settlement.
-      decisionId: null,
+      // THE CYCLE THE EVENT NAMES. Null on the decided path, and necessarily so: there the
+      // write happens before the decision row exists, because that row has to carry the
+      // corrected target, and `resolvePilotEventCycles` fills the pointer in afterwards from
+      // the event's instant. On a failure path the row ALREADY exists when this runs, so its
+      // id is passed and the pointer is written outright — the instant-based repair could not
+      // find that row, since the event is stamped after the row was created (fourth review
+      // round). The repair pass stays as what it always was: the recovery for a cycle that
+      // died in between.
+      decisionId,
       latestDecidedDecisionId,
       equityQuote: portfolio.equity.toNumber(),
       contractSha256: pilotContractSha256,
@@ -1126,7 +1130,7 @@ export async function decide(): Promise<DecideResult> {
     // cycle's — only the fabricated book of the first half is withheld.
     // The valuation was judged before the model; what it decided lands now, at the tail, past
     // every budget gate — see `settlePilot`. Then the row carries the verdict.
-    await settlePilot(false);
+    await settlePilot(false, id);
     await observeExposureBand({
       decisionId: id,
       targetAllocation: null,
@@ -1154,7 +1158,7 @@ export async function decide(): Promise<DecideResult> {
     await observeTransition(id, [], []);
     // The valuation was judged before the model; what it decided lands now, at the tail, past
     // every budget gate — see `settlePilot`. Then the row carries the verdict.
-    await settlePilot(false);
+    await settlePilot(false, id);
     await observeExposureBand({
       decisionId: id,
       targetAllocation: null,
@@ -1336,7 +1340,7 @@ export async function decide(): Promise<DecideResult> {
     await observeTransition(id, [], []);
     // The valuation was judged before the model; what it decided lands now, at the tail, past
     // every budget gate — see `settlePilot`. Then the row carries the verdict.
-    await settlePilot(false);
+    await settlePilot(false, id);
     await observeExposureBand({
       decisionId: id,
       targetAllocation: null,
@@ -1401,7 +1405,7 @@ export async function decide(): Promise<DecideResult> {
     await observeTransition(id, [], []);
     // The valuation was judged before the model; what it decided lands now, at the tail, past
     // every budget gate — see `settlePilot`. Then the row carries the verdict.
-    await settlePilot(false);
+    await settlePilot(false, id);
     await observeExposureBand({
       decisionId: id,
       targetAllocation: null,
@@ -1476,7 +1480,7 @@ export async function decide(): Promise<DecideResult> {
     await observeTransition(id, [], []);
     // The valuation was judged before the model; what it decided lands now, at the tail, past
     // every budget gate — see `settlePilot`. Then the row carries the verdict.
-    await settlePilot(false);
+    await settlePilot(false, id);
     await observeExposureBand({
       decisionId: id,
       targetAllocation: null,
@@ -1737,7 +1741,7 @@ export async function decide(): Promise<DecideResult> {
    * the official instant and promises that the correction applies from this very cycle, and
    * only a decided cycle can keep that promise. See `settlePilot`.
    */
-  await settlePilot(true);
+  await settlePilot(true, null);
 
   /**
    * THE CORRECTED TARGET. Identical to `clamp.applied` on every cycle the pilot does not arm —
