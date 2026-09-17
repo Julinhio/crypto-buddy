@@ -154,6 +154,12 @@ export interface BuildEpisodesInput {
    * intervention (first review round).
    */
   gateOf: (decisionId: number, asset: string) => string | null;
+  /**
+   * THE GATE'S MODE, frozen in the pilot's identity. Only under `enforce` does a verdict act:
+   * under `observe` `applyGate` is a no-op, the model is told nothing, and its proposal stays
+   * a free reaction. Null on the bench, where no band leg was ever executed anyway.
+   */
+  transitionMode: 'observe' | 'enforce' | null;
 }
 
 /**
@@ -195,7 +201,7 @@ export function buildEpisodes(input: BuildEpisodesInput): AdoptionEpisode[] {
       // taking the line over AT the reaction cycle. Nothing else can: the cycles in between are
       // the failed ones — no order, no model, their gate rows are observations — and another
       // band leg cannot fall there either, since a failed cycle computes no correction.
-      const reactionGate = input.gateOf(reactionDecision.id, line.asset);
+      const reactionGate = input.transitionMode === 'enforce' ? input.gateOf(reactionDecision.id, line.asset) : null;
       const intervening =
         reactionGate === 'stop_exit' || reactionGate === 'risk_off_reduction'
           ? { id: reactionDecision.id, gate: reactionGate }
@@ -260,7 +266,8 @@ export interface C8Judgement {
  * It can FAIL: an episode whose reaction is not the first decided cycle after it, an episode
  * with no booked side, an episode outside the window, a reading that does not match its own
  * numbers, or an official flag while the window is open. It is NON MESURABLE, never green,
- * when the window holds no executed episode at all.
+ * when the window holds no executed episode — or none whose reaction could be read: a
+ * population of unreadable episodes measures nothing and publishes nothing official.
  */
 export function judgeC8(input: {
   episodes: readonly AdoptionEpisode[];
@@ -319,11 +326,10 @@ export function judgeC8(input: {
   }
 
   const readable = input.episodes.filter((e) => e.reading !== 'non_mesurable' && e.reading !== 'non_attribuable').length;
-  const status: CriterionStatus =
-    problems.length > 0 ? 'fail' : input.episodes.length === 0 ? 'non_mesurable' : 'pass';
+  const status: CriterionStatus = problems.length > 0 ? 'fail' : readable === 0 ? 'non_mesurable' : 'pass';
   return {
     status,
-    official: input.windowClosed && problems.length === 0 && input.episodes.length > 0,
+    official: input.windowClosed && problems.length === 0 && readable > 0,
     population: input.episodes.length,
     readable,
     byReading,

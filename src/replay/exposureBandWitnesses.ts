@@ -13,6 +13,7 @@ import { clampAllocation } from '../risk/clamp.js';
 import { resolvePilotWindow, type PilotWindowResolution } from '../exposure/pilot.js';
 import {
   attributeLegs,
+  bandSettledCutoff,
   judgeW4,
   judgeW5,
   modelIntentionFor,
@@ -498,6 +499,31 @@ async function loadRefusedIntents(
   return reasons;
 }
 
+/**
+ * The band observation rows up to the gate-settled point — only whether a correction was
+ * computed on each, which is what says how many corrections rows that cycle owes.
+ */
+async function loadBandObservationMarkers(
+  supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  cutoffId: number,
+): Promise<Map<number, { correctionComputed: boolean }>> {
+  const PAGE = 1000;
+  const markers = new Map<number, { correctionComputed: boolean }>();
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('exposure_band_observations')
+      .select('decision_id, corrected_exposure_percent')
+      .lte('decision_id', cutoffId)
+      .order('decision_id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(`band witnesses: could not read exposure_band_observations (${error.message}).`);
+    const page = (data ?? []) as Array<{ decision_id: number; corrected_exposure_percent: string | number | null }>;
+    for (const row of page) markers.set(row.decision_id, { correctionComputed: row.corrected_exposure_percent != null });
+    if (page.length < PAGE) break;
+  }
+  return markers;
+}
+
 /** `pilot_hold` of the band observation, for the cycles where the band planned a leg. */
 async function loadPilotHolds(
   supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
@@ -767,7 +793,17 @@ function runChain(
     // longer the pre-gate one, and the pre-gate value is not recoverable. B̂ therefore does what
     // the real bot did on that cycle and corrects nothing, rather than correcting a target the
     // stop had already replaced.
-    const stopOwnedALine = [...cycle.gates.values()].includes('stop_exit');
+    // MODE-AWARE (second review round). Under `observe` a stop verdict is observational —
+    // `applyGate` is a no-op and the stored target is not post-gate — so B̂ corrects as on any
+    // other cycle. Under `enforce` the stop took the line. On the bench, with no identity to
+    // ask, the case is DERIVED from the data: the applied allocation holds the stopped line at
+    // zero where the model asked for more, which only the enforced gate produces.
+    const stopAssets = [...cycle.gates].filter(([, gate]) => gate === 'stop_exit').map(([asset]) => asset);
+    const stopOwnedALine =
+      stopAssets.length > 0 &&
+      (transitionMode === 'enforce' ||
+        (transitionMode == null &&
+          stopAssets.some((asset) => (cycle.applied[asset] ?? 0) === 0 && (cycle.raw?.[asset] ?? 0) > 0)));
     const valuedB = valueBook(bookB, priceOf);
     // A held line with no price stops every book on this cycle; the caller has already
     // filtered those out, so these are narrowings rather than branches.
@@ -933,13 +969,31 @@ async function main(): Promise<void> {
   // there. Measured on the corpus: gates land 0.33 s after the decision row on average (2.96 s
   // at worst) and never before the ledger.
   const gatesByDecision = await loadGates(supabase);
-  const cutoffId = settledCutoff(gatesByDecision, universe);
-  if (cutoffId == null) {
+  const gateCutoffId = settledCutoff(gatesByDecision, universe);
+  if (gateCutoffId == null) {
     throw new Error(
       'band witnesses: no cycle carries a complete set of transition verdicts, so no point in ' +
         'the journal is provably settled. Refusing to replay rather than reading a torn journal.',
     );
   }
+  // AND THE BAND LAYER'S OWN SETTLED POINT. The corrections journal this replay now feeds B̂
+  // with is written AFTER the verdicts, so the gates prove nothing about it: a live cycle can
+  // show complete verdicts while its corrections are still landing. The cutoff is the smaller
+  // of the two proven points, and the corrections journal is read below that alone.
+  const bandMarkers = await loadBandObservationMarkers(supabase, gateCutoffId);
+  const bandRowsByDecision = await loadCorrectionsJournal(supabase, gateCutoffId);
+  const bandCutoffId = bandSettledCutoff(
+    bandMarkers,
+    new Map([...bandRowsByDecision].map(([id, lines]) => [id, lines.length])),
+    universe.length,
+  );
+  if (bandCutoffId == null) {
+    throw new Error(
+      'band witnesses: no cycle carries a complete band closure (observation row and its corrections ' +
+        'rows), so the corrections journal is not provably settled anywhere. Refusing to replay.',
+    );
+  }
+  const cutoffId = Math.min(gateCutoffId, bandCutoffId);
   // THE PILOT'S OWN WINDOW, when a pilot exists. `--at=alerte_40|arret_50|cloture` picks which
   // persisted instant closes it; without the flag it takes the closure, then the stop, then the
   // settled point.
@@ -966,12 +1020,13 @@ async function main(): Promise<void> {
   const upperBound =
     pilotWindow.official && pilotWindow.toDecisionId != null ? pilotWindow.toDecisionId : cutoffId;
 
-  const [decisions, ledgerByDecision, correctionsByDecision, decisionSummaries] = await Promise.all([
+  const [decisions, ledgerByDecision, decisionSummaries] = await Promise.all([
     loadDecisions(supabase, upperBound),
     loadLedgerByDecision(supabase, upperBound),
-    loadCorrectionsJournal(supabase, upperBound),
     loadDecisionSummaries(supabase, upperBound),
   ]);
+  // The corrections journal, bounded like everything else by the final upper bound.
+  const correctionsByDecision = new Map([...bandRowsByDecision].filter(([id]) => id <= upperBound));
 
   console.log('='.repeat(96));
   console.log("LES DEUX TÉMOINS — rejeu hors ligne, lecture seule, aucun ordre produit");
@@ -1466,6 +1521,7 @@ async function main(): Promise<void> {
       fromDecisionId: scopeFromId,
       toDecisionId: scopeToId,
       gateOf,
+      transitionMode: chainTransitionMode,
     });
     // FINALITY FOLLOWS THE INSTANT THE WINDOW WAS RESOLVED ON, not the pilot row. A closed
     // pilot replayed with `--at=alerte_40` is a snapshot cut BEFORE the closure, and its C8 is

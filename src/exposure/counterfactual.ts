@@ -219,6 +219,37 @@ export function realBandLegs(
   };
 }
 
+// ── THE SETTLED POINT OF THE BAND LAYER ───────────────────────────────────────────────
+
+/**
+ * The last cycle whose BAND closure is proven complete.
+ *
+ * Production writes the transition verdicts, THEN the band observation, THEN the corrections
+ * rows — so a cutoff proven on the gates alone does not prove the corrections journal this
+ * replay now reads: a live cycle could show complete verdicts while its corrections are still
+ * being written, and the cycle would become a named gap that `real_journal` and C8 silently
+ * omit (second review round). The band layer's own completeness is therefore required too,
+ * and the replay's cutoff is the smaller of the two.
+ *
+ * A cycle counts as complete when its observation row exists and, if that row says a
+ * correction was computed, every asset of the universe has its corrections row. A cycle whose
+ * observation says no correction was computed expects none.
+ */
+export function bandSettledCutoff(
+  observations: ReadonlyMap<number, { correctionComputed: boolean }>,
+  correctionsRowsByDecision: ReadonlyMap<number, number>,
+  universeSize: number,
+): number | null {
+  if (universeSize <= 0) return null;
+  let cutoff: number | null = null;
+  for (const [id, observation] of observations) {
+    const rows = correctionsRowsByDecision.get(id) ?? 0;
+    if (observation.correctionComputed && rows < universeSize) continue;
+    if (cutoff == null || id > cutoff) cutoff = id;
+  }
+  return cutoff;
+}
+
 // ── THE JUDGES — W4 and W5, three-valued and able to fail ─────────────────────────────
 
 /** What one reconstructed cycle of B̂ contributes to the judges. */
