@@ -34,6 +34,7 @@ Source : `exposure_band_corrections`, par cycle et par actif, `planned_side` / `
 
 | | |
 |---|---|
+| jambes de bande **voulues** (la bande a déplacé la ligne) | 96, sur 31 cycles — dont 84 supprimées par le seuil du correcteur lui-même, avant tout plan |
 | jambes de bande **prévues** | 12, sur 11 cycles |
 | jambes de bande **exécutées** | **4, sur 3 cycles** |
 | prévues **non passées** | 8 |
