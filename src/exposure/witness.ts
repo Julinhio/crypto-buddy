@@ -345,40 +345,14 @@ export function witnessRow(plan: EqualWeightPlan, step: WitnessStep): WitnessRow
   };
 }
 
-// ── C8's READER — built now, published only when the pilot arms ───────────────────────
-
-/**
- * Does the model USE the exposure the corrector imposed, or fight it?
- *
- * THE READER EXISTS. ITS VERDICT DOES NOT — not during observation, by arbitration, and the
- * reason is not caution but arithmetic: the question asks what the model does when it SEES a
- * position the corrector created, and in observation mode it never saw one. No chained
- * counterfactual repairs that; it would be answering, with the model's real words, a question
- * the model was never asked. C8 begins the day `application` puts the corrected positions in
- * front of it, and a weakened figure published now would be read as the answer.
- *
- * THREE READINGS, because one would mislead. "The model asks for less than the imposed
- * position" is nearly automatic — it simply re-emits its own preference, which is what it did
- * before the correction existed. What separates indifference from a FIGHT is that it goes
- * lower than it had itself gone.
- */
-export type AdoptionReading = 'adoption' | 'indifference' | 'lutte' | 'sans_objet';
-
-export interface AdoptionInput {
-  /** The imposed weight on that line, and what the model had asked for at the same cycle. */
-  imposedWeightPercent: number;
-  modelWeightPercent: number | null;
-  /** What the model asks for on the NEXT cycle. */
-  nextModelWeightPercent: number | null;
-}
-
-export function readAdoption(input: AdoptionInput): AdoptionReading {
-  const { imposedWeightPercent: imposed, modelWeightPercent: own, nextModelWeightPercent: next } = input;
-  if (next == null || own == null) return 'sans_objet';
-  if (next + EPS >= imposed) return 'adoption';
-  if (next + EPS >= own) return 'indifference';
-  return 'lutte';
-}
+// ── C8's READER LIVES IN adoption.ts ─────────────────────────────────────────────────
+//
+// The first reader stood here, and it was wrong in a way a test could not see: it called
+// "adoption" any next weight at or above the imposed one, whatever the DIRECTION of the
+// correction — so on a downward episode a model that merely repeated its own higher target
+// read as adopting the band. It also read no real data. The reader is now direction-aware,
+// works per EXECUTED episode, treats a repeated initial target as a repetition (never an
+// adoption) and a first proposal of zero as a case of its own. See `src/exposure/adoption.ts`.
 
 // ── CUTTING A CHAIN WHERE ITS DATA STOPS ─────────────────────────────────────────────
 

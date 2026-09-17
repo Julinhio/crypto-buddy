@@ -2,14 +2,32 @@ import 'dotenv/config';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { config, tradableBaseAssets } from '../config/index.js';
-import { dec } from '../money.js';
+import { dec, type Decimal } from '../money.js';
 import { getSupabaseClient } from '../persistence/supabase.js';
 import { parseRegimeJournal, regimePointFromJournal } from '../market/regimeJournal.js';
 import { readContext, type ControllerReading } from '../calibration/exposure/controller.js';
 import type { TransitionGate } from '../transition/gate.js';
 import { assessBand, bandOf } from '../exposure/band.js';
 import { correctToBand } from '../exposure/correct.js';
+import { clampAllocation } from '../risk/clamp.js';
 import { resolvePilotWindow, type PilotWindowResolution } from '../exposure/pilot.js';
+import {
+  attributeLegs,
+  judgeW4,
+  judgeW5,
+  modelIntentionFor,
+  realBandLegs,
+  type AttributedLeg,
+  type CounterfactualCycle,
+  type ModelIntention,
+} from '../exposure/counterfactual.js';
+import {
+  buildEpisodes,
+  judgeC8,
+  type CriterionStatus,
+  type DecisionSummary,
+  type JournalCorrectionLine,
+} from '../exposure/adoption.js';
 import {
   cutIntoSegments,
   equalWeightUnderCaps,
@@ -65,13 +83,30 @@ import { bookOf as portfolioOf, pricesOf, type StoredContext } from './storedCyc
  * kind on performance — neither high nor low. Anyone reading B̂ as "what the pilot will do" is
  * reading it wrong, and the artefact says so in its own contract block.
  *
+ * ── WHAT B̂ IS FED, AND WHY IT WAS WRONG ONCE ──────────────────────────────────────────
+ *
+ * B̂ receives the model's UNCORRECTED intention — the journaled `clamped_weight_percent` of
+ * `exposure_band_corrections`, the very input the production corrector received — and applies
+ * the band to its own book. It used to receive `decisions.applied_allocation`, which since the
+ * activation is the allocation the band has ALREADY corrected: B̂ then corrected a corrected
+ * target, found nothing to do, and attributed the band's own buys at 1839 to the model. The
+ * semantics of the three allocations are established in `counterfactual.ts`, on the corpus.
+ *
+ * ── THREE THINGS THE REPORT KEEPS APART ────────────────────────────────────────────────
+ *
+ *   1. the REAL journal: the band legs production PLANNED, the ones it EXECUTED, and the ones
+ *      it planned and did not execute, each with its cause;
+ *   2. the COUNTERFACTUAL B̂ and its C7 — what a chained corrected bot would send, by origin;
+ *   3. the MEASURE C8 — the model's reaction per executed episode, descriptive until the
+ *      measurement window is officially closed, and never a proof of conscious adoption.
+ *
  * ── AND WHAT IS DELIBERATELY NOT HERE ──────────────────────────────────────────────────
  *
  * No return, no drawdown, no bot-versus-witness delta. §7 keeps intermediate readings
- * descriptive, and the pilot's clock starts when `application` is armed — not now. C8, "does
- * the model use or fight the imposed exposure", gets its reader built and its data kept, and
- * NO figure: the question asks what the model does when it sees a corrected position, and in
- * observation mode it never saw one.
+ * descriptive, and the pilot's clock starts when `application` is armed — not now.
+ *
+ * Every criterion is THREE-VALUED: PASS, FAIL, or NON MESURABLE when the window holds nothing
+ * that could have exercised it. A criterion that compared nothing is never green.
  *
  * Run with `npm run replay:band-witnesses`. Exits non-zero if any criterion fails.
  */
@@ -110,12 +145,19 @@ const KNOWN_GATES: ReadonlySet<string> = new Set<TransitionGate>([
   'no_regime',
 ]);
 
-const results: Array<{ id: string; passed: boolean }> = [];
+const results: Array<{ id: string; status: CriterionStatus }> = [];
 
-function record(id: string, title: string, passed: boolean, detail: string[]): void {
-  results.push({ id, passed });
+/**
+ * THREE OUTCOMES, not two. `non_mesurable` is what a criterion answers when the window holds
+ * nothing it could have judged — it is printed as such, kept in the artefact as such, and it
+ * is NEVER counted as a pass. Only a `fail` makes the run exit non-zero.
+ */
+function record(id: string, title: string, status: CriterionStatus | boolean, detail: string[]): void {
+  const resolved: CriterionStatus = status === true ? 'pass' : status === false ? 'fail' : status;
+  results.push({ id, status: resolved });
+  const label = resolved === 'pass' ? 'PASS' : resolved === 'fail' ? 'FAIL' : 'NON MESURABLE';
   console.log('');
-  console.log(`${passed ? 'PASS' : 'FAIL'}  ${id} — ${title}`);
+  console.log(`${label}  ${id} — ${title}`);
   for (const line of detail) console.log(`      ${line}`);
 }
 
@@ -205,6 +247,25 @@ function postTradeBookOf(
   return {
     exposurePercent: Math.round((deployed / equity) * 100 * 1e6) / 1e6,
     equity,
+    qty,
+  };
+}
+
+/**
+ * The bot's PRE-TRADE book at a cycle, as a chained book — quantities and cash, nothing derived.
+ * Read from the stored context production wrote at that cycle, the same source W2 checks.
+ */
+function openBookFromRealBook(context: StoredContext): WitnessBook {
+  const portfolio = context.account.portfolio;
+  const qty = new Map<string, Decimal>();
+  for (const position of portfolio.positions ?? []) {
+    if (!Number.isFinite(position.qty) || position.qty <= 0) continue;
+    qty.set(position.asset, (qty.get(position.asset) ?? dec(0)).plus(dec(position.qty)));
+  }
+  return {
+    reserveAsset: portfolio.reserveAsset,
+    startingCapital: dec(portfolio.equity),
+    cash: dec(portfolio.cash),
     qty,
   };
 }
@@ -301,6 +362,142 @@ async function loadLedgerByDecision(
   return byDecision;
 }
 
+interface CorrectionRowRead {
+  decision_id: number;
+  asset: string;
+  origin: string;
+  cause: string;
+  raw_weight_percent: string | number | null;
+  clamped_weight_percent: string | number;
+  base_weight_percent: string | number;
+  correction_points: string | number;
+  corrected_weight_percent: string | number;
+  planned_side: string | null;
+  planned_notional_quote: string | number | null;
+  suppressed_reason: string | null;
+  booked_side: string | null;
+  booked_notional_quote: string | number | null;
+  post_cycle_weight_percent: string | number | null;
+}
+
+const num = (value: string | number | null | undefined): number | null => {
+  if (value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+};
+
+/**
+ * THE CORRECTIONS JOURNAL — one row per asset per cycle, since brick 2. It is the FACT B̂ is
+ * fed (`clamped_weight_percent`), the source of the real band legs (planned and booked, by
+ * origin), and the population C8 is read on. Read up to the settled point like everything else.
+ */
+async function loadCorrectionsJournal(
+  supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  cutoffId: number,
+): Promise<Map<number, JournalCorrectionLine[]>> {
+  const PAGE = 1000;
+  const byDecision = new Map<number, JournalCorrectionLine[]>();
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('exposure_band_corrections')
+      .select(
+        'decision_id, asset, origin, cause, raw_weight_percent, clamped_weight_percent, base_weight_percent, ' +
+          'correction_points, corrected_weight_percent, planned_side, planned_notional_quote, suppressed_reason, ' +
+          'booked_side, booked_notional_quote, post_cycle_weight_percent',
+      )
+      .lte('decision_id', cutoffId)
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(`band witnesses: could not read exposure_band_corrections (${error.message}).`);
+    const page = (data ?? []) as unknown as CorrectionRowRead[];
+    for (const row of page) {
+      if (row.origin !== 'modele' && row.origin !== 'correction_de_bande' && row.origin !== 'allocation_de_secours') {
+        throw new Error(`band witnesses: exposure_band_corrections carries origin "${row.origin}" on decision ${row.decision_id}.`);
+      }
+      const clamped = num(row.clamped_weight_percent);
+      const base = num(row.base_weight_percent);
+      const points = num(row.correction_points);
+      const corrected = num(row.corrected_weight_percent);
+      if (clamped == null || base == null || points == null || corrected == null) {
+        throw new Error(`band witnesses: exposure_band_corrections row ${row.decision_id}/${row.asset} carries a non-numeric weight.`);
+      }
+      const side = (value: string | null): 'buy' | 'sell' | null => (value === 'buy' || value === 'sell' ? value : null);
+      const bucket = byDecision.get(row.decision_id) ?? [];
+      bucket.push({
+        decisionId: row.decision_id,
+        asset: row.asset,
+        origin: row.origin,
+        cause: row.cause,
+        rawWeightPercent: num(row.raw_weight_percent),
+        clampedWeightPercent: clamped,
+        baseWeightPercent: base,
+        correctionPoints: points,
+        correctedWeightPercent: corrected,
+        plannedSide: side(row.planned_side),
+        plannedNotionalQuote: num(row.planned_notional_quote),
+        suppressedReason: row.suppressed_reason,
+        bookedSide: side(row.booked_side),
+        bookedNotionalQuote: num(row.booked_notional_quote),
+        postCycleWeightPercent: num(row.post_cycle_weight_percent),
+      });
+      byDecision.set(row.decision_id, bucket);
+    }
+    if (page.length < PAGE) break;
+  }
+  return byDecision;
+}
+
+/**
+ * EVERY decision in scope, whatever its status. C8 must SEE the failed cycles between an
+ * episode and its reaction to name them and not read them; a query filtered on `decided`
+ * would silently turn a `guard_failed` wake-up into a missing cycle.
+ */
+async function loadDecisionSummaries(
+  supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  cutoffId: number,
+): Promise<DecisionSummary[]> {
+  const PAGE = 1000;
+  const rows: DecisionSummary[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('decisions')
+      .select('id, status, target_allocation')
+      .eq('prompt_version', 'v5')
+      .lte('id', cutoffId)
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(`band witnesses: could not read decision statuses (${error.message}).`);
+    const page = (data ?? []) as unknown as Array<{ id: number; status: string; target_allocation: unknown }>;
+    for (const row of page) rows.push({ id: row.id, status: row.status, targetAllocation: allocationOf(row.target_allocation) });
+    if (page.length < PAGE) break;
+  }
+  return rows;
+}
+
+/**
+ * The execution rows that were NOT executed, for the cycles where the band planned a leg —
+ * so a planned leg that did not book can name the executor's refusal when there was one.
+ */
+async function loadRefusedIntents(
+  supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  decisionIds: readonly number[],
+): Promise<Map<string, string>> {
+  const reasons = new Map<string, string>();
+  if (decisionIds.length === 0) return reasons;
+  const { data, error } = await supabase
+    .from('executions')
+    .select('decision_id, symbol, validation_status, validation_reason')
+    .eq('event_type', 'intent')
+    .neq('validation_status', 'executed')
+    .in('decision_id', [...decisionIds]);
+  if (error) throw new Error(`band witnesses: could not read refused intents (${error.message}).`);
+  for (const row of (data ?? []) as Array<{ decision_id: number; symbol: string; validation_status: string; validation_reason: string | null }>) {
+    const asset = row.symbol.split('/')[0] ?? row.symbol;
+    reasons.set(`${row.decision_id}/${asset}`, `${row.validation_status}: ${row.validation_reason ?? 'sans motif'}`);
+  }
+  return reasons;
+}
+
 /**
  * THE OFFICIAL WINDOW — the pilot's, when there is a pilot AND the pilot can be trusted.
  *
@@ -330,7 +527,7 @@ interface PilotRow {
 async function loadPilotWindow(
   supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
   requested: string | null,
-): Promise<{ window: PilotWindowResolution; transitionMode: 'observe' | 'enforce' | null }> {
+): Promise<{ window: PilotWindowResolution; transitionMode: 'observe' | 'enforce' | null; windowClosed: boolean }> {
   const { data, error } = await supabase
     .from('exposure_pilot')
     .select(
@@ -341,10 +538,10 @@ async function loadPilotWindow(
     .limit(1);
   if (error) throw new Error(`band witnesses: could not read exposure_pilot (${error.message}).`);
   const row = ((data ?? []) as unknown as PilotRow[])[0];
-  if (row == null) return { window: resolvePilotWindow(null, requested), transitionMode: null };
+  if (row == null) return { window: resolvePilotWindow(null, requested), transitionMode: null, windowClosed: false };
   const opening = row.opening_equity_usd == null ? null : Number(row.opening_equity_usd);
   const mode = row.transition_mode === 'observe' || row.transition_mode === 'enforce' ? row.transition_mode : null;
-  return { transitionMode: mode, window: resolvePilotWindow(
+  return { transitionMode: mode, windowClosed: row.window_closed_at != null, window: resolvePilotWindow(
     {
       status: row.status,
       activatedAt: row.activated_at,
@@ -364,7 +561,15 @@ async function loadPilotWindow(
 // ── The chain ─// ── The chain ─────────────────────────────────────────────────────────────────────────
 
 /** Why a cycle could not be reconstructed. Every skipped cycle carries one — none is silent. */
-type CycleGap = 'no_context' | 'no_gates' | 'no_book' | 'no_target' | 'no_prices' | 'post_gate_only';
+type CycleGap =
+  | 'no_context'
+  | 'no_gates'
+  | 'no_book'
+  | 'no_target'
+  | 'no_prices'
+  | 'post_gate_only'
+  /** In the official window B̂'s input is the journaled clamp, and a cycle without it is not reconstructed. */
+  | 'no_corrections_journal';
 
 /**
  * One uninterrupted stretch of reconstructible cycles, with its own freshly opened books.
@@ -393,6 +598,10 @@ interface ChainRow {
   B: {
     equity: number;
     fees: number;
+    input_source: 'journal_clamped' | 'clamp_recomputed';
+    model_exposure_percent: number;
+    /** Every leg B̂ sends this cycle, with its origin — C7 at the leg level. */
+    legs: AttributedLeg[];
     target_exposure_percent: number;
     corrected_exposure_percent: number;
     realised_exposure_percent: number;
@@ -441,8 +650,18 @@ interface Cycle {
   botEquityAfter: number;
   /** The post-trade quantities, kept so W2 can check them against an independent source. */
   botQtyAfter: Map<string, number>;
-  clamped: Record<string, number>;
+  /**
+   * The EFFECTIVE target the real bot pursued (`applied_allocation`, post-band, post-gate).
+   * B̂ only ever aims at it on a cycle the code's stop owned, where it follows the real bot
+   * instead of correcting — it is NOT the model's intention.
+   */
+  applied: Record<string, number>;
+  /** The model's UNCORRECTED intention, clamped — B̂'s input. See counterfactual.ts. */
+  intention: ModelIntention;
+  /** The same clamp recomputed from the raw proposal, for W5's cross-check. Null without a raw proposal. */
+  recomputedClamp: Record<string, number> | null;
   raw: Record<string, number> | null;
+  journalLines: JournalCorrectionLine[] | null;
   context: StoredContext;
 }
 
@@ -464,8 +683,9 @@ function runChain(
    * replay must not answer differently depending on the laptop.
    */
   transitionMode: 'observe' | 'enforce' | null,
-): ChainRow[] {
+): { rows: ChainRow[]; counterfactual: CounterfactualCycle[] } {
   const cycles = segment.cycles;
+  const counterfactual: CounterfactualCycle[] = [];
   // THE RE-ANCHOR. Each segment opens its own books, in cash, on the bot's equity at its first
   // cycle. Nothing is carried over a cut: a book that resumed with the quantities it held
   // before an unreconstructible interval would be asserting it had held them through an
@@ -482,11 +702,20 @@ function runChain(
 
   let bookE: WitnessBook = openBook(reserveAsset, dec(openingEquity));
   let bookP: WitnessBook = openBook(reserveAsset, dec(openingEquity));
-  let bookB: WitnessBook = openBook(reserveAsset, dec(openingEquity));
+  // B̂ OPENS ON THE BOT'S OWN BOOK, not in cash. It IS the bot under the correction: at the
+  // first cycle of a segment it holds what the bot held before that cycle's orders, and from
+  // there it chains its own corrected decisions. Opened in cash, as the witnesses are, its first
+  // cycle would BUY every line the model already held — an alignment the real bot never made,
+  // booked as the model's legs and paid in fees. At the activation cycle this makes B̂'s legs
+  // exactly the real bot's: same book, same intention, same correction (the reference check
+  // of W5 rests on it).
+  let bookB: WitnessBook = openBookFromRealBook(cycles[0]!.context);
   const rows: ChainRow[] = [];
 
   for (const cycle of cycles) {
     const priceOf = pricesOf(cycle.context);
+    // THE MODEL'S INTENTION — never the applied allocation. See the header and counterfactual.ts.
+    const intention = cycle.intention.allocation;
     const band = bandOf(config.exposureBand, cycle.reading.state);
 
     // ── E — the bot's own exposure, equally weighted under the caps ──────────────────
@@ -534,7 +763,7 @@ function runChain(
       policyVersion: config.exposureBand.version,
       policy: config.exposureBand,
       state: cycle.reading.state,
-      targetAllocation: cycle.clamped,
+      targetAllocation: intention,
       rawAllocation: cycle.raw,
       bookExposurePercent: exposureB,
       reserveAsset,
@@ -553,7 +782,7 @@ function runChain(
       ? null
       : correctToBand({
       assessment,
-      clampedAllocation: cycle.clamped,
+      clampedAllocation: intention,
       rawAllocation: cycle.raw,
       reserveAsset,
       portfolio: valuedB.portfolio,
@@ -561,9 +790,12 @@ function runChain(
       feePercent: fee,
       minMovementPercent: floorPercent,
         });
+    // ON A STOP CYCLE B̂ FOLLOWS THE REAL BOT'S EFFECTIVE TARGET — the pre-gate value is not
+    // recoverable and the code's own stop, not the model, owned that line. Named as such: the
+    // cycle contributes no C7 attribution.
     const stepB = stepWitness({
       book: bookB,
-      allocation: correction == null ? cycle.clamped : correction.correctedAllocation,
+      allocation: correction == null ? cycle.applied : correction.correctedAllocation,
       priceOf,
       feePercent: fee,
       minMovementPercent: floorPercent,
@@ -583,12 +815,20 @@ function runChain(
         .map((line) => line.asset),
     );
     const movedByBand = new Map((correction?.lines ?? []).map((line) => [line.asset, line.correctionPoints !== 0]));
-    const originOf = new Map((correction?.lines ?? []).map((line) => [line.asset, line.origin]));
+    // C7 — each leg named by its line, with the journal's own convention: the band's origin
+    // if and only if the band moved that line. A stop cycle has no correction, so every leg
+    // there is the real bot's.
+    const legs: AttributedLeg[] = attributeLegs(stepB.movements, correction?.lines ?? null);
     const sentByOrigin: Record<string, number> = {};
-    for (const movement of stepB.movements) {
-      const origin = originOf.get(movement.asset) ?? 'modele';
-      sentByOrigin[origin] = (sentByOrigin[origin] ?? 0) + 1;
-    }
+    for (const leg of legs) sentByOrigin[leg.origin] = (sentByOrigin[leg.origin] ?? 0) + 1;
+    counterfactual.push({
+      decisionId: cycle.decision.id,
+      followedRealBot: stopOwnedALine,
+      lines: correction?.lines ?? null,
+      legs,
+      intention: cycle.intention,
+      recomputedClamp: cycle.recomputedClamp,
+    });
     const suppressedByReason: Record<string, number> = {};
     for (const leg of stepB.suppressed) {
       suppressedByReason[leg.reason] = (suppressedByReason[leg.reason] ?? 0) + 1;
@@ -619,6 +859,13 @@ function runChain(
       B: {
         equity: stepB.equityAfter,
         fees: stepB.feesQuote,
+        /** Where B̂'s input came from: the journal in an official window, a recomputation on the bench. */
+        input_source: cycle.intention.source,
+        /** The model's own (clamped) exposure — what B̂ was asked, before the band. */
+        model_exposure_percent: Math.round(
+          Object.entries(intention).filter(([a]) => a !== reserveAsset).reduce((sum, [, w]) => sum + w, 0) * 1e6,
+        ) / 1e6,
+        legs,
         target_exposure_percent: assessment.targetExposurePercent,
         corrected_exposure_percent: correction?.correctedExposurePercent ?? assessment.targetExposurePercent,
         realised_exposure_percent: stepB.exposureAfterPercent,
@@ -647,7 +894,7 @@ function runChain(
     bookB = stepB.book;
   }
 
-  return rows;
+  return { rows, counterfactual };
 }
 
 async function main(): Promise<void> {
@@ -684,7 +931,7 @@ async function main(): Promise<void> {
   // means someone asked for one and named nothing, which is a refusal like any other bad value.
   const instantFlag = process.argv.find((arg) => arg.startsWith('--at='));
   const requestedInstant = instantFlag == null ? null : instantFlag.slice('--at='.length);
-  const { window: resolved, transitionMode: pilotTransitionMode } = await loadPilotWindow(supabase, requestedInstant);
+  const { window: resolved, transitionMode: pilotTransitionMode, windowClosed } = await loadPilotWindow(supabase, requestedInstant);
   // AN OFFICIAL BOUND BEYOND THE SETTLED POINT IS A REFUSAL, not a truncation.
   //
   // `Math.min` used to clip the window to the settled cutoff while the banner went on printing
@@ -703,9 +950,11 @@ async function main(): Promise<void> {
   const upperBound =
     pilotWindow.official && pilotWindow.toDecisionId != null ? pilotWindow.toDecisionId : cutoffId;
 
-  const [decisions, ledgerByDecision] = await Promise.all([
+  const [decisions, ledgerByDecision, correctionsByDecision, decisionSummaries] = await Promise.all([
     loadDecisions(supabase, upperBound),
     loadLedgerByDecision(supabase, upperBound),
+    loadCorrectionsJournal(supabase, upperBound),
+    loadDecisionSummaries(supabase, upperBound),
   ]);
 
   console.log('='.repeat(96));
@@ -777,11 +1026,29 @@ async function main(): Promise<void> {
       fail('no_gates');
       continue;
     }
-    const clamped = allocationOf(decision.applied_allocation);
-    if (clamped == null) {
+    const applied = allocationOf(decision.applied_allocation);
+    if (applied == null) {
       fail('no_target');
       continue;
     }
+    const raw = allocationOf(decision.target_allocation);
+    const journalLines = correctionsByDecision.get(decision.id) ?? null;
+    // B̂'S INPUT: the journaled clamp in the official window, mandatory; a recomputation from
+    // the raw proposal on the bench only, and named as such on every row.
+    const intention = modelIntentionFor({
+      targetAllocation: raw,
+      journalLines,
+      universe,
+      reserveAsset: portfolioOf(decision.market_context as StoredContext).reserveAsset,
+      clamp: (target) => clampAllocation(target, portfolioOf(decision.market_context as StoredContext).reserveAsset, config).applied,
+      journalMandatory: pilotWindow.official,
+    });
+    if (intention == null) {
+      fail(pilotWindow.official ? 'no_corrections_journal' : 'no_target');
+      continue;
+    }
+    const recomputedClamp =
+      raw == null ? null : clampAllocation(raw, portfolioOf(decision.market_context as StoredContext).reserveAsset, config).applied;
     const context = decision.market_context as StoredContext;
     const priceOf = pricesOf(context);
     if (universe.some((asset) => priceOf(asset) == null)) {
@@ -803,8 +1070,11 @@ async function main(): Promise<void> {
         botExposurePercent: after.exposurePercent,
         botEquityAfter: after.equity,
         botQtyAfter: after.qty,
-        clamped,
-        raw: allocationOf(decision.target_allocation),
+        applied,
+        intention,
+        recomputedClamp,
+        raw,
+        journalLines,
         context,
       },
     });
@@ -829,8 +1099,8 @@ async function main(): Promise<void> {
   // identity at activation; on the bench there is no identity to ask, and every cycle where the
   // flag could matter carries a stop exit and is handled on its own.
   const chainTransitionMode = pilotWindow.official ? pilotTransitionMode : null;
-  const runAll = (): ChainRow[] =>
-    segments.flatMap((segment) =>
+  const runAll = (): { rows: ChainRow[]; counterfactual: CounterfactualCycle[] } => {
+    const runs = segments.map((segment) =>
       runChain(
         segment,
         universe,
@@ -839,7 +1109,14 @@ async function main(): Promise<void> {
         chainTransitionMode,
       ),
     );
-  const rows = runAll();
+    return { rows: runs.flatMap((r) => r.rows), counterfactual: runs.flatMap((r) => r.counterfactual) };
+  };
+  const { rows, counterfactual } = runAll();
+  // THE BOUNDS EVERY REAL-JOURNAL READING USES: the official window when there is one, the
+  // reconstructed span otherwise — never the whole history under the pilot's name.
+  const scopeFromId = pilotWindow.official ? pilotWindow.fromDecisionId : (rows[0]?.decision_id ?? 0);
+  const scopeToId = upperBound;
+  let c8Artefact: Record<string, unknown> | null = null;
 
   console.log('');
   console.log(
@@ -901,7 +1178,7 @@ async function main(): Promise<void> {
 
   // ── W1 — the reconstruction reproduces itself, byte for byte ──────────────────────
   {
-    const again = runAll();
+    const again = runAll().rows;
     const first = sha256Of(canonicalJson(rows));
     const second = sha256Of(canonicalJson(again));
     record('W1', 'le rejeu est reproductible — même entrées, mêmes livres', first === second, [
@@ -1049,99 +1326,164 @@ async function main(): Promise<void> {
     ]);
   }
 
-  // ── W4 — the witnesses bear the plumbing, never the bot's freezes ─────────────────
+  // ── THE REAL JOURNAL, READ BEFORE ANY COUNTERFACTUAL IS PRINTED ─────────────────────
+  //
+  // What production PLANNED, what it EXECUTED, what it planned and did not execute — from
+  // `exposure_band_corrections`, by origin, inside the window. These are facts about the bot,
+  // not about B̂, and the report keeps them apart: a planned leg that never booked changed
+  // nothing the model saw, and mixing it with the executed ones is how the first report came
+  // to count corrections the bot never made.
+  const journalInScope = [...correctionsByDecision.values()]
+    .flat()
+    .filter((line) => line.decisionId >= scopeFromId && line.decisionId <= scopeToId);
+  const plannedCycleIds = [...new Set(journalInScope.filter((l) => l.origin !== 'modele' && l.plannedSide != null).map((l) => l.decisionId))];
+  const refusedIntents = await loadRefusedIntents(supabase, plannedCycleIds);
+  const real = realBandLegs(journalInScope, scopeFromId, scopeToId, (id, asset) => refusedIntents.get(`${id}/${asset}`) ?? null);
+  const legLine = (leg: (typeof real.planned)[number]): string =>
+    `#${leg.decisionId} ${leg.asset.padEnd(4)} ${leg.origin} ${leg.correctionPoints > 0 ? '+' : ''}${leg.correctionPoints} pt · ` +
+    (leg.bookedSide != null
+      ? `EXÉCUTÉE ${leg.bookedSide} ${leg.bookedNotionalQuote?.toFixed(2)} $`
+      : `prévue ${leg.plannedSide} ${leg.plannedNotionalQuote?.toFixed(2)} $ — NON PASSÉE : ${leg.notExecutedBecause}`);
+  console.log('');
+  console.log('─'.repeat(96));
+  console.log('FAITS RÉELS — le journal des corrections de production, dans la fenêtre');
+  console.log('─'.repeat(96));
+  console.log(
+    `  jambes de bande prévues : ${real.planned.length} sur ${new Set(real.planned.map((l) => l.decisionId)).size} cycle(s) · ` +
+      `exécutées : ${real.executed.length} sur ${new Set(real.executed.map((l) => l.decisionId)).size} cycle(s) · ` +
+      `prévues non passées : ${real.plannedNotExecuted.length}`,
+  );
+  for (const leg of real.executed) console.log(`    ${legLine(leg)}`);
+  for (const leg of real.plannedNotExecuted) console.log(`    ${legLine(leg)}`);
+  if (real.planned.length === 0) console.log('    aucune jambe de bande dans le journal sur cette fenêtre');
+
+  // ── W4 — no leg the band creates touches a frozen line, and there was something to test ──
   {
-    const frozenCycles = rows.filter((r) => r.B.frozen_lines > 0);
-    const violations = rows.filter((r) => r.B.correction_legs_on_frozen > 0);
-    const modelLegs = rows.reduce((sum, r) => sum + r.B.model_legs_on_frozen, 0);
-    record('W4', 'les gels : portés par B̂ parce qu’il EST le bot, jamais par les témoins', violations.length === 0, [
+    const verdict = judgeW4({ cycles: counterfactual, journal: journalInScope });
+    record('W4', 'aucun mouvement créé par la bande ne touche une ligne gelée', verdict.status, [
       'Arbitré : un gel, un stop ou une transition décrit une position DU BOT. Un témoin ne l’a',
-      'pas prise. Les lui appliquer rendrait le comparateur dépendant de la trajectoire qu’il',
-      'existe pour évaluer : un témoin serait gelé sur une ligne parce que LE BOT y est en',
-      'transition, ce qui ne dit rien de l’étalon. La séparation porte sur le livre dont un gel',
-      'parle, et elle tient sous les deux modes.',
-      `B̂, qui EST le bot corrigé, en hérite : ${frozenCycles.length} cycle(s) sur ${rows.length} portent au moins`,
-      `une ligne gelée, et la CORRECTION y a créé ${rows.reduce((s2, r) => s2 + r.B.correction_legs_on_frozen, 0)} ordre(s).`,
-      'Vérifié jambe par jambe, pas affirmé : chaque mouvement envoyé est confronté aux verdicts',
-      'de porte du cycle ET à la correction de sa ligne, et ce critère échoue sur un seul.',
+      'pas prise. B̂, qui EST le bot corrigé, en hérite en entier : le code ne crée jamais',
+      'd’ordre sur une ligne que la porte a gelée, quel que soit le mode.',
       '',
-      `En revanche ${modelLegs} jambe(s) touchent une ligne gelée parce que LE MODÈLE les a demandées et`,
-      'que la correction ne les a pas touchées. Ce n’est pas une violation : la contrainte de gel',
-      'porte sur les mouvements que la bande crée, et sur eux seuls — elle n’arme pas la porte et',
-      'ne touche pas au vecteur brut du modèle. Sous `enforce` la porte tranche ensuite sur le',
-      'vecteur entier — le modèle PROPOSE une jambe gelée, il ne la trade pas forcément.',
-      'La séparation vaut sous la porte telle qu’elle est aujourd’hui, en `enforce` : elle dit de',
-      'quel livre un gel parle, pas dans quel mode il est lu.',
+      `POPULATION : ${verdict.facts['cycles_gel_et_correction']} cycle(s) de B̂ combinent une ligne gelée ET un mouvement de bande.`,
+      verdict.population === 0
+        ? 'Aucun sur cette fenêtre — le critère n’a rien pu vérifier et ne se dit pas vert.'
+        : `Sur eux, ${verdict.facts['jambes_bande_sur_gel']} jambe(s) de bande sur une ligne gelée (attendu 0) · ` +
+          `${verdict.facts['jambes_modele_sur_gel']} jambe(s) du modèle sur une ligne gelée, qui ne sont pas des violations.`,
+      `JOURNAL RÉEL : ${verdict.facts['lignes_gelees_journal']} ligne(s) portent la cause \`gel\` dans la fenêtre — chacune vérifiée sans`,
+      'déplacement de bande ni jambe de bande prévue.',
+      ...verdict.problems.map((problem) => `  VIOLATION : ${problem}`),
     ]);
   }
 
-  // ── W5 — C7, reconstructed in the chained machinery ───────────────────────────────
+  // ── W5 — C7, reconstructed AND attributed on the replay's own data ────────────────
   {
-    const sent = rows.reduce((sum, r) => sum + r.B.sent, 0);
-    const movingCycles = rows.filter((r) => r.B.sent > 0).length;
+    const REFERENCE = { decisionId: 1839, bandAssets: ['BNB', 'ETH'], untouchedAssets: ['XRP'] };
+    const inWindow = counterfactual.some((c) => c.decisionId === REFERENCE.decisionId);
+    const verdict = judgeW5({
+      cycles: counterfactual,
+      universe,
+      reserveAsset,
+      official: pilotWindow.official,
+      reference: inWindow ? REFERENCE : null,
+    });
     const byOrigin: Record<string, number> = {};
-    const byReason: Record<string, number> = {};
-    for (const row of rows) {
-      for (const [origin, count] of Object.entries(row.B.sent_by_origin)) {
-        byOrigin[origin] = (byOrigin[origin] ?? 0) + count;
-      }
-      for (const [reason, count] of Object.entries(row.B.suppressed_by_reason)) {
-        byReason[reason] = (byReason[reason] ?? 0) + count;
-      }
-    }
+    for (const row of rows) for (const [origin, n] of Object.entries(row.B.sent_by_origin)) byOrigin[origin] = (byOrigin[origin] ?? 0) + n;
+    const bandCycles = rows.filter((r) => (r.B.sent_by_origin['correction_de_bande'] ?? 0) + (r.B.sent_by_origin['allocation_de_secours'] ?? 0) > 0);
+    const reference = counterfactual.find((c) => c.decisionId === REFERENCE.decisionId);
+    const followed = counterfactual.filter((c) => c.followedRealBot).map((c) => c.decisionId);
+    const sources = counterfactual.reduce<Record<string, number>>((acc, c) => {
+      acc[c.intention.source] = (acc[c.intention.source] ?? 0) + 1;
+      return acc;
+    }, {});
     const outsideTarget = rows.filter((r) => r.B.label !== 'aucune_correction').length;
-    const botGaps = rows.map((r) => outsideBandPoints(r.bot_exposure_percent, {
-      lowPercent: r.band_low_percent,
-      highPercent: r.band_high_percent,
-    }));
+    const botGaps = rows.map((r) => outsideBandPoints(r.bot_exposure_percent, { lowPercent: r.band_low_percent, highPercent: r.band_high_percent }));
     const bGaps = rows.map((r) => r.B.band_gap_points);
-    const unrealisable = rows.map((r) => r.B.unrealisable_points).filter((p) => p > 0);
-    const fmt = (bins: Record<string, number>): string =>
-      Object.entries(bins).map(([k, n]) => `${k} ${n}`).join(' · ');
-    record('W5', 'C7 — ce que la répartition envoie réellement, en chaîne', true, [
-      'HYPOTHÈSE AFFICHÉE : B̂ rejoue les réponses HISTORIQUES du modèle contre un livre que le',
+    const fmt = (bins: Record<string, number>): string => Object.entries(bins).map(([k, n]) => `${k} ${n}`).join(' · ');
+    record('W5', 'C7 — le contrefactuel B̂ est reconstruit depuis l’intention du modèle, et ses jambes attribuées', verdict.status, [
+      'HYPOTHÈSE AFFICHÉE : B̂ rejoue les intentions HISTORIQUES du modèle contre un livre que le',
       'modèle n’a jamais vu. Il mesure la conséquence MÉCANIQUE de la correction sous décisions',
-      'historiques figées. Ce n’est ni une simulation de la réaction future du modèle, ni une',
-      'borne — ni haute ni basse — de performance.',
+      'historiques figées. Ce n’est ni une simulation de la réaction du modèle, ni une borne.',
       '',
-      `La cible du modèle sort de la bande sur ${outsideTarget} cycle(s) sur ${rows.length}. Mais une fois le`,
-      `livre déjà corrigé, seuls ${movingCycles} cycle(s) ont quelque chose à envoyer — ${sent} jambe(s) au total.`,
-      'C’est la mesure que la brique 1 annonçait sans pouvoir la produire : sa fréquence était',
-      'une BORNE HAUTE ré-ancrée, parce que le livre y retombait sous le plancher à chaque',
-      'réveil. En chaîne, le livre garde ses propres corrections.',
+      `ENTRÉE DE B̂ : ${Object.entries(sources).map(([k, n]) => `${k} ${n}`).join(' · ')} — jamais \`applied_allocation\`,`,
+      'qui est depuis l’activation l’allocation DÉJÀ corrigée par la bande.',
+      `  clamp recalculé depuis la proposition brute et comparé au journal sur ${verdict.facts['controles_clamp']} cycle(s) : ` +
+        (verdict.problems.some((p) => p.includes('clamp recalculé')) ? 'DIVERGENCES' : 'identiques'),
+      followed.length === 0
+        ? '  aucun cycle où B̂ suit le bot réel sans corriger'
+        : `  B̂ suit le bot réel sans corriger (stop du code) sur ${followed.length} cycle(s) : ${followed.join(', ')}`,
       '',
+      `L’intention du modèle sort de la bande sur ${outsideTarget} cycle(s) sur ${rows.length}. B̂ envoie sur ${rows.filter((r) => r.B.sent > 0).length} cycle(s),`,
+      `dont ${bandCycles.length} avec au moins une jambe de la BANDE — ${verdict.facts['jambes_bande']} jambe(s) de bande, ${verdict.facts['jambes_modele']} du modèle.`,
       `  jambes par origine : ${Object.entries(byOrigin).map(([o, n]) => `${o} ${n}`).join(' · ') || 'aucune'}`,
-      `  supprimées         : ${Object.entries(byReason).map(([o, n]) => `${o} ${n}`).join(' · ') || 'aucune'}`,
+      '',
+      reference == null
+        ? `RÉFÉRENCE ${REFERENCE.decisionId} : hors de cette fenêtre.`
+        : `RÉFÉRENCE ${REFERENCE.decisionId} — le modèle demandait XRP 15 seulement, déjà détenu : ` +
+          reference.legs.map((l) => `${l.asset} ${l.side} ${l.notionalQuote.toFixed(2)} $ (${l.origin})`).join(' · ') +
+          ` — BNB et ETH ${verdict.problems.some((p) => p.startsWith('référence')) ? 'NE SONT PAS' : 'sont'} attribuées à la bande, XRP intacte.`,
       '',
       'ÉCART À LA BANDE du livre après le cycle — le même barème pour les deux :',
       `  bot réel : ${fmt(bandBins(botGaps))}`,
       `  B̂       : ${fmt(bandBins(bGaps))}`,
-      'Les cycles « moins de 0,1 pt » sont la traînée de frais publiée par la brique 2, pas un',
-      'échec de la bande : un budget d’achat divisé par (1 + frais) arrive un cheveu trop court.',
-      `Points hors d’atteinte quand il y en a : ${unrealisable.length} cycle(s), médiane ` +
-        `${median(unrealisable)?.toFixed(2)} pt, maximum ${Math.max(...unrealisable).toFixed(2)} pt, ` +
-        `dont ${unrealisable.filter((p) => p > 1).length} au-dessus du point.`,
-    ]);
+      ...verdict.problems.map((problem) => `  PROBLÈME : ${problem}`),
+      verdict.status === 'non_mesurable' ? '  B̂ n’envoie aucune jambe de bande sur cette fenêtre : C7 n’est pas mesurable ici.' : '',
+    ].filter((line) => line !== ''));
   }
 
-  // ── W6 — C8 gets its reader and NO verdict ────────────────────────────────────────
+  // ── W6 — C8 on the real executed episodes, descriptive until the closure ──────────
   {
-    const created = rows.reduce(
-      (sum, r) => sum + (r.B.sent_by_origin['allocation_de_secours'] ?? 0) + (r.B.sent_by_origin['correction_de_bande'] ?? 0),
-      0,
-    );
-    record('W6', 'C8 — le lecteur existe, le verdict n’est pas rendu', true, [
-      'La question est : le modèle UTILISE-t-il l’exposition imposée, ou la combat-il ? Elle',
-      'porte sur ce que le modèle fait quand il VOIT une position que le correcteur a créée.',
-      'En mode observation il n’en a jamais vu une seule. Aucun contrefactuel chaîné ne répare',
-      'cela : il ferait répondre les mots réels du modèle à une question qu’on ne lui a jamais',
-      'posée. Un chiffre affaibli publié ici serait lu comme la réponse.',
-      `Les données sont conservées : ${created} jambe(s) créée(s) par la correction dans cette`,
-      'fenêtre, chacune avec son origine, son `correction_moves_holding` et son poids réalisé.',
-      'Le lecteur (`readAdoption`) distingue adoption, indifférence et lutte — trois lectures,',
-      'parce qu’un modèle qui redemande sa propre préférence n’est pas un modèle qui lutte.',
-      'C8 commence le jour où `application` expose réellement le modèle aux positions corrigées.',
-    ]);
+    const gateOf = (id: number, asset: string): string | null => gatesByDecision.get(id)?.get(asset) ?? null;
+    const episodes = buildEpisodes({
+      lines: journalInScope,
+      decisions: decisionSummaries,
+      fromDecisionId: scopeFromId,
+      toDecisionId: scopeToId,
+      gateOf,
+    });
+    // THE REPORT CLAIMS AN OFFICIAL C8 ONLY ON A CLOSED WINDOW — and the judge refuses it otherwise.
+    const claimsOfficial = pilotWindow.official && windowClosed;
+    const verdict = judgeC8({
+      episodes,
+      decisions: decisionSummaries,
+      fromDecisionId: scopeFromId,
+      toDecisionId: scopeToId,
+      windowClosed: pilotWindow.official && windowClosed,
+      claimsOfficial,
+    });
+    const episodeLine = (e: (typeof episodes)[number]): string =>
+      `#${e.decisionId} ${e.asset.padEnd(4)} ${e.direction === 'hausse' ? 'HAUSSE' : 'BAISSE'} ${e.origin} · ` +
+      `le modèle demandait ${e.modelWeightPercent ?? '?'} (borné ${e.clampedWeightPercent}), la bande a imposé ${e.imposedWeightPercent}` +
+      `${e.realisedWeightPercent == null ? '' : `, le livre tient ${e.realisedWeightPercent.toFixed(2)}`} · ` +
+      (e.reaction == null
+        ? 'aucune réaction lisible'
+        : `réaction au cycle #${e.reaction.decisionId} : ${e.reaction.modelWeightPercent ?? '?'}`) +
+      (e.skippedCycles.length === 0 ? '' : ` (cycles ${e.skippedCycles.map((c) => `#${c.id} ${c.status}`).join(', ')} en échec entre les deux — pas des réactions)`) +
+      ` → ${e.reading.toUpperCase()}` +
+      (e.because == null ? '' : ` — ${e.because}`);
+    record('W6', 'C8 — le lecteur est exercé sur les épisodes réels, et aucun verdict officiel n’est rendu avant la clôture', verdict.status, [
+      'UNITÉ DE MESURE : l’épisode EXÉCUTÉ par actif — une jambe de bande réellement bookée sur une',
+      'ligne à un cycle. Pas les lignes seulement prévues, pas chaque cycle où la correction reste',
+      'visible. La réaction est la proposition du modèle au premier cycle DÉCIDÉ suivant ; un cycle',
+      'en échec entre les deux n’est pas une réaction et est nommé. La répétition de la cible',
+      'initiale n’est jamais appelée adoption ; une proposition initiale à zéro qui reste à zéro est',
+      'une répétition, pas une lutte.',
+      '',
+      `${verdict.population} épisode(s) exécuté(s) dans la fenêtre · ${verdict.readable} lisible(s) · ` +
+        Object.entries(verdict.byReading).filter(([, n]) => n > 0).map(([k, n]) => `${k} ${n}`).join(' · '),
+      ...episodes.map((e) => `  ${episodeLine(e)}`),
+      verdict.population === 0 ? '  aucun épisode exécuté : C8 n’est pas mesurable sur cette fenêtre.' : '',
+      '',
+      pilotWindow.official && windowClosed
+        ? 'FENÊTRE FERMÉE : ces lectures constituent le résultat C8 de la fenêtre officielle.'
+        : `LECTURES DESCRIPTIVES — ${pilotWindow.official ? 'la fenêtre de mesure est OUVERTE' : 'aucune fenêtre officielle'} : ` +
+          'aucun verdict C8 n’est rendu, et le juge refuse d’en publier un.',
+      'BIAIS CONNU : le prompt montre au modèle l’allocation corrigée sous l’étiquette `risk_clamp`,',
+      'figée pendant ce pilote. Un `maintien` décrit la réaction du modèle au PORTEFEUILLE corrigé ;',
+      'il ne prouve pas une adoption consciente de la bande d’exposition.',
+      ...verdict.problems.map((problem) => `  PROBLÈME : ${problem}`),
+    ].filter((line) => line !== ''));
+    c8Artefact = { episodes, judgement: verdict, official: verdict.official, window_closed: windowClosed };
   }
 
   // ── The artefact ─────────────────────────────────────────────────────────────────
@@ -1172,12 +1514,32 @@ async function main(): Promise<void> {
       })),
       gaps: gaps.map((gap) => ({ decision_id: gap.id, cause: gap.cause, placement: gap.placement })),
     },
+    // THREE THINGS KEPT APART — see the header. The real journal is what production did; B̂
+    // is a counterfactual; C8 is a reading of the model, descriptive until the closure.
+    real_journal: {
+      scope: { from_id: scopeFromId, to_id: scopeToId },
+      planned_band_legs: real.planned,
+      executed_band_legs: real.executed,
+      planned_not_executed: real.plannedNotExecuted,
+    },
+    counterfactual: {
+      input: 'intention du modèle, bornée par les plafonds (journal exposure_band_corrections.clamped_weight_percent ; clamp recalculé sur le banc)',
+      never: 'decisions.applied_allocation — l’allocation déjà corrigée par la bande depuis l’activation',
+      followed_real_bot_on: counterfactual.filter((c) => c.followedRealBot).map((c) => c.decisionId),
+      input_sources: counterfactual.reduce<Record<string, number>>((acc, c) => {
+        acc[c.intention.source] = (acc[c.intention.source] ?? 0) + 1;
+        return acc;
+      }, {}),
+    },
+    c8: c8Artefact,
+    criteria: results,
     contract: {
       not_measured: [
         'aucun rendement, aucun drawdown, aucun écart bot-témoin : la fenêtre du pilote commence au passage en `application`',
-        'B̂ mesure la conséquence mécanique de la correction sous décisions historiques figées — pas la réaction du modèle, pas une borne de performance',
-        'C8 ne reçoit aucun verdict pendant l’observation',
+        'B̂ mesure la conséquence mécanique de la correction sous intentions historiques figées — pas la réaction du modèle, pas une borne de performance',
+        'C8 est descriptif tant que la fenêtre de mesure n’est pas officiellement fermée, et ne prouve jamais une adoption consciente de la bande (étiquette risk_clamp figée)',
       ],
+      three_valued_criteria: 'pass | fail | non_mesurable — un critère qui n’a rien pu comparer n’est jamais vert',
       witnesses_bear: ['frais', 'seuil de mouvement', 'poussière', 'prix absent', 'budget insuffisant'],
       witnesses_do_not_bear: ['gels', 'stops', 'transitions du livre du bot'],
     },
@@ -1186,13 +1548,16 @@ async function main(): Promise<void> {
   console.log('');
   console.log(`Artefact : ${written.file}  ${written.sha256}  ${written.bytes} octets`);
 
-  const failed = results.filter((r) => !r.passed);
+  const failed = results.filter((r) => r.status === 'fail');
+  const unmeasurable = results.filter((r) => r.status === 'non_mesurable');
+  const passedCount = results.filter((r) => r.status === 'pass').length;
   console.log('');
   console.log('='.repeat(96));
   console.log(
-    failed.length === 0
-      ? `Tous les ${results.length} critères passent.`
-      : `${failed.length} critère(s) en échec : ${failed.map((r) => r.id).join(', ')}`,
+    `${passedCount} critère(s) passent · ${unmeasurable.length} non mesurable(s)` +
+      (unmeasurable.length === 0 ? '' : ` (${unmeasurable.map((r) => r.id).join(', ')})`) +
+      ` · ${failed.length} en échec` +
+      (failed.length === 0 ? '.' : ` : ${failed.map((r) => r.id).join(', ')}`),
   );
   console.log('='.repeat(96));
   if (failed.length > 0) process.exitCode = 1;
