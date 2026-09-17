@@ -660,8 +660,19 @@ console.log('\nProof 12 — an unresolved pointer refuses; it never lets the win
       persistence.includes("instantColumn: 'stopped_at'"),
   );
   ok(
-    'each is found as the first DECIDED cycle at or after its own instant',
-    persistence.includes(".eq('status', 'decided')") && persistence.includes(".gte('created_at', instant)"),
+    'each is found as the first cycle at or after its own instant',
+    persistence.includes(".gte('created_at', instant)"),
+  );
+  // WHICH STATUSES. A threshold is judged on the valuation, before the model is called, so the
+  // crossing cycle may end failed — and it is ITS row the pointer must name, not the next
+  // decided one, or the official window would run one cycle past the stop. The activation is
+  // the exception: it only lands on a decided cycle and seeds the decided-only heartbeat.
+  ok(
+    'the activation pointer is decided-only; the two threshold pointers are not',
+    /idColumn: 'activated_decision_id', decidedOnly: true/.test(persistence) &&
+      /idColumn: 'alert_drawdown_decision_id', decidedOnly: false/.test(persistence) &&
+      /idColumn: 'stopped_decision_id', decidedOnly: false/.test(persistence) &&
+      /pointer\.decidedOnly \? query\.eq\('status', 'decided'\) : query/.test(persistence),
   );
   ok(
     'and the update only ever touches a pointer that is still null',
@@ -935,9 +946,15 @@ console.log('\nProof 15 — a failed cycle with a reliable valuation still feeds
     return idx;
   };
   const judgementAt = at('const pilotJudgement = judgePilot({');
-  const fabricatedBookRefusal = at('refusing to trade on a book and a lifecycle we cannot');
+  const fabricatedBookRefusal = at('refusing to trade on a book we cannot derive');
+  const lifecycleRefusal = at('refusing to trade on a lifecycle we cannot record');
   const llmCallAt = at('const llmStart = Date.now();');
   ok('[câblage] the judgement comes AFTER the fabricated-book refusal', judgementAt > fabricatedBookRefusal);
+  // THE SECOND REVIEW ROUND'S FINDING. The three lifecycle reads used to refuse as one, and a
+  // failed position-state or reference read — which leaves the book sovereign and live-priced
+  // — returned before the pilot could see it. Only the journal's failure fabricates a book.
+  ok('but BEFORE the lifecycle refusal — that book is sovereign and its peak is real', judgementAt < lifecycleRefusal);
+  ok('the two refusals are split on the one read that fabricates the book', /if \(!ledgerRead\.ok\) \{/.test(decide) && /if \(!stateRead\.ok \|\| referenceUnavailable\) \{/.test(decide));
   ok('and BEFORE the model is called', judgementAt < llmCallAt);
   ok('it is made exactly once per cycle', (decide.match(/judgePilot\(\{/g) ?? []).length === 1);
   ok('the fallback-priced lines are passed from the book\'s own flag', /fallbackPricedAssets: portfolio\.positions\.filter\(\(p\) => p\.priceStale\)/.test(decide));
@@ -946,8 +963,8 @@ console.log('\nProof 15 — a failed cycle with a reliable valuation still feeds
   ok('the activation waits for the decided path', activationLanding > at('const { clamp, movements: proposedMovements } = evaluated;'));
   ok('and still lands before any order', activationLanding < at('let correctedAllocation = clamp.applied;'));
   const observations = decide.match(/observeExposureBand\(\{[\s\S]*?\}\);/g) ?? [];
-  ok(`every observation row carries a verdict (${observations.length} call sites)`, observations.length >= 6 && observations.every((call) => /pilot: (pilotJournal\(|\{)/.test(call)));
-  ok('the failure paths journal the valuation as not judged', (decide.match(/pilot: pilotJournal\(false\)/g) ?? []).length >= 4);
+  ok(`every observation row carries a verdict (${observations.length} call sites)`, observations.length >= 7 && observations.every((call) => /pilot: (pilotJournal\(|\{)/.test(call)));
+  ok('the failure paths journal the valuation as not judged', (decide.match(/pilot: pilotJournal\(false\)/g) ?? []).length >= 5);
   ok('and the decided path as reached', (decide.match(/pilot: pilotJournal\(true\)/g) ?? []).length === 1);
   ok('the verdict is no longer optional on a row', /pilot: \{ hold: PilotJournalHold \| null;/.test(decide) && !/pilot\?: \{/.test(decide));
   // NO ORDER ON A FAILED CYCLE. The executor is reached from exactly one place, and that place

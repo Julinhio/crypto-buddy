@@ -847,16 +847,20 @@ export async function decide(): Promise<DecideResult> {
   // 1 and 2 silently stop applying, and a cycle that trades with a disarmed guard it
   // still believes is armed is worse than a cycle that does not trade at all. When the
   // guard is OFF the read is irrelevant and its failure changes nothing.
+  //
+  // ONE GATE, TWO HALVES — split around the pilot's judgement below, because the three
+  // reads do not leave the same thing behind. A failed JOURNAL read leaves a fabricated
+  // book, and nothing may be measured on it, the high-water mark least of all. A failed
+  // state or reference read leaves the book exactly as sovereign and as live-priced as on any
+  // other cycle: the cycle still may not trade, but its valuation is real, and a peak
+  // reached on it is a real peak. So the journal half refuses BEFORE the pilot judges, and
+  // the lifecycle half refuses AFTER — the second review round caught the two folded
+  // together, with the valid book skipping the judgement it was entitled to.
   const referenceUnavailable = COHERENCE_GUARD && !referenceRead.ok;
-  if (!ledgerRead.ok || !stateRead.ok || referenceUnavailable) {
-    const which = !ledgerRead.ok
-      ? 'the execution journal'
-      : !stateRead.ok
-        ? 'the stored position state'
-        : 'the coherence guard\'s reference target';
+  if (!ledgerRead.ok) {
     const skipReason =
-      `${which} could not be read — refusing to trade on a book and a lifecycle we cannot ` +
-      'record the outcome of. Nothing is booked and no state is written; the next cycle retries.';
+      'the execution journal could not be read — refusing to trade on a book we cannot derive. ' +
+      'Nothing is booked and no state is written; the next cycle retries.';
     console.error(`[CRITICAL] Wake-up skipped: ${skipReason} The LLM was not called.`);
     const row = makeRow(decisionContext, context.regime, gitSha, { status: 'skipped', skip_reason: skipReason });
     const { persisted, id } = await insertDecision(supabase, row);
@@ -1061,6 +1065,33 @@ export async function decide(): Promise<DecideResult> {
     drawdownPercent: activationPending && !correctionReached ? null : pilotJudgement.drawdownPercent,
     peakEquityQuote: activationPending && !correctionReached ? null : pilotJudgement.peakEquityQuote,
   });
+
+  // Edge case 0, second half — the LIFECYCLE could not be read: the stored position state, or
+  // the guard's reference target. The book is sovereign and its valuation has just been
+  // judged; the cycle still refuses to trade, for the reasons given above the first half.
+  if (!stateRead.ok || referenceUnavailable) {
+    const which = !stateRead.ok ? 'the stored position state' : 'the coherence guard\'s reference target';
+    const skipReason =
+      `${which} could not be read — refusing to trade on a lifecycle we cannot record the ` +
+      'outcome of. Nothing is booked and no state is written; the next cycle retries.';
+    console.error(`[CRITICAL] Wake-up skipped: ${skipReason} The LLM was not called.`);
+    const row = makeRow(decisionContext, context.regime, gitSha, { status: 'skipped', skip_reason: skipReason });
+    const { persisted, id } = await insertDecision(supabase, row);
+    // Still NO persistLifecycle: the stored state is the very thing that could not be read.
+    // The book, on the other hand, is real, so its exposure is published like any other
+    // cycle's — only the fabricated book of the first half is withheld.
+    await observeExposureBand({
+      decisionId: id,
+      targetAllocation: null,
+      rawAllocation: null,
+      bookExposurePercent: portfolio.deployedPercent.toNumber(),
+      // No target existed, so no correction was judged — but the VALUATION was, above, and
+      // its verdict travels with the row.
+      pilot: pilotJournal(false),
+    });
+    await observeMarketDataOutage(id);
+    return emptyResult('skipped', persisted, id, row, portfolio, marketData);
+  }
 
   // Edge case 1 — empty context: no tradable pair returned usable data. Never
   // let the AI decide on zero data.

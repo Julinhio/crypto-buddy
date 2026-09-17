@@ -595,8 +595,10 @@ déplacer sans changer un seul verdict sur un cycle décidé.
 
 Une valorisation est **admissible** quand :
 
-* elle vient du ledger souverain — le livre fabriqué par un journal illisible n'atteint jamais le
-  pilote, le cycle est écarté avant (cas limite 0 de `decide.ts`) ;
+* elle vient du ledger souverain — le livre fabriqué par un **journal** illisible n'atteint jamais
+  le pilote, le cycle est écarté avant (première moitié du cas limite 0 de `decide.ts`). Un état
+  de position ou une référence du garde illisibles écartent aussi le cycle, mais **après** le
+  jugement : leur livre est souverain, à prix vivants, et son sommet est réel ;
 * l'equity est finie et strictement positive ;
 * **chaque ligne détenue a un prix vivant ce cycle**. `derivePortfolio` valorise une ligne sans
   ticker à son coût moyen (`priceStale`) : c'est le bon nombre pour une vue et le mauvais pour
@@ -632,9 +634,16 @@ désormais la **seule** valorisation admissible que le pilote peut manquer, et l
 demanderait un second reçu de continuité sur tous les cycles non `skipped` : un chantier séparé.
 
 Un seuil franchi sur un cycle en échec résout son pointeur (`alert_drawdown_decision_id`,
-`stopped_decision_id`) au **premier cycle décidé à cet instant ou après**, comme aujourd'hui —
-c'est-à-dire au premier cycle décidé sur lequel la correction était désarmée, ce que le pointeur
-désigne aussi quand le seuil tombe sur un cycle décidé.
+`stopped_decision_id`) sur **la ligne de ce cycle-là**, quel que soit son statut : le résolveur
+cherche la première ligne à cet instant ou après, sans filtre `decided` pour ces deux pointeurs.
+Ce filtre était un artefact de l'ancien emplacement du bloc — l'écriture ne pouvait tomber que
+sur un cycle décidé — et le garder aurait pointé la fenêtre officielle un cycle **au-delà** du
+franchissement. Le rejeu n'utilise le pointeur que comme borne haute sur les lignes décidées :
+l'id d'une ligne en échec ferme la fenêtre exactement au dernier cycle décidé avant le
+franchissement, et rien de postérieur n'y entre. Le pointeur d'activation garde le filtre : elle
+ne se pose que sur un cycle décidé, et elle amorce le battement, qui ne parle que de cycles
+décidés. Résidu inchangé : l'instant vient de l'horloge du processus et `created_at` de celle
+de la base, comme pour l'activation depuis le premier jour.
 
 ### Une interruption du mode met fin au pilote
 
