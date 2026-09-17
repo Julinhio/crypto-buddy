@@ -17,6 +17,8 @@ import {
   type PilotJudgeInput,
   type PilotWrite,
 } from '../exposure/pilot.js';
+import { resolvePilotEventCycles } from '../persistence/exposurePilot.js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 /**
  * THE PROOFS OF THE PILOT'S IDENTITY AND ITS CIRCUIT BREAKER — brick 4.
@@ -1024,6 +1026,108 @@ console.log('\nProof 15 — a failed cycle with a reliable valuation still feeds
   ok('a decided cycle at a new high still writes the peak and applies', judge({ identity: walk, equityQuote: 1100 }).write?.kind === 'peak' && judge({ identity: walk, equityQuote: 1100 }).mayCorrect);
   ok('the contract digest did not move — the running pilot is not invalidated by this fix', contractDigest(pilotContractOf(config, ['BTC', 'ETH', 'BNB', 'XRP'], 'USDT', 'enforce')) === SHA);
   ok('and the contract version is still A.1', config.exposurePilot.contractVersion === 'A.1');
+}
+
+// ── PROOF 16 — a cycle that left no row leaves nothing, and a later cycle never inherits it ──
+//
+// THE FIFTH REVIEW ROUND. On a failure path the settlement runs after the row insert, and
+// `insertDecision` returns a null id when that insert failed. Had the threshold been persisted
+// then, it would carry no pointer, and the instant-based repair would bind it to the first row
+// it finds — a LATER cycle's, which would become the triggering cycle of a crossing it never
+// saw, and the official window would be cut on it.
+//
+// Arbitrated, the minimal option: no durable row → nothing durable from the pilot. No peak, no
+// alert, no stop; no repair pass either. The RESIDUAL is stated rather than hidden: that
+// cycle's valuation is lost if the market moves before the next cycle, which judges its own.
+console.log('\nProof 16 — a crossing on a cycle with no row binds to nothing, ever:');
+{
+  // (1) THE CROSSING. Peak 1000, this cycle's equity 600: the 40% alert is decided.
+  const crossing = judge({ identity: identity({ peakEquityQuote: 1000 }), equityQuote: 600 });
+  ok('[1] the threshold is crossed and the latch is decided', crossing.alert === 'drawdown_40' && crossing.write?.kind === 'alert_drawdown');
+
+  // (2) THE INSERT FAILS. The settlement is handed a null id on a non-decided path and writes
+  // NOTHING — proven on the wiring, since the rule lives there.
+  const decide = readFileSync(path.join(ROOT, 'src/decision/decide.ts'), 'utf8').replace(/\r\n/g, '\n');
+  const settle = decide.slice(decide.indexOf('const settlePilot = async'), decide.indexOf('\n  };', decide.indexOf('const settlePilot = async')));
+  const guardAt = settle.indexOf('if (!correctionReached && decisionId == null) {');
+  ok('[2] a non-decided path with no row returns before the write', guardAt >= 0 && settle.slice(guardAt, settle.indexOf('await applyPilotWrite(')).includes('return;') && guardAt < settle.indexOf('await applyPilotWrite('));
+  ok('nothing at all is written there — the write call is the only one, and it comes after', (settle.match(/await applyPilotWrite\(/g) ?? []).length === 1);
+  ok('and no repair pass runs on a failure path without a row', (decide.match(/if \(id != null\) await resolvePilotEvents\(\);/g) ?? []).length === 5 && (decide.match(/await resolvePilotEvents\(\);/g) ?? []).length === 6);
+  ok('the decided path is untouched by the rule — the guard is scoped to non-decided paths', /await settlePilot\(true, null\);/.test(decide) && settle.includes('!correctionReached && decisionId == null'));
+
+  // (3) + (4) A LATER DECISION IS CREATED, AND THE REPAIR PASS FINDS NOTHING TO BIND TO IT.
+  // The real resolver, run against an in-memory client: the identity as the failed cycle left
+  // it (no instant persisted), and a decided row created afterwards. Then the contrast — the
+  // identity as the previous code would have left it (instant persisted, pointer null) — to
+  // show what the withheld write would have caused.
+  const T_CROSSING = '2026-09-17T10:00:00.000Z';
+  const T_LATER = '2026-09-17T11:05:00.000Z';
+  type PilotRow = Record<string, string | number | null>;
+  const fakeClient = (pilot: PilotRow, decisions: Array<{ id: number; status: string; created_at: string }>) => {
+    const updates: Array<{ patch: Record<string, unknown>; onlyIfNull: string | null }> = [];
+    const builder = (table: string) => {
+      const state = { op: 'select' as 'select' | 'update', patch: {} as Record<string, unknown>, onlyIfNull: null as string | null, gte: null as string | null, decidedOnly: false };
+      const chain: Record<string, unknown> = {};
+      const self = () => chain;
+      Object.assign(chain, {
+        select: self, order: self, limit: self, abortSignal: self,
+        update: (patch: Record<string, unknown>) => { state.op = 'update'; state.patch = patch; return chain; },
+        is: (col: string, value: unknown) => { if (value === null) state.onlyIfNull = col; return chain; },
+        gte: (_col: string, value: string) => { state.gte = value; return chain; },
+        eq: (col: string, value: string) => { if (col === 'status' && value === 'decided') state.decidedOnly = true; return chain; },
+        then: (resolve: (v: { data: unknown; error: null }) => void) => {
+          if (table === 'exposure_pilot' && state.op === 'update') {
+            if (state.onlyIfNull == null || pilot[state.onlyIfNull] == null) {
+              updates.push({ patch: state.patch, onlyIfNull: state.onlyIfNull });
+              Object.assign(pilot, state.patch);
+            }
+            resolve({ data: null, error: null });
+          } else if (table === 'exposure_pilot') {
+            resolve({ data: [pilot], error: null });
+          } else {
+            const rows = decisions
+              .filter((d) => (state.gte == null || d.created_at >= state.gte) && (!state.decidedOnly || d.status === 'decided'))
+              .sort((a, b) => a.id - b.id)
+              .map((d) => ({ id: d.id }));
+            resolve({ data: rows, error: null });
+          }
+        },
+      });
+      return chain;
+    };
+    return { client: { from: builder } as unknown as SupabaseClient, updates };
+  };
+  const basePilot = (): PilotRow => ({
+    activated_at: '2026-09-06T11:46:10.481Z', activated_decision_id: 1839,
+    alert_drawdown_at: null, alert_drawdown_decision_id: null,
+    stopped_at: null, stopped_decision_id: null,
+  });
+  const laterDecision = [{ id: 2100, status: 'decided', created_at: T_LATER }];
+
+  const withheldPilot = basePilot();
+  const withheld = fakeClient(withheldPilot, laterDecision);
+  await resolvePilotEventCycles(withheld.client);
+  ok('[3] a later decided cycle exists; [4] the repair pass binds nothing to it', withheld.updates.length === 0);
+  ok('and the identity still carries no alert and no pointer — the crossing left no trace, as arbitrated', withheldPilot.alert_drawdown_at === null && withheldPilot.alert_drawdown_decision_id === null && withheldPilot.stopped_decision_id === null);
+
+  // THE CONTRAST — what the previous code would have persisted (the instant, no pointer), and
+  // what the pass then does with it: the later cycle becomes the triggering cycle.
+  const leaked = fakeClient({ ...basePilot(), alert_drawdown_at: T_CROSSING }, laterDecision);
+  await resolvePilotEventCycles(leaked.client);
+  ok(
+    '[contraste] a persisted instant with no row WOULD have bound the later cycle as the trigger',
+    leaked.updates.length === 1 && leaked.updates[0]!.patch['alert_drawdown_decision_id'] === 2100,
+  );
+
+  // THE NEXT CYCLE JUDGES ITS OWN VALUATION, not the lost one. Recovered above 40%: no alert,
+  // nothing inherited. Still below: the alert fires on THAT cycle, which really did cross.
+  const recovered = judge({ identity: identity({ peakEquityQuote: 1000 }), equityQuote: 650 });
+  ok('[résidu] the next cycle, recovered to 35%, fires nothing — the 40% crossing is lost', recovered.alert === null && recovered.write === null);
+  const stillDown = judge({ identity: identity({ peakEquityQuote: 1000 }), equityQuote: 590 });
+  ok('and a next cycle still below 40% crosses on its own account, as its own trigger', stillDown.alert === 'drawdown_40');
+  // The README says so in as many words, and does not promise the next cycle re-judges it.
+  const readme = readFileSync(path.join(ROOT, 'src/exposure/README.md'), 'utf8');
+  ok('the residual is written down, not papered over', /peut être perdue/.test(readme) && /aucune trace durable/.test(readme));
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────────

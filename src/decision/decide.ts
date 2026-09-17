@@ -1017,6 +1017,26 @@ export async function decide(): Promise<DecideResult> {
   const settlePilot = async (correctionReached: boolean, decisionId: number | null): Promise<void> => {
     if (pilotJudgement.write == null) return;
     if (activationPending && !correctionReached) return;
+    // NO DURABLE ROW, NOTHING DURABLE FROM THE PILOT EITHER. On a failure path the row is
+    // inserted before this settlement, and `insertDecision` returns a null id when that
+    // insert failed. An event persisted then would carry no pointer, and the instant-based
+    // repair would later bind it to the first row it finds — some LATER cycle's, which would
+    // become the triggering cycle of a crossing it never saw, and the official window would
+    // be cut on it. So no peak, no alert, no stop, no interruption or divergence: nothing.
+    // (Fifth review round.)
+    //
+    // THE RESIDUAL, honestly: this cycle's valuation leaves no trace anywhere, and it is LOST
+    // if the market moves before the next cycle — a peak reached here is not recorded, a
+    // crossing seen here is not latched. The next cycle judges ITS OWN valuation, not this
+    // one's. A journal or contract fact (interruption, divergence) is not lost: it is still
+    // true next cycle and is detected then. The decided path is untouched by this rule.
+    if (!correctionReached && decisionId == null) {
+      console.warn(
+        `[pilot] the cycle's row was not persisted — its ${pilotJudgement.write.kind} is NOT written: ` +
+          'nothing durable may name a cycle that left no trace. This valuation is lost.',
+      );
+      return;
+    }
     const landed = await applyPilotWrite(supabase, pilotJudgement.write, {
       // THE CYCLE THE EVENT NAMES. Null on the decided path, and necessarily so: there the
       // write happens before the decision row exists, because that row has to carry the
@@ -1140,8 +1160,10 @@ export async function decide(): Promise<DecideResult> {
       // its verdict travels with the row.
       pilot: pilotJournal(false),
     });
-    // A threshold crossed on this cycle names THIS row, now — see `resolvePilotEvents`.
-    await resolvePilotEvents();
+    // A threshold crossed on this cycle names THIS row, now — see `resolvePilotEvents`. With
+    // no row, no pass either: nothing of this cycle's was persisted, and a pass here could only
+    // bind an event to a row that is not this cycle's.
+    if (id != null) await resolvePilotEvents();
     await observeMarketDataOutage(id);
     return emptyResult('skipped', persisted, id, row, portfolio, marketData);
   }
@@ -1168,8 +1190,10 @@ export async function decide(): Promise<DecideResult> {
       // its verdict travels with the row.
       pilot: pilotJournal(false),
     });
-    // A threshold crossed on this cycle names THIS row, now — see `resolvePilotEvents`.
-    await resolvePilotEvents();
+    // A threshold crossed on this cycle names THIS row, now — see `resolvePilotEvents`. With
+    // no row, no pass either: nothing of this cycle's was persisted, and a pass here could only
+    // bind an event to a row that is not this cycle's.
+    if (id != null) await resolvePilotEvents();
     await observeMarketDataOutage(id);
     return emptyResult('skipped', persisted, id, row, portfolio, marketData);
   }
@@ -1350,8 +1374,10 @@ export async function decide(): Promise<DecideResult> {
       // its verdict travels with the row.
       pilot: pilotJournal(false),
     });
-    // A threshold crossed on this cycle names THIS row, now — see `resolvePilotEvents`.
-    await resolvePilotEvents();
+    // A threshold crossed on this cycle names THIS row, now — see `resolvePilotEvents`. With
+    // no row, no pass either: nothing of this cycle's was persisted, and a pass here could only
+    // bind an event to a row that is not this cycle's.
+    if (id != null) await resolvePilotEvents();
     await observeMarketDataOutage(id);
     // The stop may have been armed on this book. Nothing is placed here — the alert only
     // makes the gap visible. See alertArmedStopNotFired.
@@ -1415,8 +1441,10 @@ export async function decide(): Promise<DecideResult> {
       // its verdict travels with the row.
       pilot: pilotJournal(false),
     });
-    // A threshold crossed on this cycle names THIS row, now — see `resolvePilotEvents`.
-    await resolvePilotEvents();
+    // A threshold crossed on this cycle names THIS row, now — see `resolvePilotEvents`. With
+    // no row, no pass either: nothing of this cycle's was persisted, and a pass here could only
+    // bind an event to a row that is not this cycle's.
+    if (id != null) await resolvePilotEvents();
     await observeMarketDataOutage(id);
     // After persistLifecycle, so anything it queued is written too. It cannot queue a
     // refusal here (it is called with no notes), but the ordering is the same on every
@@ -1490,8 +1518,10 @@ export async function decide(): Promise<DecideResult> {
       // its verdict travels with the row.
       pilot: pilotJournal(false),
     });
-    // A threshold crossed on this cycle names THIS row, now — see `resolvePilotEvents`.
-    await resolvePilotEvents();
+    // A threshold crossed on this cycle names THIS row, now — see `resolvePilotEvents`. With
+    // no row, no pass either: nothing of this cycle's was persisted, and a pass here could only
+    // bind an event to a row that is not this cycle's.
+    if (id != null) await resolvePilotEvents();
     await observeMarketDataOutage(id);
     await alertArmedStopNotFired('parse_failed');
     return emptyResult('parse_failed', persisted, id, row, portfolio, marketData);

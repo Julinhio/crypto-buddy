@@ -641,6 +641,19 @@ identité illisible — ne laisse aucune trace prouvable, exactement comme avant
 désormais la **seule** valorisation admissible que le pilote peut manquer, et la fermer
 demanderait un second reçu de continuité sur tous les cycles non `skipped` : un chantier séparé.
 
+**Aucune trace durable, rien de durable.** Sur un chemin non décidé, la clôture se fait après
+l'insertion de la ligne ; si cette insertion a échoué (`id` nul), le pilote n'écrit **rien** —
+ni nouveau plus-haut, ni alerte, ni arrêt — et aucune passe de résolution ne tourne. Un
+événement persisté sans ligne aurait été rattaché par la passe à la première ligne venue, celle
+d'un cycle **ultérieur**, qui serait devenu artificiellement le cycle déclencheur d'un
+franchissement qu'il n'a pas vu, et la fenêtre officielle aurait été bornée dessus. Une décision
+future ne devient jamais le cycle déclencheur d'un autre. Le résidu, dit honnêtement : la
+valorisation d'un cycle qui n'a **aucune trace durable** peut être perdue si le marché redescend
+avant le cycle suivant — un sommet atteint là n'est pas enregistré, un franchissement vu là n'est
+pas verrouillé. Le cycle suivant juge **sa propre** valorisation, pas celle-là. Un fait de
+journal ou de contrat (interruption, divergence) n'est pas perdu : il est encore vrai au cycle
+suivant et s'y détecte. Le chemin décidé n'est pas concerné par cette règle. Preuve 16.
+
 Un seuil franchi sur un cycle en échec résout son pointeur (`alert_drawdown_decision_id`,
 `stopped_decision_id`) sur **la ligne de ce cycle-là**, quel que soit son statut, et **dès ce
 cycle** : la passe de résolution tourne sur chaque chemin qui a inséré une ligne après le
