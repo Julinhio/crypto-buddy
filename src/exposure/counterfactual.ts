@@ -168,6 +168,12 @@ export interface CycleExecutionFacts {
   gateRefusal: string | null;
   /** `exposure_band_observations.pilot_hold` — set when the correction was not allowed to act. */
   pilotHold: string | null;
+  /**
+   * Was the correction allowed to reach the orders — `mode = application` and no hold? When it
+   * was not, a `booked_side` on a band-origin line is the uncorrected MODEL's own booking, and
+   * the leg counts as planned-not-executed, never as executed by the band (third review round).
+   */
+  correctionAllowed: boolean;
 }
 
 export function realBandLegs(
@@ -178,44 +184,65 @@ export function realBandLegs(
   refusedIntentReason: (decisionId: number, asset: string) => string | null,
   /** The cycle's own journaled causes — the gate's refusal and the pilot's hold. */
   cycleFacts: (decisionId: number) => CycleExecutionFacts,
-): { planned: RealBandLeg[]; executed: RealBandLeg[]; plannedNotExecuted: RealBandLeg[] } {
-  const planned: RealBandLeg[] = [];
+): {
+  /** Every leg the band WANTED — the line moved — whether it was planned, suppressed or booked. */
+  wanted: RealBandLeg[];
+  /** The journal's own "planned": a `planned_side` — the corrector's floor let the leg through. */
+  planned: RealBandLeg[];
+  /** Wanted, and deleted by the corrector's own floor before any plan existed. */
+  suppressedByCorrector: RealBandLeg[];
+  executed: RealBandLeg[];
+  /** Planned by the corrector, never booked by the band. */
+  plannedNotExecuted: RealBandLeg[];
+} {
+  const wanted: RealBandLeg[] = [];
   for (const line of lines) {
     if (line.origin === 'modele' || line.correctionPoints === 0) continue;
     if (line.decisionId < fromDecisionId || line.decisionId > toDecisionId) continue;
-    if (line.plannedSide == null && line.bookedSide == null) continue;
+    // A leg the corrector's own floor deleted has no planned side but a suppression: it was
+    // wanted, and it is a planned-not-executed leg like the others (third review round).
+    const suppressed = line.suppressedReason != null;
+    if (line.plannedSide == null && line.bookedSide == null && !suppressed) continue;
+    const facts = cycleFacts(line.decisionId);
+    // EXECUTED BY THE BAND only when the correction was allowed to act: on a held cycle the
+    // booking, if any, is the model's own.
+    const executedByBand = line.bookedSide != null && facts.correctionAllowed;
     let notExecutedBecause: string | null = null;
-    if (line.bookedSide == null) {
-      const facts = cycleFacts(line.decisionId);
+    if (!executedByBand) {
       const refused = refusedIntentReason(line.decisionId, line.asset);
       notExecutedBecause =
         line.suppressedReason != null
           ? `supprimée par le correcteur (${line.suppressedReason})`
-          : facts.pilotHold != null
-            ? `la correction n’a pas été appliquée ce cycle (pilot_hold ${facts.pilotHold})`
+          : !facts.correctionAllowed
+            ? `la correction n’a pas été appliquée ce cycle (${facts.pilotHold == null ? 'mode observation' : `pilot_hold ${facts.pilotHold}`})` +
+              (line.bookedSide == null ? '' : ` — le booking ${line.bookedSide} est celui du modèle`)
             : facts.gateRefusal != null
               ? `la porte a refusé le vecteur entier (${facts.gateRefusal})`
               : refused != null
                 ? `intention refusée par l’exécuteur (${refused})`
                 : 'aucune ligne d’exécution : écartée avant l’exécuteur, sous le seuil après arrondi au pas de la place — déduit, rien de journalisé';
     }
-    planned.push({
+    wanted.push({
       decisionId: line.decisionId,
       asset: line.asset,
       origin: line.origin,
       correctionPoints: line.correctionPoints,
-      plannedSide: line.plannedSide,
-      plannedNotionalQuote: line.plannedNotionalQuote,
-      bookedSide: line.bookedSide,
-      bookedNotionalQuote: line.bookedNotionalQuote,
+      plannedSide: line.plannedSide ?? (suppressed ? (line.correctionPoints > 0 ? 'buy' : 'sell') : null),
+      plannedNotionalQuote: line.plannedNotionalQuote ?? line.suppressedNotionalQuote,
+      bookedSide: executedByBand ? line.bookedSide : null,
+      bookedNotionalQuote: executedByBand ? line.bookedNotionalQuote : null,
       notExecutedBecause,
     });
   }
-  const sorted = planned.sort((a, b) => a.decisionId - b.decisionId || (a.asset < b.asset ? -1 : 1));
+  const sorted = wanted.sort((a, b) => a.decisionId - b.decisionId || (a.asset < b.asset ? -1 : 1));
+  const suppressedByCorrector = sorted.filter((leg) => leg.notExecutedBecause?.startsWith('supprimée par le correcteur') ?? false);
+  const planned = sorted.filter((leg) => !suppressedByCorrector.includes(leg));
   return {
-    planned: sorted,
-    executed: sorted.filter((leg) => leg.bookedSide != null),
-    plannedNotExecuted: sorted.filter((leg) => leg.bookedSide == null),
+    wanted: sorted,
+    planned,
+    suppressedByCorrector,
+    executed: planned.filter((leg) => leg.bookedSide != null),
+    plannedNotExecuted: planned.filter((leg) => leg.bookedSide == null),
   };
 }
 

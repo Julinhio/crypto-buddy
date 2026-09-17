@@ -376,6 +376,7 @@ interface CorrectionRowRead {
   planned_side: string | null;
   planned_notional_quote: string | number | null;
   suppressed_reason: string | null;
+  suppressed_notional_quote: string | number | null;
   booked_side: string | null;
   booked_notional_quote: string | number | null;
   post_cycle_weight_percent: string | number | null;
@@ -404,7 +405,7 @@ async function loadCorrectionsJournal(
       .select(
         'decision_id, asset, origin, cause, raw_weight_percent, clamped_weight_percent, base_weight_percent, ' +
           'correction_points, corrected_weight_percent, planned_side, planned_notional_quote, suppressed_reason, ' +
-          'booked_side, booked_notional_quote, post_cycle_weight_percent',
+          'suppressed_notional_quote, booked_side, booked_notional_quote, post_cycle_weight_percent',
       )
       .lte('decision_id', cutoffId)
       .order('id', { ascending: true })
@@ -437,6 +438,7 @@ async function loadCorrectionsJournal(
         plannedSide: side(row.planned_side),
         plannedNotionalQuote: num(row.planned_notional_quote),
         suppressedReason: row.suppressed_reason,
+        suppressedNotionalQuote: num(row.suppressed_notional_quote),
         bookedSide: side(row.booked_side),
         bookedNotionalQuote: num(row.booked_notional_quote),
         postCycleWeightPercent: num(row.post_cycle_weight_percent),
@@ -499,45 +501,47 @@ async function loadRefusedIntents(
   return reasons;
 }
 
+interface BandMarker {
+  /** Whether a correction was computed on the cycle — what says how many corrections rows it owes. */
+  correctionComputed: boolean;
+  mode: string;
+  pilotHold: string | null;
+  /** Mode `application` and no hold: the correction was allowed to reach the orders. */
+  correctionAllowed: boolean;
+}
+
 /**
- * The band observation rows up to the gate-settled point — only whether a correction was
- * computed on each, which is what says how many corrections rows that cycle owes.
+ * The band observation rows up to the gate-settled point: the completeness marker for the
+ * settled point, and the two facts that say whether the correction was ALLOWED TO ACT on the
+ * cycle — its mode and its `pilot_hold`. A held or observation-mode cycle records the
+ * correction it computed and the bookings the bot really made, and the two are unrelated.
  */
 async function loadBandObservationMarkers(
   supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
   cutoffId: number,
-): Promise<Map<number, { correctionComputed: boolean }>> {
+): Promise<Map<number, BandMarker>> {
   const PAGE = 1000;
-  const markers = new Map<number, { correctionComputed: boolean }>();
+  const markers = new Map<number, BandMarker>();
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await supabase
       .from('exposure_band_observations')
-      .select('decision_id, corrected_exposure_percent')
+      .select('decision_id, corrected_exposure_percent, mode, pilot_hold')
       .lte('decision_id', cutoffId)
       .order('decision_id', { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw new Error(`band witnesses: could not read exposure_band_observations (${error.message}).`);
-    const page = (data ?? []) as Array<{ decision_id: number; corrected_exposure_percent: string | number | null }>;
-    for (const row of page) markers.set(row.decision_id, { correctionComputed: row.corrected_exposure_percent != null });
+    const page = (data ?? []) as Array<{ decision_id: number; corrected_exposure_percent: string | number | null; mode: string; pilot_hold: string | null }>;
+    for (const row of page) {
+      markers.set(row.decision_id, {
+        correctionComputed: row.corrected_exposure_percent != null,
+        mode: row.mode,
+        pilotHold: row.pilot_hold,
+        correctionAllowed: row.mode === 'application' && row.pilot_hold == null,
+      });
+    }
     if (page.length < PAGE) break;
   }
   return markers;
-}
-
-/** `pilot_hold` of the band observation, for the cycles where the band planned a leg. */
-async function loadPilotHolds(
-  supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
-  decisionIds: readonly number[],
-): Promise<Map<number, string | null>> {
-  const holds = new Map<number, string | null>();
-  if (decisionIds.length === 0) return holds;
-  const { data, error } = await supabase
-    .from('exposure_band_observations')
-    .select('decision_id, pilot_hold')
-    .in('decision_id', [...decisionIds]);
-  if (error) throw new Error(`band witnesses: could not read pilot holds (${error.message}).`);
-  for (const row of (data ?? []) as Array<{ decision_id: number; pilot_hold: string | null }>) holds.set(row.decision_id, row.pilot_hold);
-  return holds;
 }
 
 /**
@@ -1008,7 +1012,7 @@ async function main(): Promise<void> {
   // the requested pointer as the closing cycle — publishing a PARTIAL replay as though it had
   // been valued at the alert, the stop or the closure. The honest answer is to wait until that
   // exact cycle is provably complete.
-  const pilotWindow: PilotWindowResolution =
+  let pilotWindow: PilotWindowResolution =
     resolved.official && resolved.toDecisionId != null && resolved.toDecisionId > cutoffId
       ? {
           official: false,
@@ -1017,6 +1021,16 @@ async function main(): Promise<void> {
             `d'arret prouve complet (${cutoffId}) — le rejeu refuse plutot que de tronquer`,
         }
       : resolved;
+  // AN OFFICIAL WINDOW WITHOUT ITS FROZEN GATE MODE IS A REFUSAL (third review round). The
+  // column is nullable; a null there would make B̂ size as under `observe` and C8 ignore the
+  // enforced gate, and the result would be published as the pilot's without knowing which
+  // gate semantics were in force. Refused with its reason, like every other doubt.
+  if (pilotWindow.official && pilotTransitionMode == null) {
+    pilotWindow = {
+      official: false,
+      reason: "l'identite ne porte pas de mode de porte fige — le rejeu ne sait pas sous quelle porte le pilote a tourne",
+    };
+  }
   const upperBound =
     pilotWindow.official && pilotWindow.toDecisionId != null ? pilotWindow.toDecisionId : cutoffId;
 
@@ -1408,17 +1422,24 @@ async function main(): Promise<void> {
     .flat()
     .filter((line) => line.decisionId >= scopeFromId && line.decisionId <= scopeToId);
   const plannedCycleIds = [...new Set(journalInScope.filter((l) => l.origin !== 'modele' && l.plannedSide != null).map((l) => l.decisionId))];
-  const [refusedIntents, pilotHolds] = await Promise.all([
-    loadRefusedIntents(supabase, plannedCycleIds),
-    loadPilotHolds(supabase, plannedCycleIds),
-  ]);
+  const refusedIntents = await loadRefusedIntents(supabase, plannedCycleIds);
   const divergenceOf = new Map(decisions.map((d) => [d.id, typeof d.applied_divergence_cause === 'string' ? d.applied_divergence_cause : null]));
+  // THE CYCLE'S OWN FACTS, from its observation row: a correction the pilot held, or computed
+  // in observation mode, never reached the orders — whatever the bot booked on that line.
+  const cycleFacts = (id: number) => {
+    const marker = bandMarkers.get(id);
+    return {
+      gateRefusal: divergenceOf.get(id) ?? null,
+      pilotHold: marker?.pilotHold ?? null,
+      correctionAllowed: marker?.correctionAllowed ?? false,
+    };
+  };
   const real = realBandLegs(
     journalInScope,
     scopeFromId,
     scopeToId,
     (id, asset) => refusedIntents.get(`${id}/${asset}`) ?? null,
-    (id) => ({ gateRefusal: divergenceOf.get(id) ?? null, pilotHold: pilotHolds.get(id) ?? null }),
+    cycleFacts,
   );
   const legLine = (leg: (typeof real.planned)[number]): string =>
     `#${leg.decisionId} ${leg.asset.padEnd(4)} ${leg.origin} ${leg.correctionPoints > 0 ? '+' : ''}${leg.correctionPoints} pt · ` +
@@ -1429,14 +1450,24 @@ async function main(): Promise<void> {
   console.log('─'.repeat(96));
   console.log('FAITS RÉELS — le journal des corrections de production, dans la fenêtre');
   console.log('─'.repeat(96));
+  const suppressedReasons = real.suppressedByCorrector.reduce<Record<string, number>>((acc, leg) => {
+    const reason = leg.notExecutedBecause?.match(/\(([^)]+)\)/)?.[1] ?? 'inconnue';
+    acc[reason] = (acc[reason] ?? 0) + 1;
+    return acc;
+  }, {});
   console.log(
-    `  jambes de bande prévues : ${real.planned.length} sur ${new Set(real.planned.map((l) => l.decisionId)).size} cycle(s) · ` +
-      `exécutées : ${real.executed.length} sur ${new Set(real.executed.map((l) => l.decisionId)).size} cycle(s) · ` +
+    `  jambes de bande VOULUES : ${real.wanted.length} sur ${new Set(real.wanted.map((l) => l.decisionId)).size} cycle(s) — ` +
+      `dont ${real.suppressedByCorrector.length} supprimée(s) par le correcteur lui-même avant tout plan` +
+      (real.suppressedByCorrector.length === 0 ? '' : ` (${Object.entries(suppressedReasons).map(([r, n]) => `${r} ${n}`).join(' · ')})`),
+  );
+  console.log(
+    `  jambes de bande PRÉVUES : ${real.planned.length} sur ${new Set(real.planned.map((l) => l.decisionId)).size} cycle(s) · ` +
+      `EXÉCUTÉES : ${real.executed.length} sur ${new Set(real.executed.map((l) => l.decisionId)).size} cycle(s) · ` +
       `prévues non passées : ${real.plannedNotExecuted.length}`,
   );
   for (const leg of real.executed) console.log(`    ${legLine(leg)}`);
   for (const leg of real.plannedNotExecuted) console.log(`    ${legLine(leg)}`);
-  if (real.planned.length === 0) console.log('    aucune jambe de bande dans le journal sur cette fenêtre');
+  if (real.wanted.length === 0) console.log('    aucune jambe de bande dans le journal sur cette fenêtre');
 
   // ── W4 — no leg the band creates touches a frozen line, and there was something to test ──
   {
@@ -1522,6 +1553,7 @@ async function main(): Promise<void> {
       toDecisionId: scopeToId,
       gateOf,
       transitionMode: chainTransitionMode,
+      correctionAllowed: (id) => cycleFacts(id).correctionAllowed,
     });
     // FINALITY FOLLOWS THE INSTANT THE WINDOW WAS RESOLVED ON, not the pilot row. A closed
     // pilot replayed with `--at=alerte_40` is a snapshot cut BEFORE the closure, and its C8 is
@@ -1609,6 +1641,8 @@ async function main(): Promise<void> {
     // is a counterfactual; C8 is a reading of the model, descriptive until the closure.
     real_journal: {
       scope: { from_id: scopeFromId, to_id: scopeToId },
+      wanted_band_legs: real.wanted.length,
+      suppressed_by_corrector: real.suppressedByCorrector,
       planned_band_legs: real.planned,
       executed_band_legs: real.executed,
       planned_not_executed: real.plannedNotExecuted,

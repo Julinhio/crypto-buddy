@@ -64,7 +64,9 @@ export interface JournalCorrectionLine {
   correctedWeightPercent: number;
   plannedSide: 'buy' | 'sell' | null;
   plannedNotionalQuote: number | null;
+  /** Set when the corrector's own floor deleted the leg — then `plannedSide` is null. */
   suppressedReason: string | null;
+  suppressedNotionalQuote: number | null;
   bookedSide: 'buy' | 'sell' | null;
   bookedNotionalQuote: number | null;
   postCycleWeightPercent: number | null;
@@ -160,6 +162,14 @@ export interface BuildEpisodesInput {
    * a free reaction. Null on the bench, where no band leg was ever executed anyway.
    */
   transitionMode: 'observe' | 'enforce' | null;
+  /**
+   * Was the correction ALLOWED TO ACT on that cycle — mode `application` and no `pilot_hold`?
+   * The journal computes and records the correction on every cycle, held or not, and
+   * `booked_side` records what the bot REALLY booked on the asset. On a held cycle a booking
+   * on a band-origin line is the uncorrected model's own trade: not an episode (third review
+   * round).
+   */
+  correctionAllowed: (decisionId: number) => boolean;
 }
 
 /**
@@ -173,6 +183,7 @@ export function buildEpisodes(input: BuildEpisodesInput): AdoptionEpisode[] {
     if (line.origin === 'modele' || line.bookedSide == null) continue;
     if (line.decisionId < input.fromDecisionId || line.decisionId > input.toDecisionId) continue;
     if (line.correctionPoints === 0) continue;
+    if (!input.correctionAllowed(line.decisionId)) continue;
     const direction: EpisodeDirection = line.correctionPoints > 0 ? 'hausse' : 'baisse';
 
     // The reaction: the first DECIDED cycle after the episode, inside the window. Everything
