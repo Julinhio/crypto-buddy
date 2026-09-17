@@ -498,6 +498,22 @@ async function loadRefusedIntents(
   return reasons;
 }
 
+/** `pilot_hold` of the band observation, for the cycles where the band planned a leg. */
+async function loadPilotHolds(
+  supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  decisionIds: readonly number[],
+): Promise<Map<number, string | null>> {
+  const holds = new Map<number, string | null>();
+  if (decisionIds.length === 0) return holds;
+  const { data, error } = await supabase
+    .from('exposure_band_observations')
+    .select('decision_id, pilot_hold')
+    .in('decision_id', [...decisionIds]);
+  if (error) throw new Error(`band witnesses: could not read pilot holds (${error.message}).`);
+  for (const row of (data ?? []) as Array<{ decision_id: number; pilot_hold: string | null }>) holds.set(row.decision_id, row.pilot_hold);
+  return holds;
+}
+
 /**
  * THE OFFICIAL WINDOW — the pilot's, when there is a pilot AND the pilot can be trusted.
  *
@@ -1337,8 +1353,18 @@ async function main(): Promise<void> {
     .flat()
     .filter((line) => line.decisionId >= scopeFromId && line.decisionId <= scopeToId);
   const plannedCycleIds = [...new Set(journalInScope.filter((l) => l.origin !== 'modele' && l.plannedSide != null).map((l) => l.decisionId))];
-  const refusedIntents = await loadRefusedIntents(supabase, plannedCycleIds);
-  const real = realBandLegs(journalInScope, scopeFromId, scopeToId, (id, asset) => refusedIntents.get(`${id}/${asset}`) ?? null);
+  const [refusedIntents, pilotHolds] = await Promise.all([
+    loadRefusedIntents(supabase, plannedCycleIds),
+    loadPilotHolds(supabase, plannedCycleIds),
+  ]);
+  const divergenceOf = new Map(decisions.map((d) => [d.id, typeof d.applied_divergence_cause === 'string' ? d.applied_divergence_cause : null]));
+  const real = realBandLegs(
+    journalInScope,
+    scopeFromId,
+    scopeToId,
+    (id, asset) => refusedIntents.get(`${id}/${asset}`) ?? null,
+    (id) => ({ gateRefusal: divergenceOf.get(id) ?? null, pilotHold: pilotHolds.get(id) ?? null }),
+  );
   const legLine = (leg: (typeof real.planned)[number]): string =>
     `#${leg.decisionId} ${leg.asset.padEnd(4)} ${leg.origin} ${leg.correctionPoints > 0 ? '+' : ''}${leg.correctionPoints} pt · ` +
     (leg.bookedSide != null
@@ -1441,14 +1467,18 @@ async function main(): Promise<void> {
       toDecisionId: scopeToId,
       gateOf,
     });
-    // THE REPORT CLAIMS AN OFFICIAL C8 ONLY ON A CLOSED WINDOW — and the judge refuses it otherwise.
-    const claimsOfficial = pilotWindow.official && windowClosed;
+    // FINALITY FOLLOWS THE INSTANT THE WINDOW WAS RESOLVED ON, not the pilot row. A closed
+    // pilot replayed with `--at=alerte_40` is a snapshot cut BEFORE the closure, and its C8 is
+    // as descriptive as an open window's; only the `cloture` instant carries the official
+    // result. (First review round.)
+    const closedAtSelectedInstant = pilotWindow.official && pilotWindow.instant === 'cloture';
+    const claimsOfficial = closedAtSelectedInstant;
     const verdict = judgeC8({
       episodes,
       decisions: decisionSummaries,
       fromDecisionId: scopeFromId,
       toDecisionId: scopeToId,
-      windowClosed: pilotWindow.official && windowClosed,
+      windowClosed: closedAtSelectedInstant,
       claimsOfficial,
     });
     const episodeLine = (e: (typeof episodes)[number]): string =>
@@ -1474,16 +1504,21 @@ async function main(): Promise<void> {
       ...episodes.map((e) => `  ${episodeLine(e)}`),
       verdict.population === 0 ? '  aucun épisode exécuté : C8 n’est pas mesurable sur cette fenêtre.' : '',
       '',
-      pilotWindow.official && windowClosed
-        ? 'FENÊTRE FERMÉE : ces lectures constituent le résultat C8 de la fenêtre officielle.'
-        : `LECTURES DESCRIPTIVES — ${pilotWindow.official ? 'la fenêtre de mesure est OUVERTE' : 'aucune fenêtre officielle'} : ` +
-          'aucun verdict C8 n’est rendu, et le juge refuse d’en publier un.',
+      closedAtSelectedInstant
+        ? 'FENÊTRE FERMÉE, valorisée à sa clôture : ces lectures constituent le résultat C8 de la fenêtre officielle.'
+        : `LECTURES DESCRIPTIVES — ${
+            !pilotWindow.official
+              ? 'aucune fenêtre officielle'
+              : windowClosed
+                ? `la fenêtre est fermée mais ce rejeu est coupé à l’instant ${pilotWindow.instant}, avant la clôture`
+                : 'la fenêtre de mesure est OUVERTE'
+          } : aucun verdict C8 n’est rendu, et le juge refuse d’en publier un.`,
       'BIAIS CONNU : le prompt montre au modèle l’allocation corrigée sous l’étiquette `risk_clamp`,',
       'figée pendant ce pilote. Un `maintien` décrit la réaction du modèle au PORTEFEUILLE corrigé ;',
       'il ne prouve pas une adoption consciente de la bande d’exposition.',
       ...verdict.problems.map((problem) => `  PROBLÈME : ${problem}`),
     ].filter((line) => line !== ''));
-    c8Artefact = { episodes, judgement: verdict, official: verdict.official, window_closed: windowClosed };
+    c8Artefact = { episodes, judgement: verdict, official: verdict.official, window_closed: windowClosed, resolved_instant: pilotWindow.official ? pilotWindow.instant : null };
   }
 
   // ── The artefact ─────────────────────────────────────────────────────────────────

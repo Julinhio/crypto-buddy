@@ -147,8 +147,11 @@ export interface BuildEpisodesInput {
   toDecisionId: number;
   /**
    * Gate verdicts per cycle per asset. A `stop_exit` or `risk_off_reduction` on the episode's
-   * line between the episode (exclusive) and its reaction (inclusive) is the code intervening
-   * on that line: the model's next proposal can no longer be attributed to the episode alone.
+   * line AT THE REACTION CYCLE is the code taking that line over: under `enforce` the model is
+   * told so in its prompt, and its proposal on that line is no longer a free reaction to the
+   * episode. Only the reaction cycle's own verdict counts — a failed cycle in between also
+   * journals a verdict, but it placed no order and consulted no model: an observation, not an
+   * intervention (first review round).
    */
   gateOf: (decisionId: number, asset: string) => string | null;
 }
@@ -188,15 +191,15 @@ export function buildEpisodes(input: BuildEpisodesInput): AdoptionEpisode[] {
     } else {
       const nextWeight = reactionDecision.targetAllocation?.[line.asset] ?? null;
       reaction = { decisionId: reactionDecision.id, modelWeightPercent: nextWeight };
-      // LATER EVENTS THAT BREAK THE ATTRIBUTION: the code's own stop or a risk-off reduction
-      // taking the line over, on any cycle up to and including the reaction cycle — the position
-      // the model reacts to is then the gate's doing, not this episode's alone. (Another BAND
-      // leg cannot fall in between: the cycles between an episode and its reaction are the
-      // failed ones, and a failed cycle computes no correction.)
-      const intervening = decisions
-        .filter((d) => d.id > line.decisionId && d.id <= reactionDecision!.id)
-        .map((d) => ({ id: d.id, gate: input.gateOf(d.id, line.asset) }))
-        .find((g) => g.gate === 'stop_exit' || g.gate === 'risk_off_reduction');
+      // THE EVENT THAT BREAKS THE ATTRIBUTION: the code's own stop or a risk-off reduction
+      // taking the line over AT the reaction cycle. Nothing else can: the cycles in between are
+      // the failed ones — no order, no model, their gate rows are observations — and another
+      // band leg cannot fall there either, since a failed cycle computes no correction.
+      const reactionGate = input.gateOf(reactionDecision.id, line.asset);
+      const intervening =
+        reactionGate === 'stop_exit' || reactionGate === 'risk_off_reduction'
+          ? { id: reactionDecision.id, gate: reactionGate }
+          : null;
       if (intervening != null) {
         reading = 'non_attribuable';
         because = `la porte a pris la ligne ${line.asset} (${intervening.gate}) au cycle ${intervening.id}`;

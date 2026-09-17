@@ -151,12 +151,23 @@ export interface RealBandLeg {
   bookedSide: 'buy' | 'sell' | null;
   bookedNotionalQuote: number | null;
   /**
-   * For a planned leg that did not book. The journal names a suppression when the corrector
-   * itself deleted the leg; when it did not and no execution row exists either, the only path
-   * that journals nothing is the executor's floor after the venue's step rounding — reported
-   * as an INFERENCE, in those words.
+   * For a planned leg that did not book, in this order of precedence: the corrector's own
+   * suppression; the pilot holding the correction back that cycle (`pilot_hold`); the
+   * transition gate refusing the whole vector (`applied_divergence_cause`), which drops the
+   * strategic legs before the executor sees them; an intent the executor journaled as refused.
+   * Only when none of those is journaled does the one path that journals nothing remain — the
+   * executor's floor after the venue's step rounding — and it is reported as an INFERENCE, in
+   * those words. (The gate and the hold were missing from the first version: first review round.)
    */
   notExecutedBecause: string | null;
+}
+
+/** What a cycle's own rows say about why its legs may never have reached the executor. */
+export interface CycleExecutionFacts {
+  /** `decisions.applied_divergence_cause` — set when the gate refused the vector. */
+  gateRefusal: string | null;
+  /** `exposure_band_observations.pilot_hold` — set when the correction was not allowed to act. */
+  pilotHold: string | null;
 }
 
 export function realBandLegs(
@@ -165,6 +176,8 @@ export function realBandLegs(
   toDecisionId: number,
   /** Non-executed execution rows (rejected / failed) per decision and asset, when the replay read them. */
   refusedIntentReason: (decisionId: number, asset: string) => string | null,
+  /** The cycle's own journaled causes — the gate's refusal and the pilot's hold. */
+  cycleFacts: (decisionId: number) => CycleExecutionFacts,
 ): { planned: RealBandLeg[]; executed: RealBandLeg[]; plannedNotExecuted: RealBandLeg[] } {
   const planned: RealBandLeg[] = [];
   for (const line of lines) {
@@ -173,13 +186,18 @@ export function realBandLegs(
     if (line.plannedSide == null && line.bookedSide == null) continue;
     let notExecutedBecause: string | null = null;
     if (line.bookedSide == null) {
+      const facts = cycleFacts(line.decisionId);
       const refused = refusedIntentReason(line.decisionId, line.asset);
       notExecutedBecause =
         line.suppressedReason != null
           ? `supprimée par le correcteur (${line.suppressedReason})`
-          : refused != null
-            ? `intention refusée par l’exécuteur (${refused})`
-            : 'aucune ligne d’exécution : écartée avant l’exécuteur, sous le seuil après arrondi au pas de la place — déduit, rien de journalisé';
+          : facts.pilotHold != null
+            ? `la correction n’a pas été appliquée ce cycle (pilot_hold ${facts.pilotHold})`
+            : facts.gateRefusal != null
+              ? `la porte a refusé le vecteur entier (${facts.gateRefusal})`
+              : refused != null
+                ? `intention refusée par l’exécuteur (${refused})`
+                : 'aucune ligne d’exécution : écartée avant l’exécuteur, sous le seuil après arrondi au pas de la place — déduit, rien de journalisé';
     }
     planned.push({
       decisionId: line.decisionId,

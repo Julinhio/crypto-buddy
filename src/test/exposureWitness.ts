@@ -392,7 +392,11 @@ console.log('\nProof 6 — C8 reads an executed episode, in its direction, and n
   ok('nor is a line the band did not move', buildEpisodes({ lines: [line({ origin: 'modele', correctionPoints: 0, correctedWeightPercent: 0 })], decisions, fromDecisionId: 100, toDecisionId: 103, gateOf: noGate }).length === 0);
   // A later event breaks the attribution.
   const stopped = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, gateOf: (id, asset) => (id === 102 && asset === 'BNB' ? 'stop_exit' : 'actionable') });
-  ok('the code\'s stop on that line before the reaction makes it non_attribuable', stopped[0]!.reading === 'non_attribuable' && /stop_exit/.test(stopped[0]!.because ?? ''));
+  ok('the code\'s stop on that line AT the reaction cycle makes it non_attribuable', stopped[0]!.reading === 'non_attribuable' && /stop_exit/.test(stopped[0]!.because ?? ''));
+  // A stop verdict journaled on the FAILED cycle in between is an observation: no order, no
+  // model consulted. It must not discard a valid reaction (first review round).
+  const observedOnFailed = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, gateOf: (id, asset) => (id === 101 && asset === 'BNB' ? 'stop_exit' : 'actionable') });
+  ok('but a stop verdict on the failed cycle in between is an observation and leaves the reading intact', observedOnFailed[0]!.reading === 'maintien');
   // A band correction AT the reaction cycle does not break the attribution: the model proposed
   // before the band acted there, and that proposal is its reaction to this episode.
   const again = buildEpisodes({ lines: [line({}), line({ decisionId: 102, bookedSide: null })], decisions, fromDecisionId: 100, toDecisionId: 103, gateOf: noGate });
@@ -796,16 +800,19 @@ console.log('\nProof 12 — the semantics of the three allocations, established 
   ok('a leg on a line with correction_points = 0 is the model\'s, whatever its origin field says', attributeLegs(right.movements, right.lines.map((l) => ({ ...l, correctionPoints: 0 }))).every((l) => l.origin === 'modele'));
   ok('and with no correction at all (a stop cycle) every leg is the model\'s', attributeLegs(right.movements, null).every((l) => l.origin === 'modele'));
 
-  // (d) THE REAL JOURNAL keeps planned and executed apart, and names why a planned leg did not book.
-  const real = realBandLegs(
-    [...journal1839, { ...journal1839[0]!, decisionId: 1926, asset: 'BTC', origin: 'correction_de_bande', correctionPoints: -1.25, correctedWeightPercent: 8.75, plannedSide: 'sell', plannedNotionalQuote: 21.56, bookedSide: null, bookedNotionalQuote: null }],
-    1839,
-    2000,
-    () => null,
-  );
+  // (d) THE REAL JOURNAL keeps planned and executed apart, and names why a planned leg did not
+  // book — the journaled causes first, in order, and the inference last.
+  const unbooked1926: JournalCorrectionLine = { ...journal1839[0]!, decisionId: 1926, asset: 'BTC', origin: 'correction_de_bande', correctionPoints: -1.25, correctedWeightPercent: 8.75, plannedSide: 'sell', plannedNotionalQuote: 21.56, bookedSide: null, bookedNotionalQuote: null };
+  const noFacts = (): { gateRefusal: string | null; pilotHold: string | null } => ({ gateRefusal: null, pilotHold: null });
+  const causeWith = (refused: string | null, facts: { gateRefusal: string | null; pilotHold: string | null }, suppressed: string | null = null): string =>
+    realBandLegs([{ ...unbooked1926, suppressedReason: suppressed }], 1839, 2000, () => refused, () => facts).plannedNotExecuted[0]!.notExecutedBecause ?? '';
+  const real = realBandLegs([...journal1839, unbooked1926], 1839, 2000, () => null, noFacts);
   ok('two executed legs at 1839, one planned-not-executed at 1926', real.executed.length === 2 && real.plannedNotExecuted.length === 1 && real.planned.length === 3);
-  ok('the unbooked leg names an INFERENCE, in those words', /déduit/.test(real.plannedNotExecuted[0]!.notExecutedBecause ?? ''));
-  ok('an executor refusal, when journaled, is named instead', /refusée par l’exécuteur \(rejected: crumb\)/.test(realBandLegs(real.planned.map((l) => ({ ...journal1839[0]!, decisionId: l.decisionId, asset: l.asset, origin: l.origin, correctionPoints: l.correctionPoints, plannedSide: l.plannedSide, plannedNotionalQuote: l.plannedNotionalQuote, bookedSide: l.bookedSide, bookedNotionalQuote: l.bookedNotionalQuote })), 1839, 2000, (id) => (id === 1926 ? 'rejected: crumb' : null)).plannedNotExecuted[0]!.notExecutedBecause ?? ''));
+  ok('with nothing journaled, the unbooked leg names an INFERENCE, in those words', /déduit/.test(real.plannedNotExecuted[0]!.notExecutedBecause ?? ''));
+  ok('an executor refusal, when journaled, is named instead', /refusée par l’exécuteur \(rejected: crumb\)/.test(causeWith('rejected: crumb', noFacts())));
+  ok('a gate that refused the vector is named before any inference', /la porte a refusé le vecteur entier \(frozen leg/.test(causeWith('rejected: crumb', { gateRefusal: 'frozen leg BTC', pilotHold: null })));
+  ok('a pilot hold is named before the gate — the correction never reached it', /pilot_hold prix_de_repli/.test(causeWith(null, { gateRefusal: 'frozen leg BTC', pilotHold: 'prix_de_repli' })));
+  ok('and the corrector\'s own suppression before everything', /supprimée par le correcteur \(movement_floor\)/.test(causeWith('rejected: crumb', { gateRefusal: 'x', pilotHold: 'y' }, 'movement_floor')));
 }
 
 // ── PROOF 13 — W4, W5 and W6 can really fail, and never pass on nothing ─────────────
@@ -895,6 +902,10 @@ console.log('\nProof 14 — the replay feeds B̂ the intention, judges through t
   ok('only a failure exits non-zero; a non-measurable does not pass for green', /results\.filter\(\(r\) => r\.status === 'fail'\)/.test(replay) && /non mesurable\(s\)/.test(replay));
   ok('the report separates the real journal, the counterfactual and C8', /FAITS RÉELS/.test(replay) && /real_journal:/.test(replay) && /counterfactual:/.test(replay) && /c8: c8Artefact/.test(replay));
   ok('and the artefact says C8 is descriptive until the closure', /descriptif tant que la fenêtre de mesure/.test(replay));
+  // FINALITY FOLLOWS THE RESOLVED INSTANT. A closed pilot replayed at `--at=alerte_40` is a
+  // snapshot cut before the closure; its C8 must stay descriptive (first review round).
+  ok('C8 is official only when the window was resolved on the `cloture` instant, never on the pilot row alone', /const closedAtSelectedInstant = pilotWindow\.official && pilotWindow\.instant === 'cloture';/.test(replay) && /windowClosed: closedAtSelectedInstant,/.test(replay) && !/windowClosed: pilotWindow\.official && windowClosed,/.test(replay));
+  ok('and a planned leg\'s cause reads the gate refusal and the pilot hold before inferring', /gateRefusal: divergenceOf\.get\(id\) \?\? null, pilotHold: pilotHolds\.get\(id\) \?\? null/.test(replay));
   ok('the reference cycle 1839 is asserted whenever it is in the window', /decisionId: 1839, bandAssets: \['BNB', 'ETH'\], untouchedAssets: \['XRP'\]/.test(replay));
 }
 

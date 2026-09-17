@@ -479,9 +479,16 @@ Le journal `exposure_band_corrections` porte, par cycle et par actif, ce que la 
 **prévu** (`planned_side`) et ce qu'elle a **booké** (`booked_side`). Le rapport les sépare :
 sur la fenêtre officielle au 17/09, **12 jambes de bande prévues sur 11 cycles, 4 exécutées
 sur 3 cycles** (1839 BNB et ETH à la hausse, 1922 ETH et 1951 BTC à la baisse), et 8 prévues
-non passées — toutes des ventes BTC d'environ 21 $, sans aucune ligne d'exécution : la seule
-voie qui ne journalise rien est le seuil de l'exécuteur après arrondi au pas de la place, et le
-rapport le dit comme une **déduction**, pas comme un fait.
+non passées — toutes des ventes BTC d'environ 21 $. La cause d'une jambe non passée se lit dans
+cet ordre : la suppression du correcteur, le `pilot_hold` du cycle (la correction n'a pas été
+appliquée), le refus du vecteur par la porte (`applied_divergence_cause`), une intention
+refusée par l'exécuteur. Quand rien de tout cela n'est journalisé — c'est le cas des huit —
+la seule voie qui ne journalise rien est le seuil de l'exécuteur après arrondi au pas de la
+place, et le rapport le dit comme une **déduction**, pas comme un fait.
+
+Le C8 n'est officiel que si la fenêtre a été **résolue sur l'instant `cloture`** : un pilote
+clos rejoué à `--at=alerte_40` est une coupe antérieure à la clôture, et ses lectures restent
+descriptives.
 
 ### C8 — par épisode exécuté, orienté, descriptif jusqu'à la clôture
 
