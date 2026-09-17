@@ -6,7 +6,9 @@
 | 1 | `observe.ts` | une ligne d'observation par cycle + le contrôle d'intégrité par bougie |
 | 2 | `correct.ts` | **répartit** : §3.5 vers le plancher, §3.6 vers le plafond, la préséance, la consolidation |
 | 3 | `witness.ts` | **compare** : les deux témoins chaînés, leur pondération sous plafonds, leur plomberie |
-| 3 | `../replay/exposureBandWitnesses.ts` | le rejeu hors ligne des trois livres, en segments, et ses huit critères |
+| 3 | `counterfactual.ts` | l'entrée de B̂ (l'intention du modèle, jamais l'allocation appliquée), l'attribution des jambes (C7), les juges W4 et W5 |
+| 3 | `adoption.ts` | C8 par épisode exécuté : le lecteur orienté, les épisodes tirés du journal, le juge W6 |
+| 3 | `../replay/exposureBandWitnesses.ts` | le rejeu hors ligne des trois livres, en segments, ses huit critères tri-valués, et son rapport en trois parts |
 | 4 | `pilot.ts` | **arme** : l'identité persistante, le coupe-circuit, la fermeture de la fenêtre de mesure |
 | 4 | `../persistence/exposurePilot.ts` | la lecture et les écritures obligatoires, bornées, sur le chemin de trading |
 
@@ -309,7 +311,8 @@ confondre laisserait le seuil de 2 % prendre le crédit d'un gel.
 
 Dérivé **en lecture**, jamais écrit dans le cycle : les colonnes ci-dessus suffisent, et
 ajouter une lecture en base au chemin de trading pour une statistique serait un mode de panne
-gratuit. La requête vit dans le rejeu (`C8`).
+gratuit. La lecture vit dans le rejeu (`C8`, par épisode exécuté — voir la section des témoins) ;
+elle a été refaite après l'audit : le premier lecteur ne lisait aucune donnée réelle.
 
 Trois lectures, parce qu'une seule serait trompeuse. « Le modèle demande moins que la position
 imposée » est presque automatique — il ré-émet sa propre préférence. Ce qui distingue
@@ -363,6 +366,21 @@ npm run replay:band-witnesses
 Hors ligne, lecture seule, huit critères, sortie non nulle si l’un échoue. L'artefact
 `out/exposure-band-witnesses/` n'est pas commité.
 
+**Chaque critère a trois issues** : `PASS`, `FAIL`, ou `NON MESURABLE` quand la fenêtre ne
+contient rien qui ait pu l'exercer. Un critère qui n'a rien comparé n'est jamais vert, et une
+donnée absente ou insuffisante produit ce troisième résultat, pas un vert trompeur. Seul un
+`FAIL` fait sortir en erreur.
+
+**Le rapport tient trois choses à part**, et l'artefact aussi (`real_journal`, `counterfactual`,
+`c8`) :
+
+1. les **faits réels** — les jambes de bande que la production a **prévues**, celles qu'elle a
+   **exécutées**, et celles prévues mais non passées, chacune avec sa cause (journalisée ou,
+   quand rien ne l'est, **déduite** et dite comme telle) ;
+2. le **contrefactuel B̂** et son C7 — ce qu'un bot corrigé chaîné enverrait, par origine ;
+3. la **mesure C8** — la réaction du modèle par épisode exécuté, descriptive tant que la
+   fenêtre n'est pas officiellement fermée, et qui ne prouve jamais une adoption consciente.
+
 ### Trois livres chaînés, et deux seulement sont des témoins
 
 | Livre | Ce qu'il vise | Porte les gels du bot ? |
@@ -412,30 +430,143 @@ aucune carte de verdicts.
 
 ### B̂ — ce que la répartition envoie vraiment (C7)
 
-B̂ n'est pas un témoin. C'est le bot **sous la correction**, chaîné : à chaque cycle la bande
-est évaluée contre **son** livre, la correction dimensionnée sur **son** équité, et ses
-mouvements bookés. À ce titre il hérite des gels en entier — le code ne crée jamais d'ordre sur
-une ligne gelée.
+B̂ n'est pas un témoin. C'est le bot **sous la correction**, chaîné : il **part du livre réel du
+bot** au premier cycle du segment (pas en cash comme les témoins — ouvert en cash, il aurait dû
+racheter au premier cycle tout ce que le bot détenait déjà, un alignement que le bot réel n'a
+jamais fait), puis à chaque cycle la bande est évaluée contre **son** livre, la correction
+dimensionnée sur **son** équité, et ses mouvements bookés. À ce titre il hérite des gels en
+entier — le code ne crée jamais d'ordre sur une ligne gelée.
 
-**L'hypothèse est affichée, pas enfouie** : B̂ rejoue les réponses **historiques** du modèle
+**Ce qu'il reçoit, et ce qu'il a reçu à tort.** Une ligne `decisions` porte trois allocations,
+dont la sémantique a été établie sur le corpus (cycles 1838-1840) avant d'être codée :
+
+| Champ | Ce que c'est | 1839 |
+|---|---|---|
+| `decisions.target_allocation` | la proposition **brute** du modèle | {XRP 15, USDT 85} — déjà détenu |
+| `exposure_band_corrections.clamped_weight_percent` | la proposition **bornée** par les plafonds : l'entrée exacte du correcteur en production, journalisée par actif depuis la brique 2 | {XRP 15, USDT 85} |
+| `decisions.applied_allocation` | la cible **effective**, après la bande et après la porte | {BNB 15, ETH 15, XRP 15, USDT 55} |
+
+Depuis l'activation, `applied_allocation` est donc l'allocation **déjà corrigée**. Le premier
+rejeu la donnait à B̂ : il corrigeait une cible corrigée, ne trouvait rien à faire, attribuait
+au modèle les achats BNB et ETH de 1839 que la bande avait faits, et publiait zéro jambe de
+bande sur une fenêtre dont le journal en compte douze prévues et quatre exécutées. Les huit
+critères verts de ce rapport-là ne disaient rien de la correction.
+
+B̂ reçoit désormais l'**intention non corrigée du modèle** : les poids bornés du journal. En
+fenêtre officielle ce journal est **obligatoire** — un cycle qui ne l'a pas est un trou nommé
+(`no_corrections_journal`), jamais un recalcul. Sur le banc (cycles antérieurs à la brique 2)
+le clamp est recalculé depuis la proposition brute par la fonction même de la production, et
+chaque ligne le dit (`input_source`). Là où les deux existent, ils sont comparés, et W5 échoue
+sur la moindre divergence. Sur un cycle où le stop du code a pris une ligne, B̂ suit la cible
+effective du bot réel sans corriger, et le cycle est nommé (`followed_real_bot_on`).
+
+**Cas de référence, le cycle 1839** : le modèle demandait XRP 15 seulement, qu'il détenait.
+B̂ envoie BNB et ETH — `allocation_de_secours`, 164,18 $ chacune, le notional prévu par la
+production au centime — et rien sur XRP. Preuve 12 le rejoue sur les vrais nombres avec les
+deux entrées ; W5 l'exige à chaque rejeu où 1839 est dans la fenêtre.
+
+**L'attribution** suit la convention du journal lui-même : une jambe est celle de la bande si
+et seulement si la bande a déplacé sa ligne (`correction_points ≠ 0`), sinon celle du modèle.
+
+**L'hypothèse est affichée, pas enfouie** : B̂ rejoue les intentions **historiques** du modèle
 contre un livre que le modèle n'a jamais vu. Il mesure donc la **conséquence mécanique de la
-correction sous décisions historiques figées**. Ce n'est ni une simulation de la réaction du
+correction sous intentions historiques figées**. Ce n'est ni une simulation de la réaction du
 modèle, ni une borne de performance — ni haute ni basse.
 
-C'est ce livre qui répond à C7, que le ré-ancrage à un pas de la brique 2 ne pouvait pas
-atteindre : il repartait à chaque cycle d'un livre que rien n'avait corrigé.
+### Les faits réels ne se confondent pas avec le contrefactuel
 
-### C8 n'a pas de verdict, et c'est de l'arithmétique
+Le journal `exposure_band_corrections` porte, par cycle et par actif, ce que la production a
+**prévu** (`planned_side`) et ce qu'elle a **booké** (`booked_side`). Le rapport les sépare :
+sur la fenêtre officielle au 17/09, **12 jambes de bande prévues sur 11 cycles, 4 exécutées
+sur 3 cycles** (1839 BNB et ETH à la hausse, 1922 ETH et 1951 BTC à la baisse), et 8 prévues
+non passées — toutes des ventes BTC d'environ 21 $. Une jambe que le correcteur a lui-même
+supprimée (`suppressed_reason`, sans `planned_side`) est **voulue** par la bande mais jamais
+planifiée : le rapport la garde et la compte à part (84 sur la même fenêtre, toutes au seuil
+de mouvement), sans gonfler les prévues. La cause d'une jambe non passée se lit dans cet
+ordre : la suppression du correcteur,
+la correction non autorisée ce cycle (mode `observation`, ou `pilot_hold` posé — un
+`booked_side` sur une telle ligne est alors le booking du **modèle**, jamais une exécution de la
+bande), le refus du vecteur par la porte (`applied_divergence_cause`), une intention refusée
+par l'exécuteur. Quand rien de tout cela n'est journalisé — c'est le cas des huit — la seule
+voie qui ne journalise rien est le seuil de l'exécuteur après arrondi au pas de la place, et le
+rapport le dit comme une **déduction**, pas comme un fait.
 
-« Le modèle utilise-t-il l'exposition imposée, ou la combat-il ? » porte sur ce que le modèle
-fait quand il **voit** une position que le correcteur a créée. En mode observation il n'en a
-jamais vu une seule, et aucun contrefactuel chaîné ne répare cela : il ferait répondre les mots
-réels du modèle à une question qu'on ne lui a jamais posée.
+**Le point d'arrêt a deux preuves.** La production écrit les verdicts de porte, puis
+l'observation de bande, puis les lignes de corrections : le point prouvé par les portes ne
+prouve pas le journal des corrections. Le rejeu prend le plus petit des deux — portes
+complètes, clôture de bande complète (ligne d'observation, et ses lignes de corrections quand
+elle dit qu'une correction a été calculée) — et refuse sans clôture de bande complète. Le point
+de la bande est parcouru sur la **séquence des cycles attendus** (toutes les décisions depuis le
+premier cycle couvert par l'une ou l'autre des deux couches) : dès qu'un cycle attendu n'a
+aucune observation, ou des corrections incomplètes, le point s'arrête au cycle précédent et
+une clôture complète ultérieure ne franchit jamais le trou.
 
-Le **lecteur** existe (`readAdoption`, trois lectures : adoption, indifférence, lutte) et les
-données sont conservées. Le **chiffre** n'est pas publié : un chiffre affaibli serait lu comme
-la réponse. C8 commence le jour où `application` expose réellement le modèle aux positions
-corrigées.
+### Les couches best-effort, et ce qu'une absence devient
+
+Une mesure officielle ne peut utiliser un cycle, une jambe ou une réaction que si toutes les
+couches nécessaires à son interprétation sont prouvées présentes et complètes. **Une absence
+n'est jamais une valeur** — ni `false`, ni « libre », ni « non appliqué », ni « aucune
+correction ». Inventaire des couches que B̂, C7, C8 et W0 à W6 consomment :
+
+| Couche | Écrite | Consommée par | Complète quand | Trou au début / au milieu | Trou sur le cycle lu |
+|---|---|---|---|---|---|
+| `decisions` (statut, proposition, `applied`, `regime`, `market_context`) | ancre du cycle, pas best-effort | tout | la ligne existe | sans objet | sans objet |
+| `executions` (registre souverain) | pas best-effort : aucun ordre sans booking durable | livre post-cycle (E, W2), W0 | par construction | sans objet | sans objet |
+| `executions` (intentions refusées) | best-effort | cause d'une jambe non passée | — | la cause est **déduite** et dite telle, jamais affirmée | idem |
+| `transition_observations` (verdicts de porte) | best-effort | point d'arrêt des portes, classification, B̂ (gels, stops), C8 (cycle de réaction sous `enforce`) | un verdict par actif de l'univers | cycle = **trou nommé** (`no_gates`, `gates_incomplete`), la chaîne est coupée — jamais reconstruit avec une ligne gelée que le cycle réel n'avait pas | réaction **illisible** sous `enforce` ; sous `observe` la porte n'agit pas, la réaction reste libre |
+| `exposure_band_observations` | best-effort | point d'arrêt de la bande, `mode` et `pilot_hold` (correction autorisée ?), C8, faits réels | la ligne existe | le point s'arrête **avant** le trou | épisode **illisible** (« correction autorisée ? » inconnu), jamais « non appliqué » |
+| `exposure_band_corrections` | best-effort | entrée de B̂, C7, faits réels, C8 (`correction_moves_holding`) | une ligne par actif quand l'observation dit qu'une correction a été calculée | le point s'arrête avant le trou ; en fenêtre officielle un cycle sans journal est un trou nommé, jamais un recalcul | `correction_moves_holding` illisible → épisode **illisible** |
+| `exposure_pilot` | lecture obligatoire du chemin de trading | fenêtre officielle, mode figé | identité résolue, mode figé présent | pas de fenêtre officielle | refus |
+
+Un épisode `illisible` porte la couche absente en clair. **En fenêtre officielle, un seul
+épisode illisible refuse tout le C8** — un agrégat qui l'omettrait publierait un chiffre sur un
+journal qu'il ne sait pas interpréter. Sur le banc, il est nommé et laissé hors du compte
+lisible. Preuve 15 de `src/test/exposureWitness.ts` parcourt chaque couche aux trois endroits.
+
+Le C8 n'est officiel que si la fenêtre a été **résolue sur l'instant `cloture`** : un pilote
+clos rejoué à `--at=alerte_40` est une coupe antérieure à la clôture, et ses lectures restent
+descriptives. Et une fenêtre officielle exige le **mode de porte figé** dans l'identité : sans
+lui, le rejeu ne saurait ni dimensionner B̂ ni lire C8 sous la bonne porte, et il refuse.
+
+### C8 — par épisode exécuté, orienté, descriptif jusqu'à la clôture
+
+« Le modèle utilise-t-il l'exposition imposée, ou la combat-il ? » L'**unité de mesure est
+l'épisode exécuté par actif** : une jambe de bande réellement bookée sur une ligne à un cycle,
+sur un cycle où la correction était autorisée, et dont `correction_moves_holding` est vrai — la
+bande a changé la **position exécutable**, pas seulement la cible (à faux, le booking est le
+plan du modèle ; illisible en fenêtre officielle, c'est un refus, jamais une exclusion muette).
+Pas les lignes seulement prévues, pas chaque cycle où la correction reste visible — ce serait
+compter plusieurs fois une seule réaction.
+
+La **réaction** est la proposition brute du modèle (`target_allocation`) au premier cycle
+**décidé** suivant. Un cycle en échec entre les deux n'est pas une réaction : il est nommé et
+sauté. Le stop du code ou une réduction risk-off sur la ligne, jusqu'au cycle de réaction
+inclus, rend la lecture `non_attribuable`. Pas de cycle décidé suivant dans la fenêtre :
+`non_mesurable`.
+
+Le lecteur (`readEpisodeReaction`) est **orienté** — hausse (la bande a acheté) et baisse (la
+bande a vendu) inversent les inégalités — et lit la **répétition d'abord** :
+
+| Lecture | Hausse (imposé > demandé) | Baisse (imposé < demandé) |
+|---|---|---|
+| `repetition` | le modèle redemande exactement sa cible initiale — **jamais appelée adoption** ; une proposition initiale à **zéro** qui reste à zéro est une répétition, pas une lutte (il n'y a pas plus bas que zéro) | idem |
+| `maintien` | prochaine ≥ imposé | prochaine ≤ imposé |
+| `rapprochement` | strictement entre demandé et imposé | idem |
+| `lutte` | au-delà de sa cible initiale, contre la bande | idem |
+
+Le premier lecteur (`readAdoption`) appelait « adoption » toute prochaine proposition ≥ imposé,
+sans regarder la direction : sur une baisse, un modèle qui répétait sa cible plus haute était lu
+comme adoptant la bande. Il ne lisait par ailleurs aucune donnée réelle.
+
+**Le biais, nommé** : le prompt montre au modèle l'allocation corrigée sous l'étiquette
+`risk_clamp`, figée pendant ce pilote. Un `maintien` décrit la réaction du modèle au
+**portefeuille** corrigé ; il ne prouve pas une adoption consciente de la bande d'exposition.
+
+**Les lectures restent descriptives** tant que la fenêtre de mesure n'est pas officiellement
+fermée (`window_closed_at`). Le juge W6 refuse de publier un verdict officiel sur une fenêtre
+ouverte — c'est une de ses conditions d'échec, pas une convention. Au 17/09, quatre épisodes :
+1839 BNB et ETH (hausse depuis zéro, réaction 15 au cycle suivant → `maintien`), 1922 ETH et
+1951 BTC (baisse, le modèle redemande 10 → `repetition`). Quatre lectures, aucun verdict.
 
 ### L'exposition que E vise est RECONSTRUITE, jamais lue
 
@@ -845,7 +976,7 @@ Ce que la brique 4 hérite, et ce qu'elle doit apporter :
 | | |
 |---|---|
 | **Hérite** | les trois livres chaînés et leur rejeu reproductible, prêts à être valorisés à un instant donné — ce que demande le §3.9 au déclenchement du coupe-circuit |
-| **Hérite** | le lecteur de C8 et les colonnes qui l'alimentent, en attente du premier cycle en `application` |
+| **Hérite** | le lecteur de C8 et les colonnes qui l'alimentent, en attente du premier cycle en `application` — lecteur refait depuis (orienté, par épisode exécuté), voir C8 |
 | **Doit apporter** | l'**identité persistante** du pilote : version de configuration, instant d'activation, equity initiale, plus-haut, état de l'alerte, actif ou arrêté — et qui survit à un redémarrage Railway |
 | **Doit apporter** | le **coupe-circuit** : alerte unique à 40 %, désactivation persistante de la seule correction de bande à 50 %, aucune liquidation forcée |
 | **Doit apporter** | la légalisation de `application` dans le résolveur d'environnement — **et elle seule crée l'instant officiel du pilote**, qui ne se dépense qu'une fois |
