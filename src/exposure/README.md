@@ -578,6 +578,97 @@ redémarrage, redéploiement, passage temporaire en `observation`. Un plus-haut 
 afficherait un drawdown nul le lendemain du pire jour du pilote, et c'est exactement la panne que
 la preuve 4 de `src/test/exposurePilot.ts` met en scène.
 
+### Le plus-haut voit toute valorisation admissible, pas seulement les cycles décidés
+
+Le jugement du pilote — plus-haut, alerte, arrêt — ne vivait que sur le chemin décidé, entre le
+garde de cohérence et la porte de transition. Un cycle `guard_failed` ou `error` dispose pourtant
+du **même livre souverain, aux mêmes prix vivants** : son equity est la valeur réelle du livre à
+cet instant, et un sommet atteint sur un tel cycle est un vrai sommet. Le 14/09, les cycles 2027
+(1 081,72 $) et 2028 (1 081,31 $) étaient au-dessus du plus-haut enregistré (1 079,65 $) et n'ont
+jamais été vus. Un coupe-circuit qui mesure depuis un sommet trop bas mord trop tard — dans le
+sens qui compte.
+
+Le pilote juge donc désormais la **valorisation**, une fois par cycle, sur tout cycle qui a
+atteint un livre souverain, **avant l'appel au modèle** — donc avant de savoir comment le cycle
+finira. Rien dans le jugement ne dépend de la réponse du modèle, c'est ce qui permet de le
+déplacer sans changer un seul verdict sur un cycle décidé.
+
+**Le jugement est pur ; rien n'est écrit avant le modèle.** Les deux lectures du pilote
+(identité, dernier cycle décidé) voyagent dans le lot de lectures que le cycle attend déjà
+(état de position, référence du garde) : aucune latence ajoutée, aucun déplacement de la porte
+de budget de la relance du garde — la règle que `validateOutageBudget` énonce pour la trace
+d'incident vaut pour le pilote. L'écriture et l'alerte qu'elle annonce se posent à la
+**clôture** (`settlePilot`) : après le garde sur le chemin décidé, exactement là où le bloc
+vivait avant ce correctif, et en queue de chaque chemin en échec, une fois la ligne insérée.
+
+Une valorisation est **admissible** quand :
+
+* elle vient du ledger souverain — le livre fabriqué par un **journal** illisible n'atteint jamais
+  le pilote, le cycle est écarté avant (première moitié du cas limite 0 de `decide.ts`). Un état
+  de position ou une référence du garde illisibles écartent aussi le cycle, mais **après** le
+  jugement : leur livre est souverain, à prix vivants, et son sommet est réel ;
+* l'equity est finie et strictement positive ;
+* **chaque ligne détenue a un prix vivant ce cycle**. `derivePortfolio` valorise une ligne sans
+  ticker à son coût moyen (`priceStale`) : c'est le bon nombre pour une vue et le mauvais pour
+  un sommet. Un prix de repli n'établit aucun plus-haut et ne déclenche aucun seuil irréversible.
+
+Sur une valorisation admissible, quel que soit le sort du cycle ensuite :
+
+| Ce qui se passe | Où |
+|---|---|
+| le plus-haut monte, l'alerte 40 % se décide et se persiste, l'arrêt 50 % se décide et se persiste | **jugé avant le modèle**, écrit à la clôture — avant tout ordre sur le chemin décidé, en queue d'un chemin en échec |
+| aucun ordre stratégique ni ordre de bande | un cycle en échec retourne avant l'exécuteur, qui n'est atteint que depuis un seul endroit, après l'insertion de la ligne `decided` |
+| le journal dit ce qui a été jugé | `pilot_hold = cycle_non_decide`, avec le plus-haut et le drawdown que le coupe-circuit voyait |
+
+Sur une valorisation à prix de repli : `pilot_hold = prix_de_repli`, aucune écriture, la
+correction se tient en retrait ce cycle — et **le pilote continue**. Le battement est écrit sur
+un cycle décidé à prix de repli : une bougie sans lecture n'est pas un cycle qui a tourné sans le
+pilote, et un ticker manquant ne doit pas tuer une expérience de huit semaines. L'interruption et
+le contrat sont jugés **avant** la valorisation, parce qu'ils parlent du journal et de la
+configuration, pas des tickers.
+
+**Une seule écriture attend le chemin décidé : l'activation.** Elle dépense l'instant officiel et
+promet que la correction s'applique dès ce cycle, ce qu'un cycle sans cible ne peut pas tenir.
+Elle est jugée avant le modèle comme le reste, et posée juste avant la correction, sur un cycle
+décidé seulement. Injoignable dans ce déploiement : l'identité existe.
+
+**Ce qui ne bouge pas, et pourquoi.** Le battement n'est écrit que sur les cycles décidés et
+l'interruption n'est jugée que contre les cycles décidés. Ces deux règles définissent « un cycle
+que le pilote doit avoir vu » ; elles ne sont pas détournées pour définir « une equity qui
+compte », qui est une règle à part (`valuationHold`). Le résidu est nommé plutôt que masqué : un
+cycle en échec qui aurait tourné pendant que le mode n'était pas `application` — ou sous une
+identité illisible — ne laisse aucune trace prouvable, exactement comme avant ce correctif. C'est
+désormais la **seule** valorisation admissible que le pilote peut manquer, et la fermer
+demanderait un second reçu de continuité sur tous les cycles non `skipped` : un chantier séparé.
+
+**Aucune trace durable, rien de durable.** Sur un chemin non décidé, la clôture se fait après
+l'insertion de la ligne ; si cette insertion a échoué (`id` nul), le pilote n'écrit **rien** —
+ni nouveau plus-haut, ni alerte, ni arrêt — et aucune passe de résolution ne tourne. Un
+événement persisté sans ligne aurait été rattaché par la passe à la première ligne venue, celle
+d'un cycle **ultérieur**, qui serait devenu artificiellement le cycle déclencheur d'un
+franchissement qu'il n'a pas vu, et la fenêtre officielle aurait été bornée dessus. Une décision
+future ne devient jamais le cycle déclencheur d'un autre. Le résidu, dit honnêtement : la
+valorisation d'un cycle qui n'a **aucune trace durable** peut être perdue si le marché redescend
+avant le cycle suivant — un sommet atteint là n'est pas enregistré, un franchissement vu là n'est
+pas verrouillé. Le cycle suivant juge **sa propre** valorisation, pas celle-là. Un fait de
+journal ou de contrat (interruption, divergence) n'est pas perdu : il est encore vrai au cycle
+suivant et s'y détecte. Le chemin décidé n'est pas concerné par cette règle. Preuve 16.
+
+Un seuil franchi sur un cycle en échec résout son pointeur (`alert_drawdown_decision_id`,
+`stopped_decision_id`) sur **la ligne de ce cycle-là**, quel que soit son statut, et **dès ce
+cycle** : la passe de résolution tourne sur chaque chemin qui a inséré une ligne après le
+jugement, pas seulement sur le chemin décidé — sinon un arrêt suivi d'une bascule du mode
+laisserait un pointeur nul pour toujours, la passe étant gardée par `application`. Le résolveur
+cherche la première ligne à cet instant ou après, sans filtre `decided` pour ces deux pointeurs.
+Ce filtre était un artefact de l'ancien emplacement du bloc — l'écriture ne pouvait tomber que
+sur un cycle décidé — et le garder aurait pointé la fenêtre officielle un cycle **au-delà** du
+franchissement. Le rejeu n'utilise le pointeur que comme borne haute sur les lignes décidées :
+l'id d'une ligne en échec ferme la fenêtre exactement au dernier cycle décidé avant le
+franchissement, et rien de postérieur n'y entre. Le pointeur d'activation garde le filtre : elle
+ne se pose que sur un cycle décidé, et elle amorce le battement, qui ne parle que de cycles
+décidés. Résidu inchangé : l'instant vient de l'horloge du processus et `created_at` de celle
+de la base, comme pour l'activation depuis le premier jour.
+
 ### Une interruption du mode met fin au pilote
 
 Le plus-haut n'est suivi que pendant que le pilote est armé. Un passage temporaire en
@@ -596,8 +687,9 @@ c'est qu'il en a manqué un. C'est ce qui fait de « aucun cycle intermédiaire 
 ignoré » une preuve et non un espoir.
 
 Un simple redémarrage ne laisse aucun trou : les cycles décidés se suivent et la reprise se fait
-normalement depuis l'état persistant. Les cycles `skipped` et `error` ne comptent pas — ils ne
-décident rien et ne déplacent aucun ordre.
+normalement depuis l'état persistant. Les cycles `skipped` et `error` ne comptent pas **pour
+cette détection** — ils ne décident rien et ne déplacent aucun ordre. Leur valorisation, elle,
+compte pour le plus-haut : voir la section précédente.
 
 L'invariant acheté : **une identité encore valide a vu tous les cycles décidés depuis son
 activation**, donc aucun sommet observable ne manque à son plus-haut.
@@ -733,6 +825,18 @@ les a touchés. En `observation` il vaut `mode_inactif` partout : c'est la répo
 c'est aussi la preuve continue que rien ne s'applique. À côté, le drawdown et le plus-haut que le
 coupe-circuit voyait à cet instant — l'identité ne garde que le dernier état, et sans eux un arrêt
 ne se relirait jamais dans son contexte.
+
+**Toute ligne porte un verdict**, y compris celles des cycles en échec, qui portaient NULL
+jusqu'à la migration 0038 — c'est-à-dire la valeur qui signifie « la correction a été autorisée »,
+l'inverse de ce qui s'était passé. Deux valeurs sont venues dire ce que NULL taisait :
+
+| `pilot_hold` | Ce que ça dit |
+|---|---|
+| `cycle_non_decide` | la valorisation a été jugée (ses chiffres sont sur la ligne), mais le cycle a échoué avant qu'une cible existe : aucune correction jugée ni appliquée. Aussi sur les cycles `skipped`, où les chiffres sont nuls — il n'y avait pas de livre fiable à juger |
+| `prix_de_repli` | une ligne détenue sans prix vivant ; aucun sommet ni seuil sur cette valorisation, la correction en retrait, le pilote toujours actif |
+
+La raison propre du pilote l'emporte toujours sur celle du cycle : un arrêt à 50 % décidé sur un
+cycle `guard_failed` se lit `pilote_arrete_drawdown`, pas `cycle_non_decide`.
 
 ## Passage de relais vers la brique 4
 

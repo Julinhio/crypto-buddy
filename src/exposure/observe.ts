@@ -136,10 +136,14 @@ export interface BandObservationInsert {
    *
    * `pilot_hold` says why the correction did not touch the orders, and it is null ONLY when it
    * did. In `observation` it reads `mode_inactif` on every cycle, which is both the honest
-   * answer and the continuous proof that nothing is being applied.
+   * answer and the continuous proof that nothing is being applied. On a cycle that failed
+   * before any target existed it reads `cycle_non_decide` (migration 0038) — it used to be
+   * null there too, which said the opposite of what had happened.
    *
-   * The two numbers beside it are what the circuit breaker saw at that instant. The identity
-   * keeps only the latest state, so without them a stop could never be re-read in context.
+   * The two numbers beside it are what the circuit breaker saw at that instant — on EVERY
+   * cycle that had a sovereign book to value, a failed one included, since the high-water mark
+   * is judged before the model is called. The identity keeps only the latest state, so without
+   * them a stop could never be re-read in context.
    */
   pilot_hold: string | null;
   pilot_drawdown_percent: number | null;

@@ -268,8 +268,10 @@ export async function closeMeasurementWindow(
  * decided cycle more recent than the one the pilot saw can only exist if the pilot did not run
  * on it. Null on a failed read, which fails closed rather than skipping the check.
  *
- * Only `decided` rows count. A skipped or errored cycle decides nothing, never reaches the
- * pilot's block and moves no order, so its presence is not a hole in anything.
+ * Only `decided` rows count. A skipped or errored cycle decides nothing and moves no order, so
+ * its presence is not a hole in the continuity this check protects. It DOES reach the pilot's
+ * block since 0038 — its valuation feeds the high-water mark — but that is a different
+ * question, answered by `valuationHold`, and it is deliberately not folded into this one.
  */
 export async function readLatestDecidedDecisionId(
   supabase: SupabaseClient | null,
@@ -337,17 +339,31 @@ export async function markPilotSawDecision(
  *
  * Idempotent by construction: each update only touches a row whose pointer is still null.
  *
- * The cycle is found as the FIRST decided decision at or after the event's instant. The pilot's
+ * The cycle is found as the FIRST decision row at or after the event's instant. The pilot's
  * writes happen inside a cycle whose decision row is inserted a moment later, and the scheduler
  * runs one cycle at a time, so that row is the one — and asking the journal is exact where
  * remembering an id we did not have would have been a guess.
+ *
+ * ── WHICH STATUSES A POINTER MAY NAME ────────────────────────────────────────────────────
+ *
+ * The 40% alert and the 50% stop are judged on the VALUATION, before the model is called, so
+ * the cycle that crosses a threshold may end `decided`, `guard_failed`, `error` or even
+ * `skipped` — and its own row is the one the pointer must name. Naming the next DECIDED cycle
+ * instead, as the first version did, pointed the official window one cycle PAST the crossing:
+ * the witnesses were then valued on a cycle that had nothing to do with the stop. The replay
+ * only ever uses the pointer as an upper bound over decided rows, so a failed row's id closes
+ * the window exactly where it should — on the last decided cycle before the crossing.
+ *
+ * The activation is the exception, in the other direction: it only ever lands on a decided
+ * cycle (decide.ts defers it to that path), and its pointer seeds `last_seen_decision_id`,
+ * which is by contract the last DECIDED cycle the pilot saw. It keeps the `decided` filter.
  */
 export async function resolvePilotEventCycles(supabase: SupabaseClient | null): Promise<void> {
   if (!supabase) return;
-  const pointers: Array<{ instantColumn: string; idColumn: string; extra?: Record<string, unknown> }> = [
-    { instantColumn: 'activated_at', idColumn: 'activated_decision_id', extra: { peak_decision_id: null } },
-    { instantColumn: 'alert_drawdown_at', idColumn: 'alert_drawdown_decision_id' },
-    { instantColumn: 'stopped_at', idColumn: 'stopped_decision_id' },
+  const pointers: Array<{ instantColumn: string; idColumn: string; decidedOnly: boolean }> = [
+    { instantColumn: 'activated_at', idColumn: 'activated_decision_id', decidedOnly: true },
+    { instantColumn: 'alert_drawdown_at', idColumn: 'alert_drawdown_decision_id', decidedOnly: false },
+    { instantColumn: 'stopped_at', idColumn: 'stopped_decision_id', decidedOnly: false },
   ];
   try {
     let row: Record<string, string | number | null> | null = null;
@@ -372,11 +388,8 @@ export async function resolvePilotEventCycles(supabase: SupabaseClient | null): 
 
       let cycleId: number | null = null;
       await runBoundedWrite(async (signal) => {
-        const res = await supabase
-          .from('decisions')
-          .select('id')
-          .eq('status', 'decided')
-          .gte('created_at', instant)
+        const query = supabase.from('decisions').select('id').gte('created_at', instant);
+        const res = await (pointer.decidedOnly ? query.eq('status', 'decided') : query)
           .order('id', { ascending: true })
           .limit(1)
           .abortSignal(signal);
