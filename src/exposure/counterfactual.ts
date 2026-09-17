@@ -261,6 +261,13 @@ export function realBandLegs(
  * A cycle counts as complete when its observation row exists and, if that row says a
  * correction was computed, every asset of the universe has its corrections row. A cycle whose
  * observation says no correction was computed expects none.
+ *
+ * THE POINT STOPS BEFORE THE FIRST INCOMPLETE CYCLE, in decision order, and a complete cycle
+ * after it never carries the point past the hole. The first version skipped an incomplete
+ * cycle and went on to the next complete one — so a corrections write that failed and stayed
+ * failed (`saveBandCorrections` swallows its error and later cycles carry on) would have left
+ * that cycle INSIDE the replay window while `real_journal` and C8 silently omitted its lines
+ * (fourth review round).
  */
 export function bandSettledCutoff(
   observations: ReadonlyMap<number, { correctionComputed: boolean }>,
@@ -269,10 +276,10 @@ export function bandSettledCutoff(
 ): number | null {
   if (universeSize <= 0) return null;
   let cutoff: number | null = null;
-  for (const [id, observation] of observations) {
+  for (const [id, observation] of [...observations].sort(([a], [b]) => a - b)) {
     const rows = correctionsRowsByDecision.get(id) ?? 0;
-    if (observation.correctionComputed && rows < universeSize) continue;
-    if (cutoff == null || id > cutoff) cutoff = id;
+    if (observation.correctionComputed && rows < universeSize) break;
+    cutoff = id;
   }
   return cutoff;
 }

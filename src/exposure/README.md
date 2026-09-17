@@ -505,7 +505,10 @@ lui, le rejeu ne saurait ni dimensionner B̂ ni lire C8 sous la bonne porte, et 
 ### C8 — par épisode exécuté, orienté, descriptif jusqu'à la clôture
 
 « Le modèle utilise-t-il l'exposition imposée, ou la combat-il ? » L'**unité de mesure est
-l'épisode exécuté par actif** : une jambe de bande réellement bookée sur une ligne à un cycle.
+l'épisode exécuté par actif** : une jambe de bande réellement bookée sur une ligne à un cycle,
+sur un cycle où la correction était autorisée, et dont `correction_moves_holding` est vrai — la
+bande a changé la **position exécutable**, pas seulement la cible (à faux, le booking est le
+plan du modèle ; illisible en fenêtre officielle, c'est un refus, jamais une exclusion muette).
 Pas les lignes seulement prévues, pas chaque cycle où la correction reste visible — ce serait
 compter plusieurs fois une seule réaction.
 

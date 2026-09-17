@@ -380,6 +380,7 @@ interface CorrectionRowRead {
   booked_side: string | null;
   booked_notional_quote: string | number | null;
   post_cycle_weight_percent: string | number | null;
+  correction_moves_holding: boolean | null;
 }
 
 const num = (value: string | number | null | undefined): number | null => {
@@ -405,7 +406,7 @@ async function loadCorrectionsJournal(
       .select(
         'decision_id, asset, origin, cause, raw_weight_percent, clamped_weight_percent, base_weight_percent, ' +
           'correction_points, corrected_weight_percent, planned_side, planned_notional_quote, suppressed_reason, ' +
-          'suppressed_notional_quote, booked_side, booked_notional_quote, post_cycle_weight_percent',
+          'suppressed_notional_quote, booked_side, booked_notional_quote, post_cycle_weight_percent, correction_moves_holding',
       )
       .lte('decision_id', cutoffId)
       .order('id', { ascending: true })
@@ -442,6 +443,9 @@ async function loadCorrectionsJournal(
         bookedSide: side(row.booked_side),
         bookedNotionalQuote: num(row.booked_notional_quote),
         postCycleWeightPercent: num(row.post_cycle_weight_percent),
+        // A boolean or nothing — never coerced. Null is reported by the episode builder and
+        // refused in the official window (fourth review round).
+        correctionMovesHolding: typeof row.correction_moves_holding === 'boolean' ? row.correction_moves_holding : null,
       });
       byDecision.set(row.decision_id, bucket);
     }
@@ -1546,7 +1550,7 @@ async function main(): Promise<void> {
   // ── W6 — C8 on the real executed episodes, descriptive until the closure ──────────
   {
     const gateOf = (id: number, asset: string): string | null => gatesByDecision.get(id)?.get(asset) ?? null;
-    const episodes = buildEpisodes({
+    const built = buildEpisodes({
       lines: journalInScope,
       decisions: decisionSummaries,
       fromDecisionId: scopeFromId,
@@ -1555,6 +1559,7 @@ async function main(): Promise<void> {
       transitionMode: chainTransitionMode,
       correctionAllowed: (id) => cycleFacts(id).correctionAllowed,
     });
+    const episodes = built.episodes;
     // FINALITY FOLLOWS THE INSTANT THE WINDOW WAS RESOLVED ON, not the pilot row. A closed
     // pilot replayed with `--at=alerte_40` is a snapshot cut BEFORE the closure, and its C8 is
     // as descriptive as an open window's; only the `cloture` instant carries the official
@@ -1568,6 +1573,10 @@ async function main(): Promise<void> {
       toDecisionId: scopeToId,
       windowClosed: closedAtSelectedInstant,
       claimsOfficial,
+      // A line whose `correction_moves_holding` could not be read is a REFUSAL of the official
+      // reading, never a silent exclusion; on the bench it is named below and left out.
+      unreadable: built.unreadable,
+      official: pilotWindow.official,
     });
     const episodeLine = (e: (typeof episodes)[number]): string =>
       `#${e.decisionId} ${e.asset.padEnd(4)} ${e.direction === 'hausse' ? 'HAUSSE' : 'BAISSE'} ${e.origin} · ` +
@@ -1589,6 +1598,12 @@ async function main(): Promise<void> {
       '',
       `${verdict.population} épisode(s) exécuté(s) dans la fenêtre · ${verdict.readable} lisible(s) · ` +
         Object.entries(verdict.byReading).filter(([, n]) => n > 0).map(([k, n]) => `${k} ${n}`).join(' · '),
+      'Un épisode exige `correction_moves_holding = true` : la bande a changé la position exécutable,',
+      'pas seulement la cible. Une valeur fausse exclut la ligne ; une valeur illisible est refusée.',
+      built.unreadable.length === 0
+        ? ''
+        : `  ${built.unreadable.length} ligne(s) de bande à correction_moves_holding illisible : ${built.unreadable.map((u) => `#${u.decisionId} ${u.asset}`).join(', ')}` +
+          (pilotWindow.official ? ' — REFUS en fenêtre officielle' : ' — écartées sur le banc, et nommées'),
       ...episodes.map((e) => `  ${episodeLine(e)}`),
       verdict.population === 0 ? '  aucun épisode exécuté : C8 n’est pas mesurable sur cette fenêtre.' : '',
       '',
@@ -1606,7 +1621,7 @@ async function main(): Promise<void> {
       'il ne prouve pas une adoption consciente de la bande d’exposition.',
       ...verdict.problems.map((problem) => `  PROBLÈME : ${problem}`),
     ].filter((line) => line !== ''));
-    c8Artefact = { episodes, judgement: verdict, official: verdict.official, window_closed: windowClosed, resolved_instant: pilotWindow.official ? pilotWindow.instant : null };
+    c8Artefact = { episodes, unreadable: built.unreadable, judgement: verdict, official: verdict.official, window_closed: windowClosed, resolved_instant: pilotWindow.official ? pilotWindow.instant : null };
   }
 
   // ── The artefact ─────────────────────────────────────────────────────────────────

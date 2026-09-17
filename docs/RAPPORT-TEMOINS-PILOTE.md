@@ -116,7 +116,7 @@ portefeuille corrigé ; il ne prouve pas une adoption consciente de la bande d'e
 |---|---|---|
 | W4 | 27 cycles gel + bande, 385 lignes `gel` réelles | une jambe de bande touche une ligne gelée, dans B̂ ou dans le journal |
 | W5 | 4 jambes de bande, 238 contrôles de clamp | entrée ≠ journal en fenêtre officielle, clamp divergent, attribution incohérente, 1839 non conforme |
-| W6 | 4 épisodes exécutés | lecture contredisant ses nombres, réaction lue au mauvais cycle, épisode non booké, verdict officiel sur fenêtre ouverte |
+| W6 | 4 épisodes exécutés (`correction_moves_holding` vrai sur les quatre) | lecture contredisant ses nombres, réaction lue au mauvais cycle, épisode non booké, `correction_moves_holding` illisible en fenêtre officielle, verdict officiel sur fenêtre ouverte |
 
 Sans population, chacun répond `NON MESURABLE`, jamais `PASS`. Preuve 13 de
 `src/test/exposureWitness.ts` fait échouer chacun sur fixture.

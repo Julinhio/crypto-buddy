@@ -9,10 +9,12 @@
  *
  * Not "every planned line", not "every cycle on which the correction is still visible". An
  * episode is one leg the band REALLY EXECUTED on one asset at one cycle: origin
- * `correction_de_bande` or `allocation_de_secours`, and a booked side. A planned leg the
- * executor dropped never changed what the model sees, and a cycle where the correction merely
- * stays visible is the same episode still — counting it again would count the model's one
- * reaction as many.
+ * `correction_de_bande` or `allocation_de_secours`, a booked side, the correction allowed to
+ * act that cycle, and `correction_moves_holding` TRUE — the band's correction really changed
+ * the executable holding, rather than moving a target the uncorrected plan would have booked
+ * identically (fourth review round). A planned leg the executor dropped never changed what the
+ * model sees, and a cycle where the correction merely stays visible is the same episode still
+ * — counting it again would count the model's one reaction as many.
  *
  * ── WHAT A REACTION IS, AND WHAT IS NOT ONE ───────────────────────────────────────────
  *
@@ -70,6 +72,13 @@ export interface JournalCorrectionLine {
   bookedSide: 'buy' | 'sell' | null;
   bookedNotionalQuote: number | null;
   postCycleWeightPercent: number | null;
+  /**
+   * Did the correction CHANGE THE EXECUTABLE HOLDING on that line? The journal stores it for
+   * the case where the correction moves the target but the corrected and uncorrected plans
+   * book the same holding — a booking there is the model's plan, not the band's. Null when the
+   * column could not be read; in the official window that is a refusal, never an exclusion.
+   */
+  correctionMovesHolding: boolean | null;
 }
 
 /** What the reader needs of a decision: its status, and the model's own proposal. */
@@ -172,11 +181,21 @@ export interface BuildEpisodesInput {
   correctionAllowed: (decisionId: number) => boolean;
 }
 
+export interface BuiltEpisodes {
+  episodes: AdoptionEpisode[];
+  /**
+   * Band lines that would have been episodes but whose `correction_moves_holding` could not be
+   * read. Never excluded in silence: the caller refuses an official result on them.
+   */
+  unreadable: Array<{ decisionId: number; asset: string }>;
+}
+
 /**
  * THE EPISODES, built from the journal — executed band legs only, each with its reaction.
  */
-export function buildEpisodes(input: BuildEpisodesInput): AdoptionEpisode[] {
+export function buildEpisodes(input: BuildEpisodesInput): BuiltEpisodes {
   const decisions = [...input.decisions].sort((a, b) => a.id - b.id);
+  const unreadable: Array<{ decisionId: number; asset: string }> = [];
 
   const episodes: AdoptionEpisode[] = [];
   for (const line of input.lines) {
@@ -184,6 +203,13 @@ export function buildEpisodes(input: BuildEpisodesInput): AdoptionEpisode[] {
     if (line.decisionId < input.fromDecisionId || line.decisionId > input.toDecisionId) continue;
     if (line.correctionPoints === 0) continue;
     if (!input.correctionAllowed(line.decisionId)) continue;
+    // THE HOLDING MUST HAVE MOVED BECAUSE OF THE BAND. False: the booking was the model's own
+    // plan, no episode. Null: unreadable — reported, never dropped in silence.
+    if (line.correctionMovesHolding == null) {
+      unreadable.push({ decisionId: line.decisionId, asset: line.asset });
+      continue;
+    }
+    if (line.correctionMovesHolding === false) continue;
     const direction: EpisodeDirection = line.correctionPoints > 0 ? 'hausse' : 'baisse';
 
     // The reaction: the first DECIDED cycle after the episode, inside the window. Everything
@@ -253,7 +279,10 @@ export function buildEpisodes(input: BuildEpisodesInput): AdoptionEpisode[] {
       because,
     });
   }
-  return episodes.sort((a, b) => a.decisionId - b.decisionId || (a.asset < b.asset ? -1 : 1));
+  return {
+    episodes: episodes.sort((a, b) => a.decisionId - b.decisionId || (a.asset < b.asset ? -1 : 1)),
+    unreadable,
+  };
 }
 
 // ── THE JUDGE — W6 ────────────────────────────────────────────────────────────────────
@@ -288,8 +317,19 @@ export function judgeC8(input: {
   windowClosed: boolean;
   /** What the report is about to publish. The judge refuses an official claim on an open window. */
   claimsOfficial: boolean;
+  /** Band lines whose `correction_moves_holding` could not be read — see `BuiltEpisodes`. */
+  unreadable?: ReadonlyArray<{ decisionId: number; asset: string }>;
+  /** In an official window an unreadable line is a REFUSAL of the whole reading. */
+  official?: boolean;
 }): C8Judgement {
   const problems: string[] = [];
+  if (input.official && (input.unreadable?.length ?? 0) > 0) {
+    problems.push(
+      `REFUS : correction_moves_holding illisible en fenêtre officielle sur ${input.unreadable!.length} ligne(s) — ` +
+        input.unreadable!.map((u) => `#${u.decisionId} ${u.asset}`).join(', ') +
+        ' ; aucune lecture C8 ne peut être publiée sur ce journal',
+    );
+  }
   const byReading: Record<EpisodeReading, number> = {
     repetition: 0,
     maintien: 0,
