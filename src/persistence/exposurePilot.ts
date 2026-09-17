@@ -268,8 +268,10 @@ export async function closeMeasurementWindow(
  * decided cycle more recent than the one the pilot saw can only exist if the pilot did not run
  * on it. Null on a failed read, which fails closed rather than skipping the check.
  *
- * Only `decided` rows count. A skipped or errored cycle decides nothing, never reaches the
- * pilot's block and moves no order, so its presence is not a hole in anything.
+ * Only `decided` rows count. A skipped or errored cycle decides nothing and moves no order, so
+ * its presence is not a hole in the continuity this check protects. It DOES reach the pilot's
+ * block since 0038 — its valuation feeds the high-water mark — but that is a different
+ * question, answered by `valuationHold`, and it is deliberately not folded into this one.
  */
 export async function readLatestDecidedDecisionId(
   supabase: SupabaseClient | null,

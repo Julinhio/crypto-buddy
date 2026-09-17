@@ -171,7 +171,29 @@ export type PilotHold =
   | 'pilote_invalide_contrat'
   | 'pilote_interrompu'
   | 'contrat_divergent'
-  | 'equite_inutilisable';
+  | 'equite_inutilisable'
+  /**
+   * A HELD line has no live price this cycle and is valued at its average cost. The book's
+   * equity is then a number the breaker cannot trust: a fallback price must neither raise the
+   * high-water mark nor trip an irreversible threshold, and a correction sized on it would be
+   * trading blind with respect to the 50% stop. The valuation is skipped, not the cycle — see
+   * `judgePilot`, which still writes the heartbeat on it.
+   */
+  | 'prix_de_repli';
+
+/**
+ * WHAT THE JOURNAL CARRIES, one value wider than what the pilot can decide.
+ *
+ * `pilot_hold` used to be null on every cycle that never reached the correction step — an
+ * `error`, a `guard_failed` — which made "the pilot did not get to judge a correction" and
+ * "the pilot allowed the correction to touch the orders" the same value. `cycle_non_decide`
+ * is the cycle-level answer: the pilot judged the VALUATION (its verdict and its numbers are
+ * on the row), but no target ever existed for a correction to be judged against.
+ *
+ * Not a `PilotHold` because `judgePilot` can never produce it: the pilot judges before the
+ * model is called, and does not know how the cycle will end. See `journalPilotHold`.
+ */
+export type PilotJournalHold = PilotHold | 'cycle_non_decide';
 
 /** A durable change the caller MUST land before the correction may touch anything. */
 export type PilotWrite =
@@ -205,6 +227,13 @@ export interface PilotJudgeInput {
   contractVersion: string;
   /** The sovereign book's equity this cycle. The only equity there is. */
   equityQuote: number;
+  /**
+   * THE HELD LINES THAT HAD NO LIVE PRICE THIS CYCLE — valued at their average cost by the
+   * book's derivation, which is the right thing for a portfolio view and the wrong thing for
+   * a high-water mark. Empty on every ordinary cycle. `derivePortfolio` flags them as
+   * `priceStale`; the caller passes their names, the pilot only needs to know there are some.
+   */
+  fallbackPricedAssets: readonly string[];
   drawdown: { alertPercent: number; stopPercent: number };
   /**
    * THE NEWEST DECIDED CYCLE THE JOURNAL HOLDS, read before this one is written.
@@ -230,6 +259,44 @@ const hold = (reason: PilotHold): PilotJudgement => ({
 });
 
 /**
+ * IS THIS VALUATION ONE THE HIGH-WATER MARK MAY BE BUILT ON? Null when it is; otherwise the
+ * named reason it is not.
+ *
+ * The rule, in full: the equity is finite and strictly positive, and every line actually held
+ * carries a live market price for this cycle. A fallback price — the average cost the book
+ * falls back on when a ticker is missing — is a fine number to display and a dangerous one to
+ * ratchet a peak from or to trip a 50% stop on: it is not what the market says the book is
+ * worth, and both of those effects are irreversible.
+ *
+ * Whether the book came from the SOVEREIGN ledger is not judged here, on purpose: the caller
+ * refuses to reach the pilot at all with the fabricated 100%-cash book a failed journal read
+ * produces (see decide.ts, edge case 0). Passing a flag would only invite a second, weaker
+ * copy of that refusal.
+ */
+export function valuationHold(input: {
+  equityQuote: number;
+  fallbackPricedAssets: readonly string[];
+}): 'equite_inutilisable' | 'prix_de_repli' | null {
+  if (!Number.isFinite(input.equityQuote) || input.equityQuote <= 0) return 'equite_inutilisable';
+  if (input.fallbackPricedAssets.length > 0) return 'prix_de_repli';
+  return null;
+}
+
+/**
+ * THE HOLD AS THE JOURNAL CARRIES IT.
+ *
+ * The pilot's own reason wins when it has one — a stop, a diverged contract, a fallback
+ * price — because that is the durable fact a reader needs first. When the pilot did not
+ * hold, the answer depends on whether the cycle ever reached the correction step: null means
+ * "the correction was allowed to touch the orders", and `cycle_non_decide` means "the cycle
+ * failed before any target existed". Never a silence in between.
+ */
+export function journalPilotHold(hold: PilotHold | null, correctionReached: boolean): PilotJournalHold | null {
+  if (hold != null) return hold;
+  return correctionReached ? null : 'cycle_non_decide';
+}
+
+/**
  * THE ONE DECISION: may the band correction touch the orders this cycle, and what must be
  * written for that to be true.
  *
@@ -240,15 +307,33 @@ const hold = (reason: PilotHold): PilotJudgement => ({
  *
  * The order of the checks is itself the contract. A diverged contract is judged BEFORE any
  * drawdown, because a contract we no longer recognise is one whose thresholds we cannot trust
- * either.
+ * either. And the valuation is judged AFTER the interruption and the contract: those two are
+ * facts about the journal and the configuration, true whatever the tickers did this cycle,
+ * so an unreliable price must not postpone them.
+ *
+ * ── WHEN IT IS CALLED, AND WHY THAT IS PART OF THE CONTRACT ────────────────────────────
+ *
+ * Once per cycle, on EVERY cycle that reached a sovereign book — before the model is called,
+ * so before it is known whether the cycle will end `decided`, `guard_failed` or `error`. The
+ * high-water mark is a property of the BOOK, not of whether the model answered: a peak
+ * reached on a cycle the guard then refused is a real peak, and a breaker measuring from a
+ * lower one would bite too late. That is the defect this placement removes — cycles 2027 and
+ * 2028 sat above the recorded peak and were never seen, because the judgement used to live on
+ * the decided path only.
+ *
+ * The one write that must NOT land on a failed cycle is the activation: it spends the official
+ * instant and promises that the correction applies from that very cycle, which a cycle with no
+ * target cannot honour. The caller defers it to the decided path; see decide.ts.
  */
 export function judgePilot(input: PilotJudgeInput): PilotJudgement {
   if (input.mode !== 'application') return hold('mode_inactif');
   if (input.identityReadFailed) return hold('identite_illisible');
-  if (!Number.isFinite(input.equityQuote) || input.equityQuote <= 0) return hold('equite_inutilisable');
+  const unreliable = valuationHold(input);
 
   // ── No pilot yet: this cycle is the activation, and it happens exactly once ──────────
   if (input.identity == null) {
+    // Never on a valuation the breaker could not trust: the opening equity IS the first peak.
+    if (unreliable != null) return hold(unreliable);
     return {
       mayCorrect: true,
       hold: null,
@@ -319,11 +404,31 @@ export function judgePilot(input: PilotJudgeInput): PilotJudgement {
     };
   }
 
+  // ── The valuation, judged before anything numeric is built on it ─────────────────────
+  //
+  // A fallback price or a non-finite equity holds the correction and touches NOTHING durable:
+  // no peak, no threshold, no write. But the pilot DID see this cycle, so the status stays
+  // `active` and the caller still writes the heartbeat — a missing ticker is a bar with no
+  // reading, not a cycle that ran without the pilot, and it must not end an eight-week
+  // experiment. The identity's own peak is reported so the row still says what the breaker
+  // knew; the drawdown is null because there is no number it could honestly be.
+  if (unreliable != null) {
+    return {
+      mayCorrect: false,
+      hold: unreliable,
+      write: null,
+      alert: null,
+      drawdownPercent: null,
+      peakEquityQuote: identity.peakEquityQuote,
+      statusAfter: 'active',
+    };
+  }
+
   // ── The high-water mark, and the drawdown measured from it ───────────────────────────
   //
   // The peak only ever rises, and it survives everything: a restart, a redeploy, a spell with
-  // the mode switched off. A peak that reset would report a drawdown of zero the day after the
-  // worst day of the pilot.
+  // the mode switched off, a cycle the guard refused. A peak that reset would report a
+  // drawdown of zero the day after the worst day of the pilot.
   const peak = Math.max(identity.peakEquityQuote, input.equityQuote);
   const drawdownPercent = peak <= 0 ? 0 : ((peak - input.equityQuote) / peak) * 100;
 

@@ -4,15 +4,18 @@ import path from 'node:path';
 import { config, resolveExposureBandMode } from '../config/index.js';
 import {
   contractDigest,
+  journalPilotHold,
   judgePilot,
   judgeWindowClosure,
   pilotAlertMessage,
   pilotContractOf,
   resolvePilotWindow,
+  valuationHold,
   type PilotAlert,
   type PilotIdentity,
   type PilotWindowRow,
   type PilotJudgeInput,
+  type PilotWrite,
 } from '../exposure/pilot.js';
 
 /**
@@ -67,6 +70,9 @@ function judge(over: Partial<PilotJudgeInput> = {}) {
     contractSha256: SHA,
     contractVersion: config.exposurePilot.contractVersion,
     equityQuote: 1000,
+    // Every held line has a live price: the ordinary cycle, and the only kind the pilot saw
+    // in its first 240 cycles.
+    fallbackPricedAssets: [],
     drawdown: DRAWDOWN,
     // The journal's newest decided cycle IS the one the pilot last saw: no hole.
     latestDecidedDecisionId: 1000,
@@ -783,6 +789,186 @@ console.log('\nProof 14 — the reserve, the persisted status, the settled bound
     'closing still leaves the correction running — the status is untouched',
     !/closeMeasurementWindow[\s\S]*?status:/.test(persistence),
   );
+}
+
+// ── PROOF 15 — the high-water mark sees every admissible valuation ──────────────────
+//
+// THE DEFECT. The judgement lived on the decided path, so the peak was only ever measured on
+// cycles the model and the guard let through. On 14/09 the identity held a peak of
+// 1 079,65 $; cycles 2027 and 2028 ended `guard_failed` with the same sovereign book valued at
+// 1 081,72 $ and 1 081,31 $, and neither was seen. Their observation rows carried NULL in all
+// three pilot columns — and NULL in `pilot_hold` is the value that means "the correction was
+// allowed to touch the orders", which is the opposite of what happened.
+//
+// THE RULE. The pilot judges the VALUATION on every cycle that reached a sovereign book,
+// before the model is called. A valuation is admissible when the equity is finite and positive
+// and every held line has a live price. On an admissible one the peak may rise and both
+// thresholds may fire, whatever the cycle goes on to do; on a fallback-priced one nothing
+// irreversible is built. The interruption and the heartbeat keep their own definition — they
+// are about DECIDED cycles, and they are not bent here to say which equities count.
+console.log('\nProof 15 — a failed cycle with a reliable valuation still feeds the high-water mark:');
+{
+  // A test-side mirror of `applyPilotWrite`'s patch, so a scenario can be walked cycle by
+  // cycle on the pure function alone. Only the fields the walk reads are carried.
+  const applied = (id: PilotIdentity, write: PilotWrite | null): PilotIdentity => {
+    if (write == null) return id;
+    switch (write.kind) {
+      case 'peak':
+        return { ...id, peakEquityQuote: write.peakEquityQuote };
+      case 'alert_drawdown':
+        return { ...id, peakEquityQuote: write.peakEquityQuote, alertDrawdownAt: '2026-09-15T00:00:00.000Z' };
+      case 'stop_drawdown':
+        return { ...id, peakEquityQuote: write.peakEquityQuote, status: 'stopped_drawdown' };
+      case 'interrupt_mode':
+        return { ...id, status: 'interrupted_mode' };
+      case 'invalidate_contract':
+        return { ...id, status: 'invalidated_contract' };
+      case 'activation':
+        return identity({ openingEquityQuote: write.openingEquityQuote, peakEquityQuote: write.peakEquityQuote });
+    }
+  };
+
+  // (a) THE REAL CASE, on the real numbers. The judgement has no way to know how the cycle will
+  // end — `PilotJudgeInput` carries no status — so a `guard_failed` cycle is judged exactly as
+  // a decided one, and its equity raises the mark.
+  const prod = identity({ peakEquityQuote: 1079.6518118063, openingEquityQuote: 1077.1033053103 });
+  const cycle2027 = judge({ identity: prod, equityQuote: 1081.72 });
+  ok('[guard_failed, 2027] the valuation establishes a new high-water mark', cycle2027.write?.kind === 'peak');
+  ok('at the cycle\'s own equity', cycle2027.write?.kind === 'peak' && cycle2027.write.peakEquityQuote === 1081.72);
+  ok('the drawdown reported on that row is zero — it IS the peak', cycle2027.drawdownPercent === 0);
+  const after2027 = applied(prod, cycle2027.write);
+  const cycle2028 = judge({ identity: after2027, equityQuote: 1081.31 });
+  ok('[guard_failed, 2028] the next one measures from the mark 2027 set', after2027.peakEquityQuote === 1081.72 && cycle2028.write === null);
+  ok(
+    'and its drawdown is the honest 0.04%, not the 0% a lost peak would have shown',
+    Math.abs((cycle2028.drawdownPercent ?? 0) - ((1081.72 - 1081.31) / 1081.72) * 100) < 1e-9,
+  );
+
+  // (b) AN `error` CYCLE is the same cycle to the pilot: the model never answered, the book was
+  // valued all the same. Nothing in the judgement distinguishes the two failure kinds, and the
+  // structural checks in (h) prove both reach the block.
+  const errorCycle = judge({ identity: identity({ peakEquityQuote: 1000 }), equityQuote: 1300 });
+  ok('[error] a reliable valuation raises the mark on an errored cycle too', errorCycle.write?.kind === 'peak' && errorCycle.write.peakEquityQuote === 1300);
+  ok('and no order can follow from it — the verdict carries no movement', !('movements' in errorCycle));
+
+  // (c) WHY IT MATTERS — the breaker bites late without it. Peak 1000; a guard_failed cycle at
+  // 1200; then a decided cycle at 700. Seen, the drawdown is 41.7% and the 40% alert fires.
+  // Unseen, it is 30% and nothing does.
+  const seen = applied(identity({ peakEquityQuote: 1000 }), judge({ identity: identity({ peakEquityQuote: 1000 }), equityQuote: 1200 }).write);
+  const withPeak = judge({ identity: seen, equityQuote: 700 });
+  const withoutPeak = judge({ identity: identity({ peakEquityQuote: 1000 }), equityQuote: 700 });
+  ok('[sommet vu sur un cycle en échec] the 40% alert fires on the next decided cycle', withPeak.alert === 'drawdown_40');
+  ok('[sommet manqué] it would not have — the defect understated the drawdown', withoutPeak.alert === null && (withoutPeak.drawdownPercent ?? 0) < 31);
+
+  // (d) A FALLBACK PRICE builds nothing irreversible. `derivePortfolio` values a held line at
+  // its average cost when the ticker is missing; the pilot refuses to ratchet or to trip on it.
+  ok('[valuationHold] a fallback-priced line is named', valuationHold({ equityQuote: 1000, fallbackPricedAssets: ['ETH'] }) === 'prix_de_repli');
+  ok('a non-finite or non-positive equity keeps its own name', valuationHold({ equityQuote: 0, fallbackPricedAssets: [] }) === 'equite_inutilisable' && valuationHold({ equityQuote: Number.NaN, fallbackPricedAssets: ['ETH'] }) === 'equite_inutilisable');
+  ok('and an ordinary valuation is admissible', valuationHold({ equityQuote: 1000, fallbackPricedAssets: [] }) === null);
+  const stale = identity({ peakEquityQuote: 1000 });
+  const staleHigh = judge({ identity: stale, equityQuote: 5000, fallbackPricedAssets: ['ETH'] });
+  ok('[prix de repli, +400%] no new peak is written', staleHigh.write === null);
+  ok('the correction stands down', !staleHigh.mayCorrect && staleHigh.hold === 'prix_de_repli');
+  ok('the row still reports the peak the breaker knew', staleHigh.peakEquityQuote === 1000);
+  ok('and no drawdown, because there is no honest number for it', staleHigh.drawdownPercent === null);
+  const staleLow = judge({ identity: stale, equityQuote: 400, fallbackPricedAssets: ['BTC'] });
+  ok('[prix de repli, -60%] the 50% stop does NOT trip on a fallback price', staleLow.write === null && staleLow.alert === null && staleLow.statusAfter === 'active');
+  ok('nor does the 40% alert', judge({ identity: stale, equityQuote: 600, fallbackPricedAssets: ['BTC'] }).alert === null);
+  // THE PILOT ITSELF IS NOT ENDED BY A MISSING TICKER. The status stays active so the heartbeat
+  // is still written on a decided cycle: a bar with no reading is not a cycle that ran unseen.
+  ok('the pilot stays active — a missing ticker must not end an eight-week experiment', staleLow.statusAfter === 'active');
+  // DELIBERATE, AND NEW: an unusable equity on an ACTIVE identity used to answer with no status,
+  // so the heartbeat was skipped and the next cycle read an interruption. Both unreliable
+  // valuations now share one posture — nothing durable, the pilot continues.
+  ok('and so does an equity of 0 — the two unreliable valuations share one posture', judge({ identity: stale, equityQuote: 0 }).statusAfter === 'active' && judge({ identity: stale, equityQuote: 0 }).write === null);
+  ok('no activation on a fallback valuation — the opening equity IS the first peak', judge({ identity: null, equityQuote: 1000, fallbackPricedAssets: ['ETH'] }).write === null);
+  ok('and it is named, not silent', judge({ identity: null, equityQuote: 1000, fallbackPricedAssets: ['ETH'] }).hold === 'prix_de_repli');
+  // THE ORDER OF THE CHECKS. A fallback price is a fact about the tickers; the interruption and
+  // the contract are facts about the journal and the configuration, and they are judged first.
+  ok(
+    'an interruption is still detected on a fallback-priced cycle',
+    judge({ identity: identity({ lastSeenDecisionId: 1500 }), latestDecidedDecisionId: 1501, fallbackPricedAssets: ['ETH'] }).write?.kind === 'interrupt_mode',
+  );
+  ok(
+    'and so is a diverged contract',
+    judge({ identity: identity({ contractSha256: 'autre' }), fallbackPricedAssets: ['ETH'] }).write?.kind === 'invalidate_contract',
+  );
+  ok('a stopped pilot names the stop, not the price', judge({ identity: identity({ status: 'stopped_drawdown' }), fallbackPricedAssets: ['ETH'] }).hold === 'pilote_arrete_drawdown');
+
+  // (e) A 40% CROSSING ON A FAILED CYCLE persists the alert and creates no order. The write is
+  // the same durable latch; the journal says the cycle never reached a correction.
+  const failedAt40 = judge({ identity: identity({ peakEquityQuote: 1000 }), equityQuote: 600 });
+  ok('[40% sur cycle en échec] the alert is decided', failedAt40.alert === 'drawdown_40');
+  ok('and latched durably — the write does not depend on the cycle\'s outcome', failedAt40.write?.kind === 'alert_drawdown');
+  ok('the journal reads cycle_non_decide, never null', journalPilotHold(failedAt40.hold, false) === 'cycle_non_decide');
+  ok('while the numbers beside it are the breaker\'s', Math.abs((failedAt40.drawdownPercent ?? 0) - 40) < 1e-9 && failedAt40.peakEquityQuote === 1000);
+  ok('on the following decided cycle the alert does not fire again', judge({ identity: applied(identity({ peakEquityQuote: 1000 }), failedAt40.write), equityQuote: 550 }).alert === null);
+
+  // (f) A 50% CROSSING ON A FAILED CYCLE stops the correction durably, and liquidates nothing.
+  const failedAt50 = judge({ identity: identity({ peakEquityQuote: 1000 }), equityQuote: 500 });
+  ok('[50% sur cycle en échec] the breaker trips', failedAt50.alert === 'drawdown_50' && failedAt50.write?.kind === 'stop_drawdown');
+  ok('the status becomes terminal', failedAt50.statusAfter === 'stopped_drawdown');
+  ok('the journal names the stop — the pilot\'s own reason wins over the cycle\'s', journalPilotHold(failedAt50.hold, false) === 'pilote_arrete_drawdown');
+  const stoppedOnFailure = applied(identity({ peakEquityQuote: 1000 }), failedAt50.write);
+  ok('the next decided cycle finds the correction disarmed', !judge({ identity: stoppedOnFailure, equityQuote: 900 }).mayCorrect);
+  ok('and a recovery does not re-arm it', judge({ identity: stoppedOnFailure, equityQuote: 2000 }).hold === 'pilote_arrete_drawdown');
+  ok('nothing in the verdict can liquidate', !('liquidate' in failedAt50) && !('movements' in failedAt50));
+
+  // (g) THE JOURNAL distinguishes a cycle that was not judged from one where the correction
+  // applied. Null is now reserved for the latter.
+  ok('[journal] the correction applied → null', journalPilotHold(null, true) === null);
+  ok('the cycle never reached a correction → cycle_non_decide', journalPilotHold(null, false) === 'cycle_non_decide');
+  ok('the pilot\'s own reason always wins', journalPilotHold('mode_inactif', false) === 'mode_inactif' && journalPilotHold('prix_de_repli', true) === 'prix_de_repli');
+  const migration = readFileSync(path.join(ROOT, 'supabase/migrations/0038_exposure_pilot_admissible_valuation.sql'), 'utf8');
+  ok('the database accepts both new values', migration.includes("'cycle_non_decide'") && migration.includes("'prix_de_repli'"));
+  ok('and every value the code can produce', ['mode_inactif', 'identite_illisible', 'ecriture_obligatoire_impossible', 'pilote_arrete_drawdown', 'pilote_invalide_contrat', 'pilote_interrompu', 'contrat_divergent', 'equite_inutilisable'].every((h) => migration.includes(`'${h}'`)));
+  ok('the migration backfills nothing and touches no identity', !/update\s+public\.exposure_pilot|update\s+public\.exposure_band_observations|insert\s+into/i.test(migration));
+
+  // (h) THE WIRING. `decide.ts` is not unit-testable, so its shape is proven the way the other
+  // proofs prove it: the judgement sits between the fabricated-book refusal and the model call,
+  // every observation row carries a verdict, and no failure path can reach the executor.
+  // Normalised to LF: the checkout's line endings are not part of what is being proven (#42).
+  const decide = readFileSync(path.join(ROOT, 'src/decision/decide.ts'), 'utf8').replace(/\r\n/g, '\n');
+  const at = (needle: string | RegExp): number => {
+    const idx = typeof needle === 'string' ? decide.indexOf(needle) : decide.search(needle);
+    assert.ok(idx >= 0, `not found in decide.ts: ${String(needle)}`);
+    return idx;
+  };
+  const judgementAt = at('const pilotJudgement = judgePilot({');
+  const fabricatedBookRefusal = at('refusing to trade on a book and a lifecycle we cannot');
+  const llmCallAt = at('const llmStart = Date.now();');
+  ok('[câblage] the judgement comes AFTER the fabricated-book refusal', judgementAt > fabricatedBookRefusal);
+  ok('and BEFORE the model is called', judgementAt < llmCallAt);
+  ok('it is made exactly once per cycle', (decide.match(/judgePilot\(\{/g) ?? []).length === 1);
+  ok('the fallback-priced lines are passed from the book\'s own flag', /fallbackPricedAssets: portfolio\.positions\.filter\(\(p\) => p\.priceStale\)/.test(decide));
+  ok('every write but the activation lands before the model is called', at('if (!activationPending) await landPilotWrite();') < llmCallAt);
+  const activationLanding = at('if (activationPending) await landPilotWrite();');
+  ok('the activation waits for the decided path', activationLanding > at('const { clamp, movements: proposedMovements } = evaluated;'));
+  ok('and still lands before any order', activationLanding < at('let correctedAllocation = clamp.applied;'));
+  const observations = decide.match(/observeExposureBand\(\{[\s\S]*?\}\);/g) ?? [];
+  ok(`every observation row carries a verdict (${observations.length} call sites)`, observations.length >= 6 && observations.every((call) => /pilot: (pilotJournal\(|\{)/.test(call)));
+  ok('the failure paths journal the valuation as not judged', (decide.match(/pilot: pilotJournal\(false\)/g) ?? []).length >= 4);
+  ok('and the decided path as reached', (decide.match(/pilot: pilotJournal\(true\)/g) ?? []).length === 1);
+  ok('the verdict is no longer optional on a row', /pilot: \{ hold: PilotJournalHold \| null;/.test(decide) && !/pilot\?: \{/.test(decide));
+  // NO ORDER ON A FAILED CYCLE. The executor is reached from exactly one place, and that place
+  // sits after the decided row has been inserted — every failure path has returned by then.
+  const executorCalls = decide.match(/await executeMovements\(/g) ?? [];
+  ok('the executor is called from exactly one place', executorCalls.length === 1);
+  const decidedRowAt = at("status: 'decided',\n    target_allocation: v.targetAllocation,");
+  ok('after the decided row exists', at('await executeMovements(') > decidedRowAt);
+  ok('and the failure helper returns without ever reaching it', at('const failCycle = async (') < decidedRowAt && !/const failCycle = async \([\s\S]*?executeMovements[\s\S]*?return emptyResult\(status/.test(decide));
+
+  // (i) WHAT DID NOT MOVE. The heartbeat and the interruption keep their definition — decided
+  // cycles — and decided cycles keep their behaviour: the standard walk of proof 3 is the same
+  // judgement, made from the same inputs, one call earlier in the cycle.
+  ok('[inchangé] the heartbeat is still written only on a decided row', /EXPOSURE_BAND_MODE === 'application' && id != null && pilotJudgement\.statusAfter === 'active'/.test(decide));
+  const persistence = readFileSync(path.join(ROOT, 'src/persistence/exposurePilot.ts'), 'utf8');
+  ok('and the interruption is still judged against decided cycles only', /readLatestDecidedDecisionId[\s\S]{0,600}?\.eq\('status', 'decided'\)/.test(persistence));
+  const walk = identity({ peakEquityQuote: 1000, openingEquityQuote: 1000 });
+  ok('a decided cycle at 10% still applies, quietly', judge({ identity: walk, equityQuote: 900 }).mayCorrect && judge({ identity: walk, equityQuote: 900 }).write === null);
+  ok('a decided cycle at a new high still writes the peak and applies', judge({ identity: walk, equityQuote: 1100 }).write?.kind === 'peak' && judge({ identity: walk, equityQuote: 1100 }).mayCorrect);
+  ok('the contract digest did not move — the running pilot is not invalidated by this fix', contractDigest(pilotContractOf(config, ['BTC', 'ETH', 'BNB', 'XRP'], 'USDT', 'enforce')) === SHA);
+  ok('and the contract version is still A.1', config.exposurePilot.contractVersion === 'A.1');
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────────

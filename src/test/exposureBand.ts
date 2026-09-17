@@ -617,9 +617,14 @@ console.log('\nProof 13 — the band cannot change what the bot does:');
     'the closure returns void — nothing downstream can read a band decision',
     body.startsWith('): Promise<void> => {'),
   );
+  // The pilot's write closure (`landPilotWrite`, brick 4 fix) now follows this one in the file
+  // with the same signature, so "appears exactly once" would fail for a reason that has nothing
+  // to do with the band. The slice is proven real by POSITION instead: the first declared
+  // return type after the closure's name comes before the next top-level statement of the
+  // cycle, so it can only be this closure's own.
   ok(
-    'and its declared return type appears exactly once, so the slice above is the real body',
-    [...closure.matchAll(/\): Promise<void> => \{/g)].length === 1,
+    'and its declared return type is the closure\'s own, so the slice above is the real body',
+    closure.indexOf('): Promise<void> => {') < closure.search(/\n  (const|let|if|await) /),
   );
 
   // (c) NO CALL SITE assigns it. A `const x = await observeExposureBand(...)` would be void,
@@ -647,9 +652,11 @@ console.log('\nProof 13 — the band cannot change what the bot does:');
   // and a fabricated 0% would be indistinguishable from a book that really was flat.
   // The options object spells each fact out by name, so these read the FIELD rather than a
   // positional argument whose meaning a future reorder could silently change.
+  // The field, wherever it sits in the call: since brick 4's fix every call also carries the
+  // pilot's verdict, so "null" is no longer the last thing before the closing brace.
   ok(
     'the lifecycle-read-failure skip passes a NULL book exposure',
-    [...decide.matchAll(/observeExposureBand\(\{[^}]*bookExposurePercent: null,\s*\}\)/g)].length === 1,
+    [...decide.matchAll(/observeExposureBand\(\{[^}]*bookExposurePercent: null,/g)].length === 1,
   );
   ok(
     'and it is the only call site that does — every other path publishes what it measured',
