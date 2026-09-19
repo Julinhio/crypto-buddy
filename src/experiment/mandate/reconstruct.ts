@@ -316,7 +316,7 @@ export async function reconstructCycle(
   // The applied side, through the same pipeline — the applied targets a hold may keep: the
   // reference row's, and the memory row's (what the model was shown). Absent or not
   // restatable values are simply not offered, exactly as decide() degrades them.
-  const appliedReference: Record<string, number>[] = [];
+  const appliedReferences: Record<string, number>[] = [];
   const shownApplied = lastSignificant ? resolveEffectiveTarget(lastSignificant).allocation : null;
   for (const candidate of [guardRef.applied, shownApplied]) {
     if (candidate == null) continue;
@@ -327,7 +327,7 @@ export async function reconstructCycle(
       policy: config,
     });
     if (!restatedApplied.ok) continue;
-    if (!appliedReference.some((known) => sameTarget(known, restatedApplied.value.intent))) appliedReference.push(restatedApplied.value.intent);
+    if (!appliedReferences.some((known) => sameTarget(known, restatedApplied.value.intent))) appliedReferences.push(restatedApplied.value.intent);
   }
 
   // The thesis set the guard reads — from the PERSISTED context, never position_state.
@@ -343,7 +343,7 @@ export async function reconstructCycle(
     assets,
     reserveStable,
     intentReference,
-    appliedReferences: appliedReference,
+    appliedReferences,
     previousIntentMovements,
     assetsWithStoredThesis,
   };
