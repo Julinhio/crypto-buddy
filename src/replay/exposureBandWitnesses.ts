@@ -49,6 +49,7 @@ import {
   type WitnessRow,
 } from '../exposure/witness.js';
 import { canonicalJson, sha256Of, writeArtefact } from '../provenance/artefacts.js';
+import { loadIntegrityMarks, type IntegrityMark } from '../persistence/decisionIntegrityMarks.js';
 import { bookOf as portfolioOf, pricesOf, type StoredContext } from './storedCycle.js';
 
 /**
@@ -125,7 +126,21 @@ interface DecisionRead {
   target_allocation: unknown;
   applied_allocation: unknown;
   applied_divergence_cause: unknown;
+  /** Migration 0039 — null on every row written before it. */
+  coherence_guard_armed: boolean | null;
 }
+
+/**
+ * THE GUARD'S STATE ON A CYCLE, as a reader may honestly claim it.
+ *
+ *   armed / disarmed     the row says so (`coherence_guard_armed`, written since 0039);
+ *   armed_by_event       the row is silent but the guard journaled a verdict on that cycle —
+ *                        a disarmed guard emits none, so the event PROVES it was armed;
+ *   unknown              nothing says anything. Never defaulted: the cycles between the manual
+ *                        disarming of 19/09 and the deploy of 0039 read exactly this, and they
+ *                        are the reason the column exists.
+ */
+type GuardState = 'armed' | 'disarmed' | 'armed_by_event' | 'unknown';
 
 interface GateRead {
   decision_id: number;
@@ -284,7 +299,7 @@ async function loadDecisions(
       .from('decisions')
       .select(
         'id, created_at, status, regime, market_context, target_allocation, applied_allocation, ' +
-          'applied_divergence_cause',
+          'applied_divergence_cause, coherence_guard_armed',
       )
       .eq('prompt_version', 'v5')
       .eq('status', 'decided')
@@ -454,6 +469,40 @@ async function loadCorrectionsJournal(
     if (page.length < PAGE) break;
   }
   return byDecision;
+}
+
+/**
+ * The cycles on which the coherence guard journaled a VERDICT — a first-attempt rejection, a
+ * recovery, a failure. Any of them proves the guard was armed on that cycle (a disarmed guard
+ * runs none of that code). `thesis_write_refused` and `output_order_violation` are NOT in the
+ * list: both are written whether the guard is armed or not.
+ */
+async function loadGuardVerdictCycles(
+  supabase: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  cutoffId: number,
+): Promise<Set<number>> {
+  const PAGE = 1000;
+  const cycles = new Set<number>();
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('decision_guard_events')
+      .select('decision_id, event_type')
+      .in('event_type', [
+        'guard_rejected_first_attempt',
+        'guard_recovered_on_retry',
+        'guard_failed_after_retry',
+        'guard_failed_no_retry_budget',
+        'guard_retry_call_failed',
+      ])
+      .lte('decision_id', cutoffId)
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(`band witnesses: could not read decision_guard_events (${error.message}).`);
+    const page = (data ?? []) as Array<{ decision_id: number | null }>;
+    for (const row of page) if (row.decision_id != null) cycles.add(row.decision_id);
+    if (page.length < PAGE) break;
+  }
+  return cycles;
 }
 
 /**
@@ -642,6 +691,10 @@ interface ChainRow {
   segment_id: number;
   decision_id: number;
   created_at: string;
+  /** Was the coherence guard armed on this cycle — see GuardState. Read, never inferred. */
+  coherence_guard: GuardState;
+  /** The integrity marks on this cycle (migration 0039), by kind. Empty when none. */
+  integrity_marks: string[];
   state: string;
   band_low_percent: number;
   band_high_percent: number;
@@ -737,6 +790,9 @@ function runChain(
    * replay must not answer differently depending on the laptop.
    */
   transitionMode: 'observe' | 'enforce' | null,
+  /** The guard's state and the integrity marks of a cycle — read, carried on each row, never interpreted here. */
+  guardStateOf: (decision: DecisionRead) => GuardState,
+  marksOf: (decisionId: number) => readonly IntegrityMark[],
 ): { rows: ChainRow[]; counterfactual: CounterfactualCycle[] } {
   const cycles = segment.cycles;
   const counterfactual: CounterfactualCycle[] = [];
@@ -902,6 +958,8 @@ function runChain(
       segment_id: segment.id,
       decision_id: cycle.decision.id,
       created_at: cycle.decision.created_at,
+      coherence_guard: guardStateOf(cycle.decision),
+      integrity_marks: marksOf(cycle.decision.id).map((mark) => mark.kind),
       state: cycle.reading.state,
       band_low_percent: band.lowPercent,
       band_high_percent: band.highPercent,
@@ -1053,10 +1111,27 @@ async function main(): Promise<void> {
   const upperBound =
     pilotWindow.official && pilotWindow.toDecisionId != null ? pilotWindow.toDecisionId : cutoffId;
 
-  const [decisions, ledgerByDecision] = await Promise.all([
+  const [decisions, ledgerByDecision, integrityMarks, guardVerdictCycles] = await Promise.all([
     loadDecisions(supabase, upperBound),
     loadLedgerByDecision(supabase, upperBound),
+    // THE INTEGRITY MARKS (migration 0039) — read for every cycle in scope, THROWING when the
+    // table cannot be read: a replay that silently read no marks would read every marked
+    // cycle as the model's free word, which is what the marks exist to prevent.
+    loadIntegrityMarks(supabase, upperBound),
+    // The cycles the guard PROVABLY judged, for the guard-state reading below.
+    loadGuardVerdictCycles(supabase, upperBound),
   ]);
+  const marksOf = (id: number): readonly IntegrityMark[] => integrityMarks.get(id) ?? [];
+  // THE GUARD'S STATE PER CYCLE — the column when written, an event as proof otherwise,
+  // unknown for the rest. Never inferred from the absence of anything.
+  const guardStateOf = (decision: DecisionRead): GuardState =>
+    decision.coherence_guard_armed === true
+      ? 'armed'
+      : decision.coherence_guard_armed === false
+        ? 'disarmed'
+        : guardVerdictCycles.has(decision.id)
+          ? 'armed_by_event'
+          : 'unknown';
   // Already read up to the gate-settled point; bounded like everything else by the final one.
   const decisionSummaries = allDecisionSummaries.filter((d) => d.id <= upperBound);
   // The corrections journal, bounded like everything else by the final upper bound.
@@ -1219,6 +1294,8 @@ async function main(): Promise<void> {
         reserveAsset,
         pilotWindow.official ? pilotWindow.openingEquityQuote : null,
         chainTransitionMode,
+        guardStateOf,
+        marksOf,
       ),
     );
     return { rows: runs.flatMap((r) => r.rows), counterfactual: runs.flatMap((r) => r.counterfactual) };
@@ -1438,6 +1515,79 @@ async function main(): Promise<void> {
     ]);
   }
 
+  // ── THE INTEGRITY OF THE MEASUREMENT, READ BEFORE ANYTHING IS READ AS THE MODEL'S ─────
+  //
+  // Two facts a reader of this window must see before any reading of the model's behaviour,
+  // and both come from the database, not from a document beside it (migration 0039):
+  //
+  //   1. THE INTEGRITY MARKS — a proposal conditioned to action by the coherence guard during
+  //      the incident of 18-19/09 (`selection_par_le_garde`), or a proposal that is the
+  //      model's SECOND attempt under the guard's relaunch message
+  //      (`relance_orientee_par_le_garde`). C8 reads them per episode (W6 below); here they
+  //      are listed in full so nobody has to know to look.
+  //   2. THE GUARD'S STATE PER CYCLE — armed, disarmed, proven armed by a journaled verdict,
+  //      or unknown. The population of decided cycles depends on it: an armed guard refuses
+  //      cycles a disarmed one would let through, and during the incident it refused every
+  //      hold. A window that changed guard state mid-way is not one population.
+  const marksInScope = [...integrityMarks.values()].flat().filter((m) => m.decisionId >= scopeFromId && m.decisionId <= scopeToId);
+  const guardStates = decisions
+    .filter((d) => d.id >= scopeFromId && d.id <= scopeToId)
+    .map((d) => ({ id: d.id, state: guardStateOf(d) }));
+  const guardCounts: Record<GuardState, number> = { armed: 0, disarmed: 0, armed_by_event: 0, unknown: 0 };
+  for (const entry of guardStates) guardCounts[entry.state] += 1;
+  const idRanges = (ids: number[]): string => {
+    if (ids.length === 0) return '—';
+    const sorted = [...ids].sort((a, b) => a - b);
+    const ranges: string[] = [];
+    let start = sorted[0]!;
+    let prev = sorted[0]!;
+    for (const id of sorted.slice(1)) {
+      if (id === prev + 1) {
+        prev = id;
+        continue;
+      }
+      ranges.push(start === prev ? `${start}` : `${start}-${prev}`);
+      start = id;
+      prev = id;
+    }
+    ranges.push(start === prev ? `${start}` : `${start}-${prev}`);
+    return ranges.join(', ');
+  };
+  console.log('');
+  console.log('─'.repeat(96));
+  console.log('INTÉGRITÉ DE LA MESURE — marques et état du garde de cohérence, dans la fenêtre (migration 0039)');
+  console.log('─'.repeat(96));
+  if (marksInScope.length === 0) {
+    console.log('  aucune marque d’intégrité sur cette fenêtre');
+  } else {
+    const byKind = new Map<string, IntegrityMark[]>();
+    for (const mark of marksInScope) byKind.set(mark.kind, [...(byKind.get(mark.kind) ?? []), mark]);
+    for (const [kind, marks] of byKind) {
+      console.log(`  ${kind} · ${marks.length} cycle(s) : ${idRanges(marks.map((m) => m.decisionId))}`);
+      console.log(`    ${marks[0]!.reason}`);
+      console.log(`    source : ${marks[0]!.source}`);
+      for (const mark of marks) {
+        if (mark.firstAttemptTarget != null) {
+          console.log(`    #${mark.decisionId} première réponse : ${Object.entries(mark.firstAttemptTarget).map(([a, w]) => `${a} ${w}`).join(', ')}`);
+        }
+      }
+    }
+    console.log('  Ce que ces marques font aux lectures C8 se lit épisode par épisode dans W6.');
+  }
+  console.log(
+    `  garde de cohérence sur les ${guardStates.length} cycle(s) décidé(s) de la fenêtre : ` +
+      `armé ${guardCounts.armed} · désarmé ${guardCounts.disarmed} · prouvé armé par un verdict journalisé ` +
+      `${guardCounts.armed_by_event} · inconnu ${guardCounts.unknown}`,
+  );
+  for (const state of ['armed', 'disarmed', 'armed_by_event', 'unknown'] as const) {
+    const ids = guardStates.filter((g) => g.state === state).map((g) => g.id);
+    if (ids.length > 0) console.log(`    ${state.padEnd(15)} ${idRanges(ids)}`);
+  }
+  console.log(
+    '  « inconnu » n’est jamais lu comme armé ni comme désarmé : la colonne n’existe que depuis la 0039, et un',
+  );
+  console.log('  garde désarmé n’émet aucun événement. Les cycles décidés pendant le désarmement manuel du 19/09 y sont.');
+
   // ── THE REAL JOURNAL, READ BEFORE ANY COUNTERFACTUAL IS PRINTED ─────────────────────
   //
   // What production PLANNED, what it EXECUTED, what it planned and did not execute — from
@@ -1592,6 +1742,10 @@ async function main(): Promise<void> {
       gatesComplete: (id) => gateCoverageComplete(gatesByDecision.get(id), universe),
       transitionMode: chainTransitionMode,
       correctionAllowed: (id) => cycleFacts(id).correctionAllowed,
+      // The integrity marks (migration 0039): a guard-selected proposal, or a second-attempt
+      // answer, on the episode's cycle or on its reaction cycle. Read by the reader, printed
+      // in the block below — never interpreted here.
+      marksOf,
     });
     // FINALITY FOLLOWS THE INSTANT THE WINDOW WAS RESOLVED ON, not the pilot row. A closed
     // pilot replayed with `--at=alerte_40` is a snapshot cut BEFORE the closure, and its C8 is
@@ -1619,7 +1773,8 @@ async function main(): Promise<void> {
         : `réaction au cycle #${e.reaction.decisionId} : ${e.reaction.modelWeightPercent ?? '?'}`) +
       (e.skippedCycles.length === 0 ? '' : ` (cycles ${e.skippedCycles.map((c) => `#${c.id} ${c.status}`).join(', ')} en échec entre les deux — pas des réactions)`) +
       ` → ${e.reading.toUpperCase()}` +
-      (e.because == null ? '' : ` — ${e.because}`);
+      (e.because == null ? '' : ` — ${e.because}`) +
+      (e.caveats.length === 0 ? '' : ` — RÉSERVE : ${e.caveats.join(' ; ')}`);
     record('W6', 'C8 — le lecteur est exercé sur les épisodes réels, et aucun verdict officiel n’est rendu avant la clôture', verdict.status, [
       'UNITÉ DE MESURE : l’épisode EXÉCUTÉ par actif — une jambe de bande réellement bookée sur une',
       'ligne à un cycle. Pas les lignes seulement prévues, pas chaque cycle où la correction reste',
@@ -1707,6 +1862,28 @@ async function main(): Promise<void> {
       }, {}),
     },
     c8: c8Artefact,
+    // THE INTEGRITY OF THE MEASUREMENT (migration 0039) — the marks in scope, in full, and the
+    // guard's state per decided cycle. An artefact that carried the readings without them
+    // would invite exactly the rereading the marks exist to forbid.
+    integrity: {
+      marks: marksInScope.map((m) => ({
+        decision_id: m.decisionId,
+        kind: m.kind,
+        reason: m.reason,
+        source: m.source,
+        first_attempt_target: m.firstAttemptTarget,
+      })),
+      coherence_guard: {
+        counts: guardCounts,
+        by_cycle: guardStates,
+        legend: {
+          armed: 'la ligne le dit (decisions.coherence_guard_armed = true)',
+          disarmed: 'la ligne le dit (decisions.coherence_guard_armed = false)',
+          armed_by_event: 'la ligne est muette mais le garde a journalisé un verdict sur ce cycle — un garde désarmé n’en émet aucun',
+          unknown: 'rien ne le dit : jamais lu comme armé ni comme désarmé',
+        },
+      },
+    },
     criteria: results,
     contract: {
       not_measured: [

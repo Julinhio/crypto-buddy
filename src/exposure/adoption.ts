@@ -25,6 +25,28 @@
  * `raw_weight_percent`, never against the clamped or the corrected figure: what it repeats or
  * abandons is what IT asked for.
  *
+ * ── AND WHAT THE INTEGRITY MARKS SAY ABOUT A PROPOSAL (migration 0039) ───────────────
+ *
+ * A proposal is the model's free word only if nothing conditioned it. The incident of
+ * 18-19/09 produced decided cycles that were not: with the guard refusing every hold after a
+ * band correction, cycles 2115 and 2124-2126 were decided BECAUSE they moved — selected by
+ * the guard, not reacting to the band. And on twenty cycles since the activation the journaled
+ * proposal is a SECOND attempt, written under the guard's relaunch message that steered the
+ * model back to its raw preference. Both facts live in `decision_integrity_marks`, where this
+ * reader reads them — never in a document beside the data:
+ *
+ *   `selection_par_le_garde`         on the episode's cycle or on the reaction cycle: the
+ *                                    reading is NON ATTRIBUABLE, with the mark's reason;
+ *   `relance_orientee_par_le_garde`  the reading stands only when the first, un-steered
+ *                                    answer carried the SAME weight on that line (cycle 1840
+ *                                    relabelled its hold and kept its target); when the
+ *                                    relaunch moved the line, or the first answer is not
+ *                                    journaled, the reading is NON ATTRIBUABLE;
+ *   any other kind                   ILLISIBLE — a fact the reader cannot interpret refuses
+ *                                    the official reading rather than being skipped.
+ *
+ * The marks on the CYCLES IN BETWEEN do not matter: those cycles are not read.
+ *
  * ── THE FOUR READINGS, AND WHY "ADOPTION" IS NOT ONE OF THEM ─────────────────────────
  *
  * Direction matters. An upward episode (the band bought) and a downward one (the band sold)
@@ -50,6 +72,8 @@
  * descriptive, and they stay descriptive until the measurement window is officially closed:
  * no verdict is published on an open window.
  */
+
+import { KNOWN_MARK_KINDS, type IntegrityMark } from '../persistence/decisionIntegrityMarks.js';
 
 export type LineOrigin = 'modele' | 'correction_de_bande' | 'allocation_de_secours';
 
@@ -126,8 +150,15 @@ export interface AdoptionEpisode {
   /** Failed cycles between the episode and its reaction — named, and NOT reactions. */
   skippedCycles: Array<{ id: number; status: string }>;
   reading: EpisodeReading;
-  /** Why the reading is `non_attribuable` or `non_mesurable`. Null otherwise. */
+  /** Why the reading is `non_attribuable`, `non_mesurable` or `illisible`. Null otherwise. */
   because: string | null;
+  /**
+   * The integrity marks found on the episode's cycle and on its reaction cycle, whatever
+   * they did to the reading — so the artefact shows them even when the reading stood.
+   */
+  integrityMarks: Array<{ decisionId: number; kind: string }>;
+  /** Marks that did NOT change the reading, with what they say. Empty when there are none. */
+  caveats: string[];
 }
 
 const TOL = 1e-6;
@@ -193,6 +224,76 @@ export interface BuildEpisodesInput {
    * as a free reaction, and the episode is `illisible` (sixth review round).
    */
   gatesComplete: (decisionId: number) => boolean;
+  /**
+   * THE INTEGRITY MARKS on a cycle (migration 0039), read on the episode's cycle and on its
+   * reaction cycle. Empty when the cycle carries none. See the header for what each kind does
+   * to the reading — a kind this reader does not know makes the episode `illisible`.
+   */
+  marksOf: (decisionId: number) => readonly IntegrityMark[];
+}
+
+/**
+ * What the marks on the two cycles a reading depends on say about it. Pure, and the ONLY
+ * place a mark's kind is interpreted: the replay prints marks, it never reads them.
+ */
+export function judgeMarks(input: {
+  episodeDecisionId: number;
+  reactionDecisionId: number;
+  asset: string;
+  /** The model's own weight at the episode (`raw_weight_percent`). */
+  episodeWeight: number | null;
+  /** The model's weight on the line at the reaction cycle. */
+  reactionWeight: number | null;
+  marksOf: (decisionId: number) => readonly IntegrityMark[];
+}): {
+  verdict: 'illisible' | 'non_attribuable' | null;
+  because: string | null;
+  caveats: string[];
+  marks: Array<{ decisionId: number; kind: string }>;
+} {
+  const caveats: string[] = [];
+  const marks: Array<{ decisionId: number; kind: string }> = [];
+  let verdict: 'illisible' | 'non_attribuable' | null = null;
+  let because: string | null = null;
+  const refuse = (kind: 'illisible' | 'non_attribuable', why: string): void => {
+    // ILLISIBLE outranks NON ATTRIBUABLE: a fact the reader cannot interpret is a refusal, and
+    // a refusal is not softened by a second mark it does know how to read.
+    if (verdict === 'illisible') return;
+    if (verdict === 'non_attribuable' && kind === 'non_attribuable') return;
+    verdict = kind;
+    because = why;
+  };
+  const roles: Array<{ decisionId: number; role: 'episode' | 'reaction'; weight: number | null }> = [
+    { decisionId: input.episodeDecisionId, role: 'episode', weight: input.episodeWeight },
+    { decisionId: input.reactionDecisionId, role: 'reaction', weight: input.reactionWeight },
+  ];
+  for (const { decisionId, role, weight } of roles) {
+    for (const mark of input.marksOf(decisionId)) {
+      marks.push({ decisionId, kind: mark.kind });
+      const where = role === 'episode' ? `le cycle de l’épisode ${decisionId}` : `le cycle de réaction ${decisionId}`;
+      if (!KNOWN_MARK_KINDS.has(mark.kind)) {
+        refuse('illisible', `marque d’intégrité de type inconnu « ${mark.kind} » sur ${where} — le lecteur ne sait pas l’interpréter`);
+        continue;
+      }
+      if (mark.kind === 'selection_par_le_garde') {
+        refuse('non_attribuable', `${where} porte la marque selection_par_le_garde : ${mark.reason}`);
+        continue;
+      }
+      // relance_orientee_par_le_garde — the journaled answer is a second attempt. It stands
+      // for this line only if the first, un-steered answer carried the same weight there.
+      const first = mark.firstAttemptTarget?.[input.asset];
+      if (first == null || !Number.isFinite(first)) {
+        refuse('non_attribuable', `${where} est une réponse de seconde tentative (relance du garde) dont la première réponse n’est pas journalisée sur ${input.asset}`);
+        continue;
+      }
+      if (weight == null || Math.abs(first - weight) > TOL) {
+        refuse('non_attribuable', `${where} est une réponse de seconde tentative : la relance du garde a déplacé la cible sur ${input.asset} (première réponse ${first}, seconde ${weight ?? '?'})`);
+        continue;
+      }
+      caveats.push(`${where} est une réponse de seconde tentative (relance du garde) ; la première réponse portait le même poids sur ${input.asset} (${first}), la lecture tient`);
+    }
+  }
+  return { verdict, because, caveats, marks };
 }
 
 /**
@@ -233,6 +334,8 @@ export function buildEpisodes(input: BuildEpisodesInput): AdoptionEpisode[] {
         skippedCycles: [],
         reading: 'illisible',
         because: unreadableBecause,
+        integrityMarks: [],
+        caveats: [],
       });
       continue;
     }
@@ -253,12 +356,25 @@ export function buildEpisodes(input: BuildEpisodesInput): AdoptionEpisode[] {
     let reading: EpisodeReading;
     let because: string | null = null;
     let reaction: AdoptionEpisode['reaction'] = null;
+    let integrityMarks: AdoptionEpisode['integrityMarks'] = [];
+    let caveats: string[] = [];
     if (reactionDecision == null) {
       reading = 'non_mesurable';
       because = 'aucun cycle décidé ne suit l’épisode dans la fenêtre';
     } else {
       const nextWeight = reactionDecision.targetAllocation?.[line.asset] ?? null;
       reaction = { decisionId: reactionDecision.id, modelWeightPercent: nextWeight };
+      // THE MARKS, on the two cycles this reading depends on — see the header.
+      const marked = judgeMarks({
+        episodeDecisionId: line.decisionId,
+        reactionDecisionId: reactionDecision.id,
+        asset: line.asset,
+        episodeWeight: line.rawWeightPercent,
+        reactionWeight: nextWeight,
+        marksOf: input.marksOf,
+      });
+      integrityMarks = marked.marks;
+      caveats = marked.caveats;
       // THE EVENT THAT BREAKS THE ATTRIBUTION: the code's own stop or a risk-off reduction
       // taking the line over AT the reaction cycle. Nothing else can: the cycles in between are
       // the failed ones — no order, no model, their gate rows are observations — and another
@@ -274,9 +390,15 @@ export function buildEpisodes(input: BuildEpisodesInput): AdoptionEpisode[] {
       if (input.transitionMode === 'enforce' && !input.gatesComplete(reactionDecision.id)) {
         reading = 'illisible';
         because = `verdicts de porte incomplets au cycle de réaction ${reactionDecision.id} sous enforce — la réaction ne peut pas être lue comme libre`;
+      } else if (marked.verdict === 'illisible') {
+        reading = 'illisible';
+        because = marked.because;
       } else if (intervening != null) {
         reading = 'non_attribuable';
         because = `la porte a pris la ligne ${line.asset} (${intervening.gate}) au cycle ${intervening.id}`;
+      } else if (marked.verdict === 'non_attribuable') {
+        reading = 'non_attribuable';
+        because = marked.because;
       } else {
         reading = readEpisodeReaction({
           direction,
@@ -308,6 +430,8 @@ export function buildEpisodes(input: BuildEpisodesInput): AdoptionEpisode[] {
       skippedCycles: skipped,
       reading,
       because,
+      integrityMarks,
+      caveats,
     });
   }
   return episodes.sort((a, b) => a.decisionId - b.decisionId || (a.asset < b.asset ? -1 : 1));
@@ -392,6 +516,9 @@ export function judgeC8(input: {
     }
     if (episode.reading === 'illisible' && episode.because == null) {
       problems.push(`épisode ${episode.decisionId} ${episode.asset} : illisible sans couche nommée`);
+    }
+    if (episode.reading === 'non_attribuable' && episode.because == null) {
+      problems.push(`épisode ${episode.decisionId} ${episode.asset} : non attribuable sans cause nommée`);
     }
     if (episode.reaction != null && episode.reading !== 'non_attribuable' && episode.reading !== 'illisible') {
       const recomputed = readEpisodeReaction({

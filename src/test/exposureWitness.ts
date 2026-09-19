@@ -24,6 +24,7 @@ import {
   type DecisionSummary,
   type JournalCorrectionLine,
 } from '../exposure/adoption.js';
+import type { IntegrityMark } from '../persistence/decisionIntegrityMarks.js';
 import {
   allocationsAgree,
   bandJournalStart,
@@ -386,37 +387,38 @@ console.log('\nProof 6 — C8 reads an executed episode, in its direction, and n
     { id: 103, status: 'decided', targetAllocation: { BNB: 0, XRP: 15, USDT: 85 } },
   ];
   const noGate = (): string | null => 'actionable';
-  const built = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: noGate });
+  const noMarks = (): IntegrityMark[] => [];
+  const built = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, marksOf: noMarks, gateOf: noGate });
   ok('one executed leg → one episode', built.length === 1);
   const episode = built[0]!;
   ok('the reaction is read at 102, the first DECIDED cycle after it', episode.reaction?.decisionId === 102);
   ok('101 is named as skipped and is NOT a reaction', episode.skippedCycles.length === 1 && episode.skippedCycles[0]!.id === 101 && episode.skippedCycles[0]!.status === 'guard_failed');
   ok('the episode reads maintien on 102\'s 15, not on 103\'s later 0', episode.reading === 'maintien');
   // A planned-but-not-booked leg is NOT an episode; a model line is not one either.
-  ok('a planned leg that never booked is not an episode', buildEpisodes({ lines: [line({ bookedSide: null, bookedNotionalQuote: null })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: noGate }).length === 0);
-  ok('nor is a line the band did not move', buildEpisodes({ lines: [line({ origin: 'modele', correctionPoints: 0, correctedWeightPercent: 0 })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: noGate }).length === 0);
+  ok('a planned leg that never booked is not an episode', buildEpisodes({ lines: [line({ bookedSide: null, bookedNotionalQuote: null })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, marksOf: noMarks, gateOf: noGate }).length === 0);
+  ok('nor is a line the band did not move', buildEpisodes({ lines: [line({ origin: 'modele', correctionPoints: 0, correctedWeightPercent: 0 })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, marksOf: noMarks, gateOf: noGate }).length === 0);
   // A later event breaks the attribution.
-  const stopped = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: (id, asset) => (id === 102 && asset === 'BNB' ? 'stop_exit' : 'actionable') });
+  const stopped = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, marksOf: noMarks, gateOf: (id, asset) => (id === 102 && asset === 'BNB' ? 'stop_exit' : 'actionable') });
   ok('the code\'s stop on that line AT the reaction cycle makes it non_attribuable', stopped[0]!.reading === 'non_attribuable' && /stop_exit/.test(stopped[0]!.because ?? ''));
   // A stop verdict journaled on the FAILED cycle in between is an observation: no order, no
   // model consulted. It must not discard a valid reaction (first review round).
-  const observedOnFailed = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: (id, asset) => (id === 101 && asset === 'BNB' ? 'stop_exit' : 'actionable') });
+  const observedOnFailed = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, marksOf: noMarks, gateOf: (id, asset) => (id === 101 && asset === 'BNB' ? 'stop_exit' : 'actionable') });
   ok('but a stop verdict on the failed cycle in between is an observation and leaves the reading intact', observedOnFailed[0]!.reading === 'maintien');
   // UNDER `observe` A VERDICT ACTS ON NOTHING: `applyGate` is a no-op and the model is told
   // nothing, so even a stop AT the reaction cycle leaves the reaction free (second review round).
-  const observedMode = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'observe', correctionAllowed: () => true, gatesComplete: () => true, gateOf: (id, asset) => (id === 102 && asset === 'BNB' ? 'stop_exit' : 'actionable') });
+  const observedMode = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'observe', correctionAllowed: () => true, gatesComplete: () => true, marksOf: noMarks, gateOf: (id, asset) => (id === 102 && asset === 'BNB' ? 'stop_exit' : 'actionable') });
   ok('under `observe` the same stop at the reaction cycle is observational and the reading stays maintien', observedMode[0]!.reading === 'maintien');
   // A BOOKING ON A HELD CYCLE IS THE MODEL'S. The journal records the computed correction and
   // the real bookings even when the pilot held the correction back; a band-origin line with a
   // booked side there is the uncorrected bot's own trade, not an episode (third review round).
-  const held = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => false, gatesComplete: () => true, gateOf: noGate });
+  const held = buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => false, gatesComplete: () => true, marksOf: noMarks, gateOf: noGate });
   ok('a booking on a cycle where the correction was not allowed to act is not an episode', held.length === 0);
   // THE HOLDING MUST HAVE MOVED BECAUSE OF THE BAND (fourth review round). `false` means the
   // corrected and uncorrected plans booked the same holding — the booking is the model's plan.
   // Null is unreadable: reported, never dropped in silence, and refused in the official window.
-  const unmoved = buildEpisodes({ lines: [line({ correctionMovesHolding: false })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: noGate });
+  const unmoved = buildEpisodes({ lines: [line({ correctionMovesHolding: false })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, marksOf: noMarks, gateOf: noGate });
   ok('correction_moves_holding = false excludes the line from the episodes', unmoved.length === 0);
-  const unread = buildEpisodes({ lines: [line({ correctionMovesHolding: null })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: noGate });
+  const unread = buildEpisodes({ lines: [line({ correctionMovesHolding: null })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, marksOf: noMarks, gateOf: noGate });
   ok('an unreadable correction_moves_holding is an ILLISIBLE episode naming the column, not a silent exclusion', unread.length === 1 && unread[0]!.reading === 'illisible' && /correction_moves_holding/.test(unread[0]!.because ?? ''));
   const refusedOfficial = judgeC8({ episodes: unread, decisions, fromDecisionId: 100, toDecisionId: 103, windowClosed: false, claimsOfficial: false, official: true });
   ok('and in the official window the judge REFUSES, explicitly', refusedOfficial.status === 'fail' && /REFUS : 1 épisode\(s\) illisible\(s\) en fenêtre officielle/.test(refusedOfficial.problems[0] ?? ''));
@@ -424,9 +426,9 @@ console.log('\nProof 6 — C8 reads an executed episode, in its direction, and n
   ok('on the bench it is not a refusal — the episode is named and left out of the readable count', benchUnread.status !== 'fail' && benchUnread.readable === 0 && benchUnread.byReading.illisible === 1);
   // A band correction AT the reaction cycle does not break the attribution: the model proposed
   // before the band acted there, and that proposal is its reaction to this episode.
-  const again = buildEpisodes({ lines: [line({}), line({ decisionId: 102, bookedSide: null })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: noGate });
+  const again = buildEpisodes({ lines: [line({}), line({ decisionId: 102, bookedSide: null })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, marksOf: noMarks, gateOf: noGate });
   ok('a band correction at the reaction cycle itself leaves the reading attributable', again.find((e) => e.decisionId === 100)!.reading === 'maintien');
-  ok('an episode with no decided cycle after it is non_mesurable', buildEpisodes({ lines: [line({ decisionId: 103 })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: noGate })[0]!.reading === 'non_mesurable');
+  ok('an episode with no decided cycle after it is non_mesurable', buildEpisodes({ lines: [line({ decisionId: 103 })], decisions, fromDecisionId: 100, toDecisionId: 103, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, marksOf: noMarks, gateOf: noGate })[0]!.reading === 'non_mesurable');
 
   // (f) THE READINGS STAY DESCRIPTIVE UNTIL THE CLOSURE, and the replay does not decide that.
   const open = judgeC8({ episodes: built, decisions, fromDecisionId: 100, toDecisionId: 103, windowClosed: false, claimsOfficial: false });
@@ -916,7 +918,7 @@ console.log('\nProof 13 — the three criteria have a population, and each one c
     { id: 1, status: 'decided', targetAllocation: { BNB: 0, USDT: 100 } },
     { id: 2, status: 'decided', targetAllocation: { BNB: 15, USDT: 85 } },
   ];
-  const episode: AdoptionEpisode = { decisionId: 1, asset: 'BNB', origin: 'allocation_de_secours', direction: 'hausse', modelWeightPercent: 0, clampedWeightPercent: 0, imposedWeightPercent: 15, realisedWeightPercent: 15.2, bookedSide: 'buy', bookedNotionalQuote: 163, reaction: { decisionId: 2, modelWeightPercent: 15 }, skippedCycles: [], reading: 'maintien', because: null };
+  const episode: AdoptionEpisode = { decisionId: 1, asset: 'BNB', origin: 'allocation_de_secours', direction: 'hausse', modelWeightPercent: 0, clampedWeightPercent: 0, imposedWeightPercent: 15, realisedWeightPercent: 15.2, bookedSide: 'buy', bookedNotionalQuote: 163, reaction: { decisionId: 2, modelWeightPercent: 15 }, skippedCycles: [], reading: 'maintien', because: null, integrityMarks: [], caveats: [] };
   const judge = (episodes: AdoptionEpisode[], over: Partial<Parameters<typeof judgeC8>[0]> = {}) =>
     judgeC8({ episodes, decisions, fromDecisionId: 1, toDecisionId: 2, windowClosed: false, claimsOfficial: false, ...over });
   ok('[W6] one consistent episode on an open window: pass, not official', judge([episode]).status === 'pass' && judge([episode]).official === false);
@@ -972,7 +974,7 @@ console.log('\nProof 13b — the corrections journal has its own settled point, 
   ok('and refuses when the band layer is settled nowhere', /no cycle carries a complete band closure/.test(replay));
   ok('the corrections journal is read below the final bound only', /const correctionsByDecision = new Map\(\[\.\.\.bandRowsByDecision\]\.filter\(\(\[id\]\) => id <= upperBound\)\);/.test(replay));
   ok('B̂ follows the real bot on a stop cycle under `enforce`, never under `observe`', /transitionMode === 'enforce' \|\|/.test(replay) && /transitionMode == null &&/.test(replay) && /\(cycle\.applied\[asset\] \?\? 0\) === 0 && \(cycle\.raw\?\.\[asset\] \?\? 0\) > 0/.test(replay));
-  ok('and C8 receives the frozen mode', /transitionMode: chainTransitionMode,\s*\n\s*correctionAllowed: \(id\) => cycleFacts\(id\)\.correctionAllowed,\s*\n\s*\}\);/.test(replay));
+  ok('and C8 receives the frozen mode, and the integrity marks', /transitionMode: chainTransitionMode,\s*\n\s*correctionAllowed: \(id\) => cycleFacts\(id\)\.correctionAllowed,[\s\S]{0,600}?marksOf,\s*\n\s*\}\);/.test(replay));
   // AN OFFICIAL WINDOW WITHOUT ITS FROZEN MODE IS A REFUSAL (third review round): the replay
   // would otherwise size B̂ as under `observe` and read C8 without the enforced gate, and call
   // the result the pilot's.
@@ -1036,7 +1038,7 @@ console.log('\nProof 15 — an absent best-effort layer is named, refused or cut
     { id: 102, status: 'decided', targetAllocation: { BNB: 15, USDT: 85 } },
   ];
   const build = (over: Partial<Parameters<typeof buildEpisodes>[0]>) =>
-    buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 102, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, gateOf: () => 'actionable', ...over });
+    buildEpisodes({ lines: [line({})], decisions, fromDecisionId: 100, toDecisionId: 102, transitionMode: 'enforce', correctionAllowed: () => true, gatesComplete: () => true, marksOf: () => [], gateOf: () => 'actionable', ...over });
   const gatesGoneAtReaction = build({ gatesComplete: (id) => id !== 102 });
   ok('[porte, cycle de réaction, enforce] an incomplete gate journal there makes the episode ILLISIBLE, not a free reaction', gatesGoneAtReaction[0]!.reading === 'illisible' && /verdicts de porte incomplets au cycle de réaction 102/.test(gatesGoneAtReaction[0]!.because ?? ''));
   ok('[porte, cycle de réaction, observe] the same absence leaves the reaction free — the gate acts on nothing there', build({ gatesComplete: (id) => id !== 102, transitionMode: 'observe' })[0]!.reading === 'maintien');
@@ -1074,6 +1076,128 @@ console.log('\nProof 15 — an absent best-effort layer is named, refused or cut
   ok('[agrégat] one readable and one illisible episode: the official reading is REFUSED, not published on the readable one', officialMixed.status === 'fail' && officialMixed.official === false && /REFUS/.test(officialMixed.problems[0] ?? ''));
   const benchMixed = judgeC8({ episodes: mixed, decisions, fromDecisionId: 100, toDecisionId: 102, windowClosed: false, claimsOfficial: false, official: false });
   ok('and the bench publishes the readable one while naming the other', benchMixed.status === 'pass' && benchMixed.readable === 1 && benchMixed.byReading.illisible === 1);
+}
+
+// ── PROOF 16 — the integrity marks (migration 0039): a conditioned proposal is never read as free ─
+//
+// The incident of 18-19/09: with the guard refusing every hold after the band correction of
+// 2112, cycles 2115 and 2124-2126 were decided BECAUSE they moved. And twenty cycles since
+// 1840 are second attempts under the guard's relaunch message. The marks live in the database
+// and C8 reads them here — on the episode's cycle and on its reaction cycle — never in a
+// document beside the data. The fixture mirrors the 2112 → 2115 shape: the band buys BNB at
+// 100, 101 fails, 102 is the first decided cycle.
+console.log('\nProof 16 — the integrity marks, read by C8 on the episode and on its reaction:');
+{
+  const line = (over: Partial<JournalCorrectionLine> = {}): JournalCorrectionLine => ({
+    decisionId: 100,
+    asset: 'BNB',
+    origin: 'correction_de_bande',
+    cause: 'aucune',
+    rawWeightPercent: 10,
+    clampedWeightPercent: 10,
+    baseWeightPercent: 10,
+    correctionPoints: 4.5,
+    correctedWeightPercent: 14.5,
+    plannedSide: 'buy',
+    plannedNotionalQuote: 48,
+    suppressedReason: null,
+    suppressedNotionalQuote: null,
+    bookedSide: 'buy',
+    bookedNotionalQuote: 47.91,
+    postCycleWeightPercent: 14.5,
+    correctionMovesHolding: true,
+    ...over,
+  });
+  const decisions: DecisionSummary[] = [
+    { id: 100, status: 'decided', targetAllocation: { BNB: 10, USDT: 90 } },
+    { id: 101, status: 'guard_failed', targetAllocation: null },
+    { id: 102, status: 'decided', targetAllocation: { BNB: 10, USDT: 90 } },
+  ];
+  const mark = (decisionId: number, kind: string, over: Partial<IntegrityMark> = {}): IntegrityMark => ({
+    decisionId,
+    kind,
+    reason: `raison durable pour ${decisionId}`,
+    source: 'PR #48',
+    firstAttemptTarget: null,
+    ...over,
+  });
+  const build = (marks: IntegrityMark[], over: Partial<Parameters<typeof buildEpisodes>[0]> = {}) =>
+    buildEpisodes({
+      lines: [line()],
+      decisions,
+      fromDecisionId: 100,
+      toDecisionId: 102,
+      transitionMode: 'enforce',
+      correctionAllowed: () => true,
+      gatesComplete: () => true,
+      gateOf: () => 'actionable',
+      marksOf: (id) => marks.filter((m) => m.decisionId === id),
+      ...over,
+    });
+
+  // No mark: the 2112-shape reads as it always did (the model repeats its 10 → repetition).
+  const free = build([])[0]!;
+  ok('[no mark] the reading stands: repetition, no caveat, no mark listed', free.reading === 'repetition' && free.caveats.length === 0 && free.integrityMarks.length === 0);
+
+  // selection_par_le_garde ON THE REACTION CYCLE — the 2112 episodes, whose reaction is 2115.
+  const selectedReaction = build([mark(102, 'selection_par_le_garde')])[0]!;
+  ok('[selection, réaction] the reading is NON ATTRIBUABLE', selectedReaction.reading === 'non_attribuable');
+  ok('[selection, réaction] and the cause quotes the mark\'s durable reason', /le cycle de réaction 102 porte la marque selection_par_le_garde : raison durable pour 102/.test(selectedReaction.because ?? ''));
+  ok('[selection, réaction] the reaction is still identified — nothing is hidden', selectedReaction.reaction?.decisionId === 102 && selectedReaction.integrityMarks.some((m) => m.decisionId === 102 && m.kind === 'selection_par_le_garde'));
+  // selection_par_le_garde ON THE EPISODE'S OWN CYCLE — the 2115, 2125 and 2126 episodes: the
+  // model's "own" weight at the episode was itself conditioned.
+  const selectedEpisode = build([mark(100, 'selection_par_le_garde')])[0]!;
+  ok('[selection, épisode] the reading is NON ATTRIBUABLE too — the baseline is not the model\'s free word', selectedEpisode.reading === 'non_attribuable' && /le cycle de l’épisode 100 porte la marque selection_par_le_garde/.test(selectedEpisode.because ?? ''));
+  // A mark on a cycle IN BETWEEN changes nothing: that cycle is not read.
+  ok('[selection, entre les deux] a mark on the failed cycle in between leaves the reading intact', build([mark(101, 'selection_par_le_garde')])[0]!.reading === 'repetition');
+
+  // relance_orientee_par_le_garde ON THE REACTION CYCLE — three shapes.
+  // (i) The 1840 shape: the first attempt carried the SAME weight on the line → the reading
+  //     stands, with a caveat that says so.
+  const relaunchSame = build([mark(102, 'relance_orientee_par_le_garde', { firstAttemptTarget: { BNB: 10, USDT: 90 } })])[0]!;
+  ok('[relance, même poids] the reading stands', relaunchSame.reading === 'repetition' && relaunchSame.because == null);
+  ok('[relance, même poids] with a caveat naming the second attempt and the equal first weight', relaunchSame.caveats.length === 1 && /seconde tentative/.test(relaunchSame.caveats[0]!) && /même poids sur BNB \(10\)/.test(relaunchSame.caveats[0]!));
+  // (ii) The relaunch MOVED the line (the model first held at 14.5, the relaunch brought it to 10).
+  const relaunchMoved = build([mark(102, 'relance_orientee_par_le_garde', { firstAttemptTarget: { BNB: 14.5, USDT: 85.5 } })])[0]!;
+  ok('[relance, cible déplacée] the reading is NON ATTRIBUABLE — the journaled answer is the steered one', relaunchMoved.reading === 'non_attribuable' && /a déplacé la cible sur BNB \(première réponse 14\.5, seconde 10\)/.test(relaunchMoved.because ?? ''));
+  // (iii) The first attempt is not journaled (the refusal did not quote it).
+  const relaunchUnknown = build([mark(102, 'relance_orientee_par_le_garde')])[0]!;
+  ok('[relance, première inconnue] the reading is NON ATTRIBUABLE, and says why', relaunchUnknown.reading === 'non_attribuable' && /première réponse n’est pas journalisée sur BNB/.test(relaunchUnknown.because ?? ''));
+  // And a first attempt that knows OTHER lines but not this one is "unknown" for this line.
+  ok('[relance, autre ligne] a first attempt silent on the episode\'s line is unknown for it', build([mark(102, 'relance_orientee_par_le_garde', { firstAttemptTarget: { ETH: 5 } })])[0]!.reading === 'non_attribuable');
+  // (iv) The same relaunch mark on the EPISODE's cycle: judged on the episode's own weight.
+  ok('[relance, épisode, même poids] stands with a caveat', (() => { const e = build([mark(100, 'relance_orientee_par_le_garde', { firstAttemptTarget: { BNB: 10 } })])[0]!; return e.reading === 'repetition' && e.caveats.length === 1; })());
+  ok('[relance, épisode, poids déplacé] is non attribuable', build([mark(100, 'relance_orientee_par_le_garde', { firstAttemptTarget: { BNB: 12 } })])[0]!.reading === 'non_attribuable');
+
+  // AN UNKNOWN KIND is a fact the reader cannot interpret: ILLISIBLE, refused officially.
+  const unknownKind = build([mark(102, 'une_marque_future')]);
+  ok('[type inconnu] the episode is ILLISIBLE and names the kind', unknownKind[0]!.reading === 'illisible' && /type inconnu « une_marque_future » sur le cycle de réaction 102/.test(unknownKind[0]!.because ?? ''));
+  const refused = judgeC8({ episodes: unknownKind, decisions, fromDecisionId: 100, toDecisionId: 102, windowClosed: false, claimsOfficial: false, official: true });
+  ok('[type inconnu] and the official C8 REFUSES on it', refused.status === 'fail' && /REFUS/.test(refused.problems[0] ?? ''));
+  // ILLISIBLE outranks NON ATTRIBUABLE, whatever the order the marks come in.
+  ok('[précédence] an unknown kind next to a selection mark still reads ILLISIBLE', build([mark(102, 'selection_par_le_garde'), mark(102, 'une_marque_future')])[0]!.reading === 'illisible' && build([mark(102, 'une_marque_future'), mark(102, 'selection_par_le_garde')])[0]!.reading === 'illisible');
+
+  // THE JUDGE accepts a non-attributable reading only with its cause, and does not recompute it.
+  const marked = build([mark(102, 'selection_par_le_garde')]);
+  const judged = judgeC8({ episodes: marked, decisions, fromDecisionId: 100, toDecisionId: 102, windowClosed: true, claimsOfficial: true, official: true });
+  ok('[juge] a marked, non-attributable episode is not a problem — and yields no readable episode, so nothing official is published', judged.problems.length === 0 && judged.readable === 0 && judged.status === 'non_mesurable' && judged.official === false);
+  ok('[juge] a non-attributable reading WITHOUT its cause is a problem', judgeC8({ episodes: [{ ...marked[0]!, because: null }], decisions, fromDecisionId: 100, toDecisionId: 102, windowClosed: false, claimsOfficial: false }).problems.some((p) => /non attribuable sans cause nommée/.test(p)));
+
+  // THE ORDER OF THE CASCADE: an incomplete gate journal at the reaction (illisible) comes
+  // before a mark; a stop at the reaction (non attribuable, the gate's) comes before a mark.
+  ok('[cascade] incomplete gates at the reaction outrank a selection mark', build([mark(102, 'selection_par_le_garde')], { gatesComplete: (id) => id !== 102 })[0]!.reading === 'illisible');
+  const stopAndMark = build([mark(102, 'selection_par_le_garde')], { gateOf: (id, asset) => (id === 102 && asset === 'BNB' ? 'stop_exit' : 'actionable') })[0]!;
+  ok('[cascade] the gate\'s own takeover is named before the mark', stopAndMark.reading === 'non_attribuable' && /la porte a pris la ligne/.test(stopAndMark.because ?? ''));
+
+  // THE REPLAY IS WIRED TO IT: it loads the marks, throws rather than reads none, feeds C8,
+  // prints them and carries them in the artefact next to the guard's state.
+  const replay = readFileSync(path.join(ROOT, 'src/replay/exposureBandWitnesses.ts'), 'utf8').replace(/\r\n/g, '\n');
+  ok('[rejeu] the marks are loaded up to the same bound as everything else', /loadIntegrityMarks\(supabase, upperBound\)/.test(replay));
+  ok('[rejeu] and printed in their own block, before the real journal', /INTÉGRITÉ DE LA MESURE — marques et état du garde/.test(replay) && replay.indexOf('INTÉGRITÉ DE LA MESURE') < replay.indexOf('FAITS RÉELS — le journal des corrections'));
+  ok('[rejeu] the artefact carries the marks and the guard state per cycle', /integrity: \{\s*\n\s*marks: marksInScope/.test(replay) && /coherence_guard: \{/.test(replay) && /coherence_guard: guardStateOf\(cycle\.decision\)/.test(replay));
+  ok('[rejeu] the guard state is read from the column, proven by a verdict event, or unknown — never defaulted', /decision\.coherence_guard_armed === true\s*\n\s*\? 'armed'/.test(replay) && /guardVerdictCycles\.has\(decision\.id\)\s*\n\s*\? 'armed_by_event'\s*\n\s*: 'unknown'/.test(replay));
+  const loader = readFileSync(path.join(ROOT, 'src/persistence/decisionIntegrityMarks.ts'), 'utf8');
+  ok('[rejeu] an unreadable marks table THROWS rather than reading no marks', /throw new Error\(`could not read \$\{TABLE\}/.test(loader));
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────────
