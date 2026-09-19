@@ -17,6 +17,7 @@ import {
 import {
   buildRetryPrompt,
   checkCoherence,
+  sameTarget,
   type CoherenceInput,
   type CoherenceRule,
 } from '../decision/coherence.js';
@@ -1048,6 +1049,29 @@ console.log('\n── The band incident: a hold after a correction, on both path
   ok('[new line, slack] labelled honestly but without its note, rule 4 fires on SOL', (() => { const v = checkCoherence({ ...fundedFromSlack, actionType: 'rebalance' }).violations; return v.length === 1 && v[0]!.rule === 'moved_line_without_note' && v[0]!.assets.join(',') === 'SOL'; })());
   ok('[new line, slack] with its note the opening passes', checkCoherence({ ...fundedFromSlack, actionType: 'rebalance', notes: [note('SOL')] }).ok);
   ok('[new line, slack] a new line at float noise weight opens nothing and stays a hold', checkCoherence({ ...fundedFromSlack, intentTarget: { ...slackReference, SOL: 0.001 }, movements: [] }).ok);
+
+  // AN OPENING WHOSE BOOKING FAILED (third review round, P1). The intention advanced on the
+  // decided row (BNB 0 → 12) but the leg never booked, so the line is flat and thesis-less
+  // while the reference already says 12. Next cycle the model re-emits 12 — unchanged by
+  // every reading — and the pipeline retries the entry: the position must not open without
+  // its thesis. A moving line with no thesis on record owes its note whatever the intention did.
+  const retriedEntry = band({
+    actionType: 'hold',
+    intentTarget: { ...REFERENCE },
+    movements: [movement('BNB', 'buy'), ...reversal().filter((m) => m.asset !== 'BNB')],
+    notes: [],
+    assetsWithStoredThesis: new Set(['BTC', 'ETH']), // BNB never got its thesis
+  });
+  ok('[entry retried] a line that trades with no thesis on record owes its note even on an unchanged intention', (() => { const v = checkCoherence(retriedEntry).violations; return v.length === 1 && v[0]!.rule === 'moved_line_without_note' && v[0]!.assets.join(',') === 'BNB' && /no thesis on record/.test(v[0]!.detail); })());
+  ok('[entry retried] with the note it passes', checkCoherence({ ...retriedEntry, notes: [note('BNB')] }).ok);
+  ok('[entry retried] the reversal of a band-opened line to zero is a full exit, exempt — the band owes no thesis', checkCoherence(band({ actionType: 'hold', intentTarget: { ...REFERENCE }, movements: [movement('XRP', 'sell', true)], notes: [], assetsWithStoredThesis: new Set(['BTC', 'ETH', 'BNB']) })).ok);
+
+  // THE DEDUPLICATION of the applied references reads absent keys as zero (third review
+  // round, P2): the retained target and the shown one may differ by a line only one of
+  // them carries, and dropping the shown one would leave a hold copying it nothing to keep.
+  ok('[dedupe] two targets differing by a line only one carries are NOT the same target', !sameTarget({ ...REFERENCE, USDT: 40 }, { ...REFERENCE, USDT: 40, SOL: 3 }));
+  ok('[dedupe] a line carried at zero by one and absent from the other is the same target', sameTarget({ ...REFERENCE, SOL: 0 }, { ...REFERENCE }));
+  ok('[dedupe] the same allocation with float noise is the same target', sameTarget({ ...REFERENCE }, { ...REFERENCE, BTC: 25.001 }));
 
   // THE DOCUMENTED RESIDUAL of rule 2, pinned so it is a known fact and not a surprise: after
   // a displacement, a sub-floor revision on a displaced line reads as reachable through the

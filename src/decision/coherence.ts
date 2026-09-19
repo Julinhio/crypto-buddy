@@ -273,11 +273,22 @@ function movedAssets(
 
 /**
  * Are two stored targets THE SAME TARGET, by the guard's own notion of sameness — the
- * epsilon above, over the keys they share. Exported so a caller deduplicating the applied
- * references a hold may keep uses the guard's equality and not one of its own.
+ * epsilon above, over the UNION of their keys, an absent key reading as zero. Exported so a
+ * caller deduplicating the applied references a hold may keep uses the guard's equality
+ * and not one of its own.
+ *
+ * The union, deliberately, where `movedAssets` reads the shared keys only: that one asks
+ * "did the model change its mind", and a key the reference does not carry is not a change
+ * of mind. This one asks "are these two the same allocation", and two targets that differ
+ * by a line one of them carries and the other does not are NOT the same — dropping one of
+ * them as a duplicate would leave a hold copying it with no reference to keep (third
+ * review round).
  */
 export function sameTarget(a: Record<string, number>, b: Record<string, number>): boolean {
-  return movedAssets(a, b).length === 0 && movedAssets(b, a).length === 0;
+  for (const asset of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    if (Math.abs((a[asset] ?? 0) - (b[asset] ?? 0)) > TARGET_EPSILON) return false;
+  }
+  return true;
 }
 
 const fmt = (allocation: Record<string, number>): string =>
@@ -512,6 +523,16 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   // construction (see `openedOutside` above), so it is the model's move and owes its
   // thesis exactly as under the previous rule.
   //
+  // A LINE THAT TRADES WITH NO THESIS ON RECORD owes one whatever its intention did. The
+  // intention advances on the decided row whether or not the booking lands: an opening
+  // whose leg was refused by the venue, or whose intent write failed, leaves the line flat,
+  // thesis-less, and the reference already at the new weight. The model re-emits that
+  // weight next cycle — unchanged, by every reading above — the pipeline retries the
+  // entry, and the position would open with a null thesis (third review round). The band's
+  // own openings are not caught by this: their legs are never in `movements` (the guard
+  // judges the proposal, the band acts after it), and their reversal to zero is a full
+  // exit, exempt below. What is left is exactly the model's line without its thesis.
+  //
   // FULL EXITS ARE EXEMPT, and that is not an oversight. `nextPositionState` clears the
   // thesis and its invalidation on a full exit by design — "a thesis about a position
   // that no longer exists is not a thesis". Demanding a note there would demand output
@@ -523,23 +544,26 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
     : intentReference == null
       ? [...movingAssets]
       : intentMoved.filter((asset) => movingAssets.has(asset));
+  const movingWithoutThesis = [...movingAssets].filter((asset) => !assetsWithStoredThesis.has(asset));
   const movedWithoutNote = !thesisRulesApply
     ? []
-    : modelMoved
+    : [...new Set([...modelMoved, ...movingWithoutThesis])]
         .filter((asset) => !fullExitAssets.has(asset))
         .filter((asset) => !notes.some((n) => n.asset === asset));
   if (movedWithoutNote.length > 0) {
     const revised = (asset: string): string =>
-      intentReference == null || intentReference[asset] == null
-        ? `${asset} ${intentTarget[asset]}% (no prior intention on this line)`
-        : `${asset} ${intentReference[asset]}% → ${intentTarget[asset]}%`;
+      !modelMoved.includes(asset)
+        ? `${asset} ${intentTarget[asset]}% (the line trades and has no thesis on record)`
+        : intentReference == null || intentReference[asset] == null
+          ? `${asset} ${intentTarget[asset]}% (no prior intention on this line)`
+          : `${asset} ${intentReference[asset]}% → ${intentTarget[asset]}%`;
     violations.push({
       rule: 'moved_line_without_note',
       assets: movedWithoutNote,
       detail:
-        `you revised ${movedWithoutNote.map(revised).join(', ')} and that revision trades this cycle, ` +
-        'but the line carries no entry in position_notes. A line you choose to trade must say ' +
-        'what it is now betting on.',
+        `${movedWithoutNote.map(revised).join(', ')} trades this cycle but carries no entry in ` +
+        'position_notes. A line you choose to trade, or a line that trades with no thesis on ' +
+        'record, must say what it is now betting on.',
     });
   }
 
