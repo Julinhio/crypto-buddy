@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { KNOWN_MARK_KINDS } from '../persistence/decisionIntegrityMarks.js';
+import { judge, type StoredContext } from '../replay/storedCycle.js';
+import type { ValidatedDecision } from '../decision/schema.js';
 
 /**
  * THE GUARD/BAND INCIDENT (18-19/09/2026) — the measurement-integrity half, proven on the
@@ -86,6 +88,52 @@ console.log('\nThe cycle writes the guard\'s state on every row, and nothing wri
   ].map((f) => [f, read(f)] as const);
   ok('no code path inserts, updates or deletes a mark', srcFiles.every(([, s]) => !/decision_integrity_marks[\s\S]{0,300}\.(insert|update|delete|upsert)\(/.test(s)));
   ok('the trading path does not import the marks module', !/decisionIntegrityMarks/.test(read('src/decision/decide.ts')) && !/decisionIntegrityMarks/.test(read('src/beat.ts')) && !/decisionIntegrityMarks/.test(read('src/scheduler/heartbeat.ts')));
+}
+
+console.log('\nThe replay harness judges on the clamped proposal production saw, never re-clamped:');
+{
+  // A book of 1000 with XRP held at 15%, and a journaled clamp of XRP 20 — a value TODAY's
+  // cap (15) would trim. The journal is what production's clamp produced under the caps of
+  // its day; the harness must hand it to the guard verbatim, and say where it came from.
+  const context: StoredContext = {
+    market: { tradable: [{ symbol: 'XRP/USDT', price: 1 }, { symbol: 'BTC/USDT', price: 100 }] },
+    account: {
+      portfolio: {
+        reserveAsset: 'USDT',
+        startingCapital: 1000,
+        cash: 850,
+        equity: 1000,
+        deployedPercent: 15,
+        realizedPnl: 0,
+        unrealizedPnl: 0,
+        totalPnl: 0,
+        positions: [{ asset: 'XRP', qty: 150, avgCost: 1, price: 1, priceStale: false, value: 150, unrealizedPnl: 0, weightPercent: 15 }],
+      },
+    },
+    positions: [],
+  };
+  const decision: ValidatedDecision = {
+    targetAllocation: { XRP: 20, BTC: 0, USDT: 80 },
+    actionType: 'rebalance',
+    whatChanged: 'x',
+    confidence: 'medium',
+    marketState: null,
+    reasoning: 'x',
+    positionNotes: [{ asset: 'XRP', thesis: 't', invalidation: 'i', replace: false }],
+    notificationSummary: 'x',
+    requestedDelayMinutes: 60,
+    appliedDelayMinutes: 60,
+  };
+  const references = { intent: { XRP: 15, BTC: 0, USDT: 85 }, applied: { XRP: 15, BTC: 0, USDT: 85 }, shownApplied: null };
+  const journaled = { XRP: 20, BTC: 0, USDT: 80 };
+  const withJournal = judge(decision, context, references, undefined, 'split', journaled);
+  ok('the journaled clamp is the guard target, verbatim, above today\'s cap', withJournal.guardTarget.XRP === 20 && withJournal.guardTargetSource === 'journal_clamped');
+  ok('and the movements the guard judged are sized from it (a real XRP buy)', withJournal.guardMovements.some((m) => m.asset === 'XRP' && m.side === 'buy'));
+  const withoutJournal = judge(decision, context, references, undefined, 'split', null);
+  ok('without a journal, the clamp is recomputed under today\'s caps and named as such', withoutJournal.guardTarget.XRP === 15 && withoutJournal.guardTargetSource === 'clamp_recomputed');
+  const storedDiverging = judge(decision, context, references, { XRP: 20, BTC: 0, USDT: 80 }, 'split', null);
+  ok('a stored applied that is not the recomputed clamp is not trusted as the guard target, and the divergence is named', storedDiverging.guardTargetSource === 'clamp_recomputed_diverges' && storedDiverging.guardTarget.XRP === 15);
+  ok('while it remains what the next cycle reads back as its applied reference', storedDiverging.appliedAllocation.XRP === 20);
 }
 
 console.log(`\n${passed} guard/band-incident checks passed.`);

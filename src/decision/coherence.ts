@@ -484,17 +484,26 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   // restated) every trade is the model's: there is no prior intention the book could have
   // been displaced from, and the bootstrap cycle really does open every line it buys.
   //
+  // A LINE THE REFERENCE DOES NOT KNOW is the same case, one key at a time. The reference
+  // is restated into this cycle's universe, so an asset that has just (re)entered the
+  // universe has no reference weight at all — `movedAssets` rightly does not read that as
+  // a change of mind (rule 1 must not refuse a hold because a feed came back), but a trade
+  // opening that line has no prior intention to be displaced from either. It is the
+  // model's move, and it owes its thesis exactly as under the previous rule.
+  //
   // FULL EXITS ARE EXEMPT, and that is not an oversight. `nextPositionState` clears the
   // thesis and its invalidation on a full exit by design — "a thesis about a position
   // that no longer exists is not a thesis". Demanding a note there would demand output
   // the code is contractually about to discard, and rule 4's purpose (no move without a
   // recorded rationale) has no target: there is no line left to record it against. The
   // rationale still lands in what_changed and reasoning, as on any cycle.
+  const linesWithoutReference =
+    intentReference == null ? [] : Object.keys(intentTarget).filter((asset) => intentReference[asset] == null);
   const modelMoved = unchanged
     ? []
     : intentReference == null
       ? [...movingAssets]
-      : intentMoved.filter((asset) => movingAssets.has(asset));
+      : [...intentMoved, ...linesWithoutReference].filter((asset) => movingAssets.has(asset));
   const movedWithoutNote = !thesisRulesApply
     ? []
     : modelMoved
@@ -502,8 +511,8 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
         .filter((asset) => !notes.some((n) => n.asset === asset));
   if (movedWithoutNote.length > 0) {
     const revised = (asset: string): string =>
-      intentReference == null
-        ? `${asset} ${intentTarget[asset]}%`
+      intentReference == null || intentReference[asset] == null
+        ? `${asset} ${intentTarget[asset]}% (no prior intention on this line)`
         : `${asset} ${intentReference[asset]}% → ${intentTarget[asset]}%`;
     violations.push({
       rule: 'moved_line_without_note',

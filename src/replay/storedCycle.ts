@@ -355,11 +355,13 @@ export function judge(
       : storedAgreesWithClamp
         ? 'stored_applied'
         : 'clamp_recomputed_diverges';
-  const effective = clampAllocation(
-    journaledClamp ?? (guardTargetSource === 'stored_applied' ? stored.allocation! : clamp.applied),
-    reserveAsset,
-    config,
-  ).applied;
+  // NEVER RE-CLAMPED. The journal is what production's clamp produced under the caps of ITS
+  // day; passing it through today's `clampAllocation` would silently rewrite a journaled 40
+  // into 35 the day a cap tightens, while the source still read `journal_clamped`. The stored
+  // applied is offered only when it already equals the recomputed clamp, and the recomputed
+  // clamp is clamped by construction — so nothing here needs a second pass.
+  const effective =
+    journaledClamp ?? (guardTargetSource === 'stored_applied' ? stored.allocation! : clamp.applied);
   const movements = computeMovements(
     book,
     effective,

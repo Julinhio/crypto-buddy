@@ -1020,6 +1020,18 @@ console.log('\n── The band incident: a hold after a correction, on both path
   ok('[bootstrap] with no reference at all, a traded line still owes its note', rules(bootstrap).includes('moved_line_without_note'));
   ok('[bootstrap] and supplies it, the decision passes', checkCoherence({ ...bootstrap, notes: [note('BTC')] }).ok);
 
+  // A LINE THAT (RE)ENTERS THE UNIVERSE has no reference weight: rule 1 does not read it as
+  // a change of mind (a hold must survive a feed coming back), but opening it IS the model's
+  // move — there is no prior intention it could have been displaced from — and it owes its
+  // thesis exactly as under the previous rule (first review round, P1).
+  const withSol = { ...REFERENCE, SOL: 10, USDT: 33 };
+  const opened = band({ actionType: 'rebalance', intentTarget: withSol, movements: [movement('SOL', 'buy'), ...reversal()], notes: [] });
+  ok('[new line] opening a line the reference does not know, without its note, is REFUSED by rule 4', rules(opened).includes('moved_line_without_note'));
+  const openedVerdict = checkCoherence(opened).violations.find((v) => v.rule === 'moved_line_without_note')!;
+  ok('[new line] on that line only — the reversal sells on ETH and BNB are still the chain\'s', openedVerdict.assets.join(',') === 'SOL' && /SOL 10% \(no prior intention on this line\)/.test(openedVerdict.detail));
+  ok('[new line] with its note the opening passes', checkCoherence({ ...opened, notes: [note('SOL')] }).ok);
+  ok('[new line] and a hold that keeps the new line at zero is still a hold', checkCoherence(band({ actionType: 'hold', intentTarget: { ...REFERENCE, SOL: 0 }, movements: reversal() })).ok);
+
   // THE DOCUMENTED RESIDUAL of rule 2, pinned so it is a known fact and not a surprise: after
   // a displacement, a sub-floor revision on a displaced line reads as reachable through the
   // counterfactual (the standing intention replayed against the lifted book trades that
