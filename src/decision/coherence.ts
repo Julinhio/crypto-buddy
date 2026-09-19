@@ -330,11 +330,31 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   // word — because that is what "changed its mind" means; an applied allocation is a fact
   // about the chain, not a prior opinion.
   //
+  // A LINE THE REFERENCE DOES NOT KNOW counts too, with weight. A reference is restated
+  // into this cycle's universe, so an asset that has just (re)entered it carries no
+  // reference weight; `movedAssets` rightly does not compare it, and a hold that keeps
+  // that line at zero survives the feed coming back. But a target that PUTS weight on such
+  // a line has an intention where there was none — and it need not have taken that weight
+  // from a shared line: a stored total legally below 100 (the restatement accepts the
+  // corruption band, not today's tolerance) leaves slack a new line can be funded from
+  // while every shared weight stays put. Read on the shared keys alone, that is a hold
+  // opening a position without a thesis (second review round). So "keeps a target" means:
+  // no shared weight moved, AND nothing opened outside it.
+  //
   // Rule 3 never touches this: it is about theses, and reads the pipeline's movements.
-  const keepsIntent = intentReference != null && movedAssets(intentTarget, intentReference).length === 0;
-  const keepsApplied = appliedReferences.some((applied) => movedAssets(intentTarget, applied).length === 0);
+  const openedOutside = (reference: Record<string, number>): string[] =>
+    Object.keys(intentTarget).filter(
+      (asset) => reference[asset] == null && Math.abs(intentTarget[asset] ?? 0) > TARGET_EPSILON,
+    );
+  const keeps = (reference: Record<string, number>): boolean =>
+    movedAssets(intentTarget, reference).length === 0 && openedOutside(reference).length === 0;
+  const keepsIntent = intentReference != null && keeps(intentReference);
+  const keepsApplied = appliedReferences.some(keeps);
   const unchanged = keepsIntent || keepsApplied;
-  const intentMoved = unchanged || intentReference == null ? [] : movedAssets(intentTarget, intentReference);
+  const intentMoved =
+    unchanged || intentReference == null
+      ? []
+      : [...movedAssets(intentTarget, intentReference), ...openedOutside(intentReference)];
   const intentChanged = intentMoved.length > 0;
   // An applied reference is worth quoting only when it is a second, different, target.
   const appliedWorthQuoting = appliedReferences.filter(
@@ -359,6 +379,9 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
       detail:
         `action_type is "hold" but the target moved on ${intentMoved.join(', ')}: ` +
         `reference [${fmt(intentReference)}] → emitted [${fmt(intentTarget)}]. ` +
+        (openedOutside(intentReference).length > 0
+          ? `${openedOutside(intentReference).join(', ')} carries weight the reference never had — a hold opens no line. `
+          : '') +
         (appliedWorthQuoting.length > 0
           ? `The applied allocation you were shown, ${appliedWorthQuoting.map((a) => `[${fmt(a)}]`).join(' or ')}, is also a valid hold. `
           : '') +
@@ -484,12 +507,10 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   // restated) every trade is the model's: there is no prior intention the book could have
   // been displaced from, and the bootstrap cycle really does open every line it buys.
   //
-  // A LINE THE REFERENCE DOES NOT KNOW is the same case, one key at a time. The reference
-  // is restated into this cycle's universe, so an asset that has just (re)entered the
-  // universe has no reference weight at all — `movedAssets` rightly does not read that as
-  // a change of mind (rule 1 must not refuse a hold because a feed came back), but a trade
-  // opening that line has no prior intention to be displaced from either. It is the
-  // model's move, and it owes its thesis exactly as under the previous rule.
+  // A LINE THE REFERENCE DOES NOT KNOW is the same case, one key at a time: a trade
+  // opening it has no prior intention to be displaced from. It is in `intentMoved` by
+  // construction (see `openedOutside` above), so it is the model's move and owes its
+  // thesis exactly as under the previous rule.
   //
   // FULL EXITS ARE EXEMPT, and that is not an oversight. `nextPositionState` clears the
   // thesis and its invalidation on a full exit by design — "a thesis about a position
@@ -497,13 +518,11 @@ export function checkCoherence(input: CoherenceInput): CoherenceVerdict {
   // the code is contractually about to discard, and rule 4's purpose (no move without a
   // recorded rationale) has no target: there is no line left to record it against. The
   // rationale still lands in what_changed and reasoning, as on any cycle.
-  const linesWithoutReference =
-    intentReference == null ? [] : Object.keys(intentTarget).filter((asset) => intentReference[asset] == null);
   const modelMoved = unchanged
     ? []
     : intentReference == null
       ? [...movingAssets]
-      : [...intentMoved, ...linesWithoutReference].filter((asset) => movingAssets.has(asset));
+      : intentMoved.filter((asset) => movingAssets.has(asset));
   const movedWithoutNote = !thesisRulesApply
     ? []
     : modelMoved

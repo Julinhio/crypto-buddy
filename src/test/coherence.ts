@@ -1031,6 +1031,23 @@ console.log('\n── The band incident: a hold after a correction, on both path
   ok('[new line] on that line only — the reversal sells on ETH and BNB are still the chain\'s', openedVerdict.assets.join(',') === 'SOL' && /SOL 10% \(no prior intention on this line\)/.test(openedVerdict.detail));
   ok('[new line] with its note the opening passes', checkCoherence({ ...opened, notes: [note('SOL')] }).ok);
   ok('[new line] and a hold that keeps the new line at zero is still a hold', checkCoherence(band({ actionType: 'hold', intentTarget: { ...REFERENCE, SOL: 0 }, movements: reversal() })).ok);
+  // THE SLACK CASE (second review round, P2). A stored reference may legally total below
+  // 100 — the restatement accepts the corruption band, not today's tolerance — so a new line
+  // can be funded from that slack while EVERY shared weight stays put. Read on the shared
+  // keys alone that is "unchanged", and a hold would open a position without a thesis.
+  const slackReference = { ...REFERENCE, USDT: 40 }; // totals 97
+  const fundedFromSlack = band({
+    actionType: 'hold',
+    intentReference: slackReference,
+    appliedReferences: [slackReference],
+    intentTarget: { ...slackReference, SOL: 3 }, // totals 100, no shared weight touched
+    movements: [movement('SOL', 'buy')],
+    notes: [],
+  });
+  ok('[new line, slack] a hold funding a new line from the reference\'s slack is REFUSED by rule 1 — a hold opens no line', rules(fundedFromSlack).includes('hold_moved_target') && /SOL carries weight the reference never had/.test(checkCoherence(fundedFromSlack).violations[0]!.detail));
+  ok('[new line, slack] labelled honestly but without its note, rule 4 fires on SOL', (() => { const v = checkCoherence({ ...fundedFromSlack, actionType: 'rebalance' }).violations; return v.length === 1 && v[0]!.rule === 'moved_line_without_note' && v[0]!.assets.join(',') === 'SOL'; })());
+  ok('[new line, slack] with its note the opening passes', checkCoherence({ ...fundedFromSlack, actionType: 'rebalance', notes: [note('SOL')] }).ok);
+  ok('[new line, slack] a new line at float noise weight opens nothing and stays a hold', checkCoherence({ ...fundedFromSlack, intentTarget: { ...slackReference, SOL: 0.001 }, movements: [] }).ok);
 
   // THE DOCUMENTED RESIDUAL of rule 2, pinned so it is a known fact and not a surprise: after
   // a displacement, a sub-floor revision on a displaced line reads as reachable through the
