@@ -379,6 +379,9 @@ console.log('\n§7 — A STOP ON AN ACCEPTED CYCLE: the next reference carries z
     actionType: 'hold',
     intentTarget: { BTC: 25, ETH: 20, BNB: 12, XRP: 0, USDT: 43 },
     intentReference: restated.ok ? restated.value.intent : null,
+    // The INTENTION side alone: this proof is about the zeroing of the stored intention,
+    // so no second target is offered that could accept the hold for another reason.
+    appliedReferences: [],
     movements: [],
     previousIntentMovements: [],
     reserveAsset: RESERVE,
@@ -394,6 +397,9 @@ console.log('\n§7 — A STOP ON AN ACCEPTED CYCLE: the next reference carries z
     actionType: 'hold',
     intentTarget: { BTC: 25, ETH: 20, BNB: 12, XRP: 0, USDT: 43 },
     intentReference: proposal,
+    // Same isolation as above — the applied side would accept this honest zero on its own
+    // (the stop put the line flat there too), which is a second reason, not this one.
+    appliedReferences: [],
     movements: [],
     previousIntentMovements: [],
     reserveAsset: RESERVE,
@@ -449,6 +455,10 @@ console.log('\n§8 — A STOP ON A CYCLE THE GATE ALSO REFUSED: still zero, and 
     actionType: 'hold',
     intentTarget: { ...intent },
     intentReference: restated.ok ? restated.value.intent : null,
+    // What the chain retained on the refused cycle — the previous vector — is the other
+    // target a hold may keep. It differs from the intention here, and the model re-emits
+    // the intention: accepted on that side.
+    appliedReferences: [outcome.appliedAllocation],
     movements: [],
     previousIntentMovements: [],
     reserveAsset: RESERVE,
@@ -474,6 +484,11 @@ console.log('\n§9 — THE COUNTERFACTUAL IS COMPUTED BEFORE THE GATE');
     actionType: 'rebalance' as const,
     intentTarget: { BTC: 25, ETH: 15, BNB: 12, XRP: 8, USDT: 40 },
     intentReference: { BTC: 25, ETH: 25, BNB: 12, XRP: 8, USDT: 30 },
+    // The refused cycle left the book on the target this decision now re-emits — so the
+    // withdrawal is ALSO a hold on the applied side. Kept null here on purpose: this proof
+    // is about rule 2's counterfactual, and the applied side would accept the decision
+    // before rule 2 ever looked at it.
+    appliedReferences: [],
     movements: [],
     reserveAsset: RESERVE,
     notes: [],

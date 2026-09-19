@@ -57,7 +57,10 @@ import type { PositionNote } from '../decision/schema.js';
  *
  * The rules themselves are not simulated at all — this drives the real `checkCoherence`,
  * the real `clampAllocation` and the real `computeMovements`, with the two operand sets
- * exactly as production and the pre-PR code build them.
+ * exactly as production and the pre-PR code build them. The RULES are today's in both
+ * modes — since PR #48 rule 4 only asks a thesis of a line the model revised, so a cap
+ * moving the book toward an unrevised intention costs nothing in either mode. The A/B
+ * below isolates the OPERANDS (rules 1 and 2), which is the question it was built for.
  *
  * Run with `npm run replay:policy-change`. Exits non-zero if any criterion fails.
  */
@@ -165,6 +168,10 @@ function run(policy: AppConfig, operands: 'split' | 'legacy'): RunOutcome {
   const oldPolicy = withCaps({ BTC: 35 });
   const seededApplied = clampAllocation(ASK, RESERVE, oldPolicy).applied;
   let reference: Record<string, number> = operands === 'split' ? { ...ASK } : seededApplied;
+  // The allocation the chain last RETAINED — production's `applied_allocation`, the second
+  // target rule 1 lets a hold keep. Carried under `split` only: the pre-PR guard had one
+  // reference, and reproducing it means feeding it one.
+  let lastApplied: Record<string, number> = seededApplied;
   let book = bookAt(seededApplied);
   // A bot that has been running carries a thesis on every line it holds. That matters for
   // rule 3: it is what makes a note on an UNMOVED line a violation rather than a first
@@ -211,6 +218,21 @@ function run(policy: AppConfig, operands: 'split' | 'legacy'): RunOutcome {
       // compares two raw intentions.
       intentTarget: operands === 'split' ? emitted : applied,
       intentReference: operands === 'split' ? restated.value.intent : restated.value.bounded,
+      // What the chain last retained, restated like production restates it. Only the split
+      // guard reads a second target; the legacy one never had it.
+      appliedReferences:
+        operands === 'split'
+          ? (() => {
+              const applied = restateIntentReference({
+                reference: lastApplied,
+                universe: UNIVERSE,
+                reserveAsset: RESERVE,
+                policy,
+              });
+              if (!applied.ok) throw new Error(`the carried applied allocation is not restatable: ${applied.reason}`);
+              return [applied.value.intent];
+            })()
+          : [],
       movements,
       previousIntentMovements,
       reserveAsset: RESERVE,
@@ -262,6 +284,7 @@ function run(policy: AppConfig, operands: 'split' | 'legacy'): RunOutcome {
       // What production writes and reads back next cycle: the INTENTION for the split
       // guard, the APPLIED allocation for the legacy one. And the book follows the chain.
       reference = operands === 'split' ? { ...emitted } : attempt.applied;
+      lastApplied = attempt.applied;
       book = bookAt(attempt.applied);
     }
   }
@@ -294,8 +317,9 @@ function main(): void {
     const ok =
       legacy.rejectedFirstAttempts.length === CYCLES &&
       legacy.finalBtc === 35 &&
-      split.rejectedFirstAttempts.length === 1 &&
+      split.rejectedFirstAttempts.length === 0 &&
       split.deadCycles.length === 0 &&
+      split.calls === CYCLES &&
       split.finalBtc === 40 &&
       split.calls < legacy.calls;
     record('P1', 'a RELAXED cap stops costing a retry EVERY cycle, and the weight arrives', ok, [
@@ -304,15 +328,17 @@ function main(): void {
         `(${legacy.rules.join(', ') || 'none'}) · ${legacy.deadCycles.length} dead cycles · ` +
         `book ends at BTC ${legacy.finalBtc}%.`,
       `AFTER:  ${split.calls} LLM calls over ${CYCLES} cycles · ` +
-        `${split.rejectedFirstAttempts.length} first attempt rejected, on cycle ` +
-        `${split.rejectedFirstAttempts.join(', ') || '—'} (${split.rules.join(', ') || 'none'}) · ` +
+        `${split.rejectedFirstAttempts.length} first attempt(s) rejected` +
+        `${split.rejectedFirstAttempts.length === 0 ? '' : `, on cycle ${split.rejectedFirstAttempts.join(', ')}`}` +
+        ` (${split.rules.join(', ') || 'none'}) · ` +
         `${split.deadCycles.length} dead cycles · book ends at BTC ${split.finalBtc}%.`,
       `Saved: ${legacy.calls - split.calls} calls over ${CYCLES} cycles.`,
-      'THE ONE RETRY THAT REMAINS IS NOT THE DEFECT, and it is why this harness carries a ' +
-        'real book. On the cycle the ceiling moves, the intention has not changed but the ' +
-        'BOOK does — the newly permitted weight is a real leg — so rule 4 asks the line that ' +
-        'trades to say what it is now betting on. The model supplies the note and the trade ' +
-        'lands. That is the guard working, once, not the reference being stale every cycle.',
+      'NO RETRY AT ALL, and the real book is why this harness can say so. On the cycle the ' +
+        'ceiling moves the intention has not changed but the BOOK does — the newly permitted ' +
+        'weight is a real leg. That leg is the CHAIN\'s move, not the model\'s: a line the model ' +
+        'did not revise carries its thesis unchanged, so rule 4 asks nothing of it (PR #48 — ' +
+        'the same frontier that stops a band correction\'s reversal from demanding theses). ' +
+        'Before that PR the cycle cost one relaunch here, for a note on an unrevised line.',
       `AND THE WEIGHT ACTUALLY ARRIVES: the book ends at BTC ${split.finalBtc}% instead of ` +
         `${legacy.finalBtc}%. Before, the retry did not merely cost a call — it talked the ` +
         'model back down to the OLD ceiling every single cycle, so the weight the new ceiling ' +
@@ -336,7 +362,8 @@ function main(): void {
       `BEFORE: ${legacy.calls} LLM calls · ${legacy.rejectedFirstAttempts.length} rejected first ` +
         `attempt(s) · ${legacy.deadCycles.length} dead cycles · book ends at BTC ${legacy.finalBtc}%.`,
       'The risk-mandated reduction executes in both, which is the whole point of tightening a ' +
-        'cap. Here too the single rejection is rule 4, on the cycle the book actually moves.',
+        'cap. And it executes on the FIRST attempt: the reduction is the cap\'s move on an ' +
+        'unrevised line, so rule 4 asks no thesis for it (PR #48).',
       'Note the asymmetry the split removes: #28 closed this direction by CLAMPING the ' +
         'reference, which is what made the relaxed direction lossy. Comparing two unclamped ' +
         'intentions closes both at once, structurally.',

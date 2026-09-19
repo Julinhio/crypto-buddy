@@ -156,11 +156,18 @@ async function main(): Promise<void> {
   }
 
   // C4 — the systemic detector actually detects.
+  //
+  // Asserted on the BRIEFED WINDOW, which is the pre-fix corpus: every one of those responses
+  // was produced under the old contract. The corpus has kept growing under the NEW contract
+  // since, so "100% of the whole corpus" stopped being the right expectation the day the fix
+  // deployed — the whole-corpus count is reported beside it, never asserted.
   {
-    const violating = cycles.filter((c) => outputOrderViolation(c.raw_response) !== null);
-    const ok = violating.length === cycles.length;
-    record('C4', 'the output-order check fires on 100% of the pre-fix corpus', ok, [
-      `${violating.length}/${cycles.length} historical responses emit target_allocation BEFORE reasoning.`,
+    const violating = inWindow.filter((c) => outputOrderViolation(c.raw_response) !== null);
+    const violatingAll = cycles.filter((c) => outputOrderViolation(c.raw_response) !== null);
+    const ok = violating.length === inWindow.length;
+    record('C4', 'the output-order check fires on 100% of the pre-fix (briefed) corpus', ok, [
+      `${violating.length}/${inWindow.length} briefed responses emit target_allocation BEFORE reasoning ` +
+        `(${violatingAll.length}/${cycles.length} over the whole corpus, the rest written under the new contract).`,
       ok
         ? 'Which is exactly right: every one was produced under the OLD contract. A detector that stayed ' +
           'silent here would be a detector that never fires. After the fix, a single hit means the ' +

@@ -127,14 +127,23 @@ export interface GuardReferenceBefore {
   referenceDecisionId: number | null;
   /** The last accepted INTENTION (resolved as production resolves it), or null when none. */
   intent: Record<string, number> | null;
+  /**
+   * The last APPLIED allocation from the same row — the second target a hold may keep
+   * since the guard accepts a re-emission of what the chain retained. Resolved as
+   * production resolves it (`resolveEffectiveTarget`). On the experiment's corpus it equals
+   * the intention on every context (the clamp never bit, the band did not exist), so the
+   * verdicts are unchanged; it is carried so the rebuilt guard stays field-for-field the
+   * production one.
+   */
+  applied: Record<string, number> | null;
 }
 
 /**
- * The coherence guard's reference strictly BEFORE `beforeCreatedAt` — the production
+ * The coherence guard's references strictly BEFORE `beforeCreatedAt` — the production
  * query (`loadReferenceAllocations`) with the time bound added, resolved through the
- * SAME resolvers production uses. The experiment only needs the intention side (rule 1's
- * operand and rule 2's counterfactual basis both derive from it via
- * `restateIntentReference`).
+ * SAME resolvers production uses. Both sides: the intention (rule 1's operand and rule 2's
+ * counterfactual basis, via `restateIntentReference`) and the applied allocation (the
+ * second target rule 1 lets a hold keep).
  */
 export async function loadGuardReferenceBefore(
   supabase: SupabaseClient,
@@ -150,7 +159,7 @@ export async function loadGuardReferenceBefore(
     .limit(1);
   if (error) throw new Error(`could not load the guard reference before ${beforeCreatedAt}: ${error.message}`);
   const row = (data ?? [])[0] as (TargetColumns & { id: number }) | undefined;
-  if (!row) return { referenceDecisionId: null, intent: null };
+  if (!row) return { referenceDecisionId: null, intent: null, applied: null };
 
   const effective = resolveEffectiveTarget(row);
   const intent = resolveIntentAllocation(row, reserveAsset);
@@ -160,5 +169,5 @@ export async function loadGuardReferenceBefore(
         'rebuild the coherence guard faithfully for this context (gate 1).',
     );
   }
-  return { referenceDecisionId: row.id, intent: intent.allocation };
+  return { referenceDecisionId: row.id, intent: intent.allocation, applied: effective.allocation };
 }

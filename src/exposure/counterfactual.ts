@@ -46,9 +46,13 @@ export interface ModelIntention {
 
 const round6 = (value: number): number => Math.round(value * 1e6) / 1e6;
 
-/** The journal's clamped weights as an allocation, or null when the journal does not cover the universe. */
+/**
+ * The journal's clamped weights as an allocation, or null when the journal does not cover
+ * the universe. Reads only the two columns it needs, so the coherence replay can feed it
+ * the rows it embeds without rebuilding the whole journal line.
+ */
 export function journaledClampedAllocation(
-  lines: readonly JournalCorrectionLine[] | null | undefined,
+  lines: readonly Pick<JournalCorrectionLine, 'asset' | 'clampedWeightPercent'>[] | null | undefined,
   universe: readonly string[],
   reserveAsset: string,
 ): Record<string, number> | null {

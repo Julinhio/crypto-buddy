@@ -53,6 +53,8 @@ export interface PipelineInputs {
   assets: string[];
   reserveStable: string;
   intentReference: Record<string, number> | null;
+  /** The applied allocations a hold may keep, restated and deduplicated — see `GuardReferenceBefore.applied`. */
+  appliedReferences: Record<string, number>[];
   previousIntentMovements: Movement[];
   assetsWithStoredThesis: Set<string>;
 }
@@ -128,6 +130,7 @@ export function judgeResponse(rawResponse: string, inputs: PipelineInputs): Call
     actionType: decision.actionType,
     intentTarget: decision.targetAllocation,
     intentReference: inputs.intentReference,
+    appliedReferences: inputs.appliedReferences,
     movements,
     previousIntentMovements: inputs.previousIntentMovements,
     reserveAsset: inputs.reserveStable,
