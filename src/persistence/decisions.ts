@@ -86,6 +86,14 @@ export interface DecisionRow {
   model: string | null;
   prompt_version: string;
   git_sha: string | null;
+  /**
+   * Whether `COHERENCE_GUARD` was armed on the wake-up that wrote this row (migration
+   * 0039) — a condition of the decision, journaled on every status like the prompt version
+   * and the SHA. `false` is a fact the guard's own events can never record (a disarmed
+   * guard emits none), which is why the switch is written rather than inferred. NULL on
+   * every row predating the column: unknown, and deliberately never reconstructed.
+   */
+  coherence_guard_armed: boolean | null;
   raw_response: string | null;
   latency_ms: number | null;
   input_tokens: number | null;

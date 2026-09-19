@@ -80,8 +80,9 @@ import {
   validateDecision,
   type ValidatedDecision,
 } from './schema.js';
-import { buildRetryPrompt, checkCoherence, type CoherenceViolation } from './coherence.js';
+import { buildRetryPrompt, checkCoherence, sameTarget, type CoherenceViolation } from './coherence.js';
 import { buildIntentAllocation, restateIntentReference } from './intentReference.js';
+import { resolveEffectiveTarget } from './effectiveTarget.js';
 import {
   loadReferenceAllocations,
   recordGuardEvent,
@@ -1249,6 +1250,43 @@ export async function decide(): Promise<DecideResult> {
   /** Rule 1's operand: the last intention, in this cycle's universe, NEVER clamped. */
   const intentReference = intentRestatement?.ok ? intentRestatement.value.intent : null;
   /**
+   * THE APPLIED TARGETS a hold may keep, restated like the intention — see
+   * `CoherenceInput.appliedReferences`. Two sources, assembled below once both are read:
+   *
+   *   1. what the chain last RETAINED — `applied_allocation` of the last decided row, read
+   *      from the same row as the intention (`loadReferenceAllocations`);
+   *   2. what the model was SHOWN as applied — the effective target of the last significant
+   *      decision, the one its memory block quotes (`buildUserPromptV5`). Between 1925 and
+   *      1951 the model copied THAT allocation twenty-five times as a hold while the last
+   *      decided row's applied had drifted by a point: a hold on the value the model was
+   *      told is applied is a hold, and it must be judged against that very value.
+   *
+   * Since the pilot is armed both can differ durably from the intention (the band lifted
+   * 2112 from 33.75% to 45%), and from each other (the band recomputes a slightly different
+   * 45% split on each hold it never executes). Restated through the SAME pipeline as the
+   * intention, into the same universe, so every target rule 1 compares the candidate to is
+   * in one frame.
+   *
+   * Degrades exactly like the intention: a restatement that fails is deterministic on the
+   * stored row, so the cycle proceeds WITHOUT that reference — rule 1 then judges against
+   * what remains, down to the intention alone, which is the guard as it stood before the
+   * band existed — rather than skipping forever on a row the skipped cycle would never
+   * replace.
+   */
+  const restateApplied = (allocation: Record<string, number> | null, what: string): Record<string, number> | null => {
+    if (allocation == null) return null;
+    const restated = restateIntentReference({ reference: allocation, universe: assets, reserveAsset: reserveStable, policy: config });
+    if (!restated.ok) {
+      console.error(
+        `[CRITICAL] ${what} cannot be restated — ${restated.reason} ` +
+          'This cycle runs WITHOUT that applied reference: a hold is judged against the remaining targets.',
+      );
+      return null;
+    }
+    return restated.value.intent;
+  };
+  const retainedApplied = restateApplied(referenceRead.applied, 'the stored applied allocation');
+  /**
    * Rule 2's counterfactual: what the STANDING intention would do to today's book, bounded
    * by today's policy. Empty when there is no reference yet, and — far more often — empty
    * in substance because the standing intention already executed and the book is already
@@ -1278,6 +1316,20 @@ export async function decide(): Promise<DecideResult> {
     loadRecentDecisions(supabase, config.decision.recentDecisionsToLoad),
     STRATEGY_VERSION === 'v5' ? loadLastSignificantDecision(supabase) : Promise.resolve(null),
   ]);
+  // THE APPLIED ALLOCATION THE MODEL IS SHOWN — resolved exactly as the prompt resolves it
+  // (`resolveEffectiveTarget` on the memory row), so the guard accepts as a hold the very
+  // value the memory block quotes. Null under v4 (no memory row is read) and when there is
+  // no significant decision yet: then only the retained target remains, deduplicated.
+  const shownApplied = restateApplied(
+    lastSignificant ? resolveEffectiveTarget(lastSignificant).allocation : null,
+    'the applied allocation of the memory row',
+  );
+  const appliedReferences: Record<string, number>[] = [];
+  for (const candidate of [retainedApplied, shownApplied]) {
+    if (candidate == null) continue;
+    const duplicate = appliedReferences.some((known) => sameTarget(known, candidate));
+    if (!duplicate) appliedReferences.push(candidate);
+  }
   // THE STRATEGY SWITCH. v4 is the mandate that produced 785 holds out of 787; v5 is
   // Strategy V2. The absence of STRATEGY_VERSION resolves to v4, so the new behaviour
   // can only be reached by an explicit, correctly-spelled opt-in — never by omission,
@@ -1562,6 +1614,9 @@ export async function decide(): Promise<DecideResult> {
           // invariant to the caps, whichever way they move between two cycles.
           intentTarget: decision.targetAllocation,
           intentReference,
+          // The allocations the chain retained and showed — a hold that re-emits one keeps
+          // what the book holds, and is a hold. See where they are derived.
+          appliedReferences,
           movements,
           // Rule 2's counterfactual, computed before the gate — see where it is derived.
           previousIntentMovements,
@@ -2197,6 +2252,15 @@ function makeRow(
     model: over.model ?? null,
     prompt_version: STRATEGY_VERSION === 'v5' ? PROMPT_V5_VERSION : PROMPT_VERSION,
     git_sha: gitSha,
+    // WAS THE COHERENCE GUARD ARMED ON THIS WAKE-UP — a condition of the decision, like the
+    // prompt version and the SHA, and journaled on every row for the same reason. Resolved
+    // once per process from `COHERENCE_GUARD`, and each wake-up is a fresh process under
+    // Cron Schedule, so the value is the state of the switch at this very cycle. Without it
+    // nothing in the database could say that the cycles after 2131 ran with the guard
+    // switched off by hand — the guard's own events prove "armed" when they exist, and
+    // prove nothing when they do not. Rows written before this column stay NULL: unknown,
+    // never reconstructed (migration 0039).
+    coherence_guard_armed: COHERENCE_GUARD,
     raw_response: over.raw_response ?? null,
     latency_ms: over.latency_ms ?? null,
     input_tokens: over.input_tokens ?? null,

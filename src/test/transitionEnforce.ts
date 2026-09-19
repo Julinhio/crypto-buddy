@@ -453,6 +453,9 @@ console.log('\n§8 — THE GUARD ACCEPTS A RE-EMITTED INTENTION WHILE STILL FROZ
     actionType: 'hold',
     intentTarget: { ...refusedIntention },
     intentReference: refusedIntention,
+    // The vector the gate reverted to is the OTHER target a hold may keep since PR #48;
+    // here the model keeps its intention, and that side is what this proof is about.
+    appliedReferences: [previousApplied],
     movements: [],
     previousIntentMovements: [],
     reserveAsset: 'USDT',
@@ -469,6 +472,8 @@ console.log('\n§8 — THE GUARD ACCEPTS A RE-EMITTED INTENTION WHILE STILL FROZ
     actionType: 'hold',
     intentTarget: { ...refusedIntention },
     intentReference: previousApplied,
+    // The old guard had ONE reference; reproducing it means offering one.
+    appliedReferences: [],
     movements: [],
     previousIntentMovements: [],
     reserveAsset: 'USDT',
@@ -485,6 +490,8 @@ console.log('\n§8 — THE GUARD ACCEPTS A RE-EMITTED INTENTION WHILE STILL FROZ
     actionType: 'hold',
     intentTarget: { BTC: 18, ETH: 20, USDT: 62 },
     intentReference: refusedIntention,
+    // Matches neither the intention nor the reverted vector: a real revision.
+    appliedReferences: [previousApplied],
     movements: [],
     previousIntentMovements: [],
     reserveAsset: 'USDT',

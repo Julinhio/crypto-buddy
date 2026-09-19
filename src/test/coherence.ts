@@ -17,6 +17,7 @@ import {
 import {
   buildRetryPrompt,
   checkCoherence,
+  sameTarget,
   type CoherenceInput,
   type CoherenceRule,
 } from '../decision/coherence.js';
@@ -66,6 +67,15 @@ const input = (over: Partial<CoherenceInput> = {}): CoherenceInput => ({
   actionType: 'hold',
   intentTarget: { ...REFERENCE },
   intentReference: { ...REFERENCE },
+  // The pre-band world by default: the chain applied exactly what the model asked, so the
+  // two previous targets a hold may keep are one and the same. The band cases below set
+  // them apart on purpose. `undefined` here means "same as the intention reference".
+  appliedReferences:
+    over.intentReference === undefined
+      ? [{ ...REFERENCE }]
+      : over.intentReference == null
+        ? []
+        : [{ ...over.intentReference }],
   movements: [],
   // No standing plan by default: the previous intention already executed, so replaying it
   // against today's book produces nothing. The rule-2 cases that need one pass it in.
@@ -901,6 +911,180 @@ const withCaps = (perAsset: Record<string, number>, minCashPercent?: number): Ap
     checkCoherence(input({ actionType: 'hold' })).ok,
   );
   passed += 1;
+}
+
+/* ── THE BAND INCIDENT OF 18/09 — two previous targets, and what "the model moved" means ──
+ *
+ * The exposure pilot can RETAIN an allocation the model never asked for. Cycle 2112: the
+ * model held at 33.75% of exposure, the band lifted the book to 45%. From then on the
+ * model's last intention and the last applied allocation differed durably, and the guard
+ * had no satisfiable answer for a hold: re-emitting the intention produced the REVERSAL of
+ * the band's legs, which rule 4 read as lines the model moved without a thesis; re-emitting
+ * the applied allocation was rule 1's "hold that moved the target". Fifteen cycles died.
+ *
+ * The fixture reproduces the shape: the reference intention is REFERENCE, the band lifted
+ * ETH and BNB and the book sits on LIFTED, so an unchanged intention replayed against the
+ * book produces two sells the model never decided.
+ */
+
+console.log('\n── The band incident: a hold after a correction, on both paths ──');
+{
+  const LIFTED = { BTC: 25, ETH: 25, BNB: 15, XRP: 0, USDT: 35 };
+  // The pipeline's movements for the unchanged intention against the lifted book: the
+  // reversal of the band's own legs. And rule 2's counterfactual — the standing intention
+  // replayed against the same book — is that same reversal.
+  const reversal = () => [movement('ETH', 'sell'), movement('BNB', 'sell')];
+  const band = (over: Partial<CoherenceInput> = {}): CoherenceInput =>
+    input({
+      intentReference: { ...REFERENCE },
+      appliedReferences: [{ ...LIFTED }],
+      previousIntentMovements: reversal(),
+      assetsWithStoredThesis: new Set(['BTC', 'ETH', 'BNB']),
+      ...over,
+    });
+
+  // PATH (a) — the model re-emits its own intention, unchanged, as a hold (cycles 2113,
+  // 2114, 2127 on the first attempt; every retry of the incident). No line was revised, so
+  // the reversal sells are the CHAIN's, and no thesis is owed for them.
+  const pathA = band({ actionType: 'hold', intentTarget: { ...REFERENCE }, movements: reversal(), notes: [] });
+  ok('[path a] a hold re-emitting the intention after a band correction is ACCEPTED', checkCoherence(pathA).ok);
+  ok('[path a] and in particular rule 4 asks no thesis for the reversal of the band\'s legs', !rules(pathA).includes('moved_line_without_note'));
+
+  // PATH (b) — the model re-emits the APPLIED allocation, what the book holds, as a hold
+  // (cycles 2113, 2116, 2118, 2119, 2123, 2130 on the first attempt; twenty cycles since
+  // 1840). Keeping what the chain retained is a hold: accepted on the first attempt.
+  const pathB = band({ actionType: 'hold', intentTarget: { ...LIFTED }, movements: [], notes: [] });
+  ok('[path b] a hold re-emitting the applied allocation is ACCEPTED — keeping what the book holds is a hold', checkCoherence(pathB).ok);
+  ok('[path b] no rule fires at all, so no relaunch is consumed', checkCoherence(pathB).violations.length === 0);
+  ok('[path b] the same target under any other label is accepted too (1840 relabelled its hold)', checkCoherence({ ...pathB, actionType: 'rebalance' }).ok);
+  ok(
+    '[path b] with no applied reference at all — the pre-band guard — the same hold is still refused, so the acceptance comes from the second target and nowhere else',
+    rules({ ...pathB, appliedReferences: [] }).includes('hold_moved_target'),
+  );
+  ok(
+    '[path b] the applied reference is never the valued book: a hold copying a DRIFTED book weight matches neither target and is refused',
+    rules(band({ actionType: 'hold', intentTarget: { ...LIFTED, ETH: 24.46, USDT: 35.54 }, movements: [] })).includes('hold_moved_target'),
+  );
+
+  // A COPY ROUNDED TO THE POINT (cycles 2128, 2129, 2131 wrote "BTC 11" for 10.95): it matches
+  // neither target to the epsilon, so rule 1 fires — and ONLY rule 1. The relaunch quotes
+  // both references and the model's second answer (path a) passes. No dead cycle.
+  const rounded = band({
+    actionType: 'hold',
+    appliedReferences: [{ ...LIFTED, BNB: 14.83, USDT: 35.17 }],
+    intentTarget: { ...LIFTED },
+    movements: [],
+  });
+  ok('[rounded copy] rule 1 fires', rules(rounded).includes('hold_moved_target'));
+  ok('[rounded copy] and only rule 1 — never rule 4, never rule 2', rules(rounded).length === 1);
+  ok(
+    '[rounded copy] the rejection quotes the applied allocation as a valid hold, so the model can copy it exactly',
+    /applied allocation you were shown, \[.*BNB 14\.83%.*\], is also a valid hold/.test(checkCoherence(rounded).violations[0]!.detail),
+  );
+
+  // THE NEGATIVE CONTROLS — what the guard is still for.
+  //
+  // A REAL CHANGE OF MIND DISGUISED AS A HOLD: the target matches neither the intention nor
+  // the applied allocation. The 987 family, still refused.
+  const disguised = band({ actionType: 'hold', intentTarget: { ...REFERENCE, ETH: 10, USDT: 53 }, movements: [movement('ETH', 'sell'), movement('BNB', 'sell')] });
+  ok('[control] a hold that matches neither target is REFUSED by rule 1', rules(disguised).includes('hold_moved_target'));
+  ok(
+    '[control] a hold revising a line the band did NOT touch is refused too — the displacement elsewhere buys nothing',
+    rules(band({ actionType: 'hold', intentTarget: { ...REFERENCE, BTC: 15, USDT: 53 }, movements: [movement('BTC', 'sell'), ...reversal()] })).includes('hold_moved_target'),
+  );
+  // A REVISION THAT TRADES, WITHOUT ITS THESIS: the model changed its mind on ETH and the
+  // pipeline sells ETH — that is the model's move, and rule 4 still asks for the note.
+  const silent = band({ actionType: 'de_risk', intentTarget: { ...REFERENCE, ETH: 10, USDT: 53 }, movements: [movement('ETH', 'sell'), movement('BNB', 'sell')], notes: [] });
+  ok('[control] a real revision that trades without its note is REFUSED by rule 4', rules(silent).includes('moved_line_without_note'));
+  const silentVerdict = checkCoherence(silent).violations.find((v) => v.rule === 'moved_line_without_note')!;
+  ok('[control] rule 4 names the REVISED line only — not the reversal on BNB the model never decided', silentVerdict.assets.length === 1 && silentVerdict.assets[0] === 'ETH');
+  ok('[control] and quotes the revision it wants documented', /ETH 20% → 10%/.test(silentVerdict.detail));
+  ok('[control] with the note supplied, the same decision is accepted', checkCoherence({ ...silent, notes: [note('ETH')] }).ok);
+
+  // A REVISION ON ONE LINE WHILE THE BAND DISPLACED ANOTHER: the thesis is owed on the
+  // revised line and on it alone.
+  const mixed = band({ actionType: 'rebalance', intentTarget: { ...REFERENCE, BNB: 6, USDT: 49 }, movements: [movement('ETH', 'sell'), movement('BNB', 'sell')], notes: [note('BNB')] });
+  ok('[mixed] a revision on BNB with its note passes although ETH is being sold back by the chain', checkCoherence(mixed).ok);
+  ok('[mixed] without the BNB note, rule 4 fires on BNB and on BNB only', (() => { const v = checkCoherence({ ...mixed, notes: [] }).violations.find((x) => x.rule === 'moved_line_without_note'); return v != null && v.assets.join(',') === 'BNB'; })());
+
+  // THE 2115 SHAPE — the model keeps two lines at the band's level and trims the third back
+  // to its own intention. On that line its intention did NOT change (12 → 12), so no thesis
+  // is owed: the stored thesis still describes BNB at 12, which is where the trim puts it.
+  // A note offered anyway is accepted (the line trades), as the lifecycle would write it.
+  const trimBack = band({ actionType: 'rebalance', intentTarget: { ...LIFTED, BNB: 12, USDT: 38 }, movements: [movement('BNB', 'sell')], notes: [] });
+  ok('[2115] trimming a displaced line back to the unchanged intention owes no thesis', checkCoherence(trimBack).ok);
+  ok('[2115] and a thesis offered on that line is accepted — the line trades', checkCoherence({ ...trimBack, notes: [note('BNB')] }).ok);
+
+  // THE BOOTSTRAP: with no reference of either kind, every trade is the model's and rule 4
+  // applies as it always did — the first decision really does open every line it buys.
+  const bootstrap = input({ intentReference: null, appliedReferences: [], actionType: 'rebalance', intentTarget: { BTC: 30, ETH: 0, BNB: 0, XRP: 0, USDT: 70 }, movements: [movement('BTC', 'buy')], notes: [], assetsWithStoredThesis: new Set(['BTC']) });
+  ok('[bootstrap] with no reference at all, a traded line still owes its note', rules(bootstrap).includes('moved_line_without_note'));
+  ok('[bootstrap] and supplies it, the decision passes', checkCoherence({ ...bootstrap, notes: [note('BTC')] }).ok);
+
+  // A LINE THAT (RE)ENTERS THE UNIVERSE has no reference weight: rule 1 does not read it as
+  // a change of mind (a hold must survive a feed coming back), but opening it IS the model's
+  // move — there is no prior intention it could have been displaced from — and it owes its
+  // thesis exactly as under the previous rule (first review round, P1).
+  const withSol = { ...REFERENCE, SOL: 10, USDT: 33 };
+  const opened = band({ actionType: 'rebalance', intentTarget: withSol, movements: [movement('SOL', 'buy'), ...reversal()], notes: [] });
+  ok('[new line] opening a line the reference does not know, without its note, is REFUSED by rule 4', rules(opened).includes('moved_line_without_note'));
+  const openedVerdict = checkCoherence(opened).violations.find((v) => v.rule === 'moved_line_without_note')!;
+  ok('[new line] on that line only — the reversal sells on ETH and BNB are still the chain\'s', openedVerdict.assets.join(',') === 'SOL' && /SOL 10% \(no prior intention on this line\)/.test(openedVerdict.detail));
+  ok('[new line] with its note the opening passes', checkCoherence({ ...opened, notes: [note('SOL')] }).ok);
+  ok('[new line] and a hold that keeps the new line at zero is still a hold', checkCoherence(band({ actionType: 'hold', intentTarget: { ...REFERENCE, SOL: 0 }, movements: reversal() })).ok);
+  // THE SLACK CASE (second review round, P2). A stored reference may legally total below
+  // 100 — the restatement accepts the corruption band, not today's tolerance — so a new line
+  // can be funded from that slack while EVERY shared weight stays put. Read on the shared
+  // keys alone that is "unchanged", and a hold would open a position without a thesis.
+  const slackReference = { ...REFERENCE, USDT: 40 }; // totals 97
+  const fundedFromSlack = band({
+    actionType: 'hold',
+    intentReference: slackReference,
+    appliedReferences: [slackReference],
+    intentTarget: { ...slackReference, SOL: 3 }, // totals 100, no shared weight touched
+    movements: [movement('SOL', 'buy')],
+    notes: [],
+  });
+  ok('[new line, slack] a hold funding a new line from the reference\'s slack is REFUSED by rule 1 — a hold opens no line', rules(fundedFromSlack).includes('hold_moved_target') && /SOL carries weight the reference never had/.test(checkCoherence(fundedFromSlack).violations[0]!.detail));
+  ok('[new line, slack] labelled honestly but without its note, rule 4 fires on SOL', (() => { const v = checkCoherence({ ...fundedFromSlack, actionType: 'rebalance' }).violations; return v.length === 1 && v[0]!.rule === 'moved_line_without_note' && v[0]!.assets.join(',') === 'SOL'; })());
+  ok('[new line, slack] with its note the opening passes', checkCoherence({ ...fundedFromSlack, actionType: 'rebalance', notes: [note('SOL')] }).ok);
+  ok('[new line, slack] a new line at float noise weight opens nothing and stays a hold', checkCoherence({ ...fundedFromSlack, intentTarget: { ...slackReference, SOL: 0.001 }, movements: [] }).ok);
+
+  // AN OPENING WHOSE BOOKING FAILED (third review round, P1). The intention advanced on the
+  // decided row (BNB 0 → 12) but the leg never booked, so the line is flat and thesis-less
+  // while the reference already says 12. Next cycle the model re-emits 12 — unchanged by
+  // every reading — and the pipeline retries the entry: the position must not open without
+  // its thesis. A moving line with no thesis on record owes its note whatever the intention did.
+  const retriedEntry = band({
+    actionType: 'hold',
+    intentTarget: { ...REFERENCE },
+    movements: [movement('BNB', 'buy'), ...reversal().filter((m) => m.asset !== 'BNB')],
+    notes: [],
+    assetsWithStoredThesis: new Set(['BTC', 'ETH']), // BNB never got its thesis
+  });
+  ok('[entry retried] a line that trades with no thesis on record owes its note even on an unchanged intention', (() => { const v = checkCoherence(retriedEntry).violations; return v.length === 1 && v[0]!.rule === 'moved_line_without_note' && v[0]!.assets.join(',') === 'BNB' && /no thesis on record/.test(v[0]!.detail); })());
+  ok('[entry retried] with the note it passes', checkCoherence({ ...retriedEntry, notes: [note('BNB')] }).ok);
+  ok('[entry retried] the reversal of a band-opened line to zero is a full exit, exempt — the band owes no thesis', checkCoherence(band({ actionType: 'hold', intentTarget: { ...REFERENCE }, movements: [movement('XRP', 'sell', true)], notes: [], assetsWithStoredThesis: new Set(['BTC', 'ETH', 'BNB']) })).ok);
+
+  // THE DEDUPLICATION of the applied references reads absent keys as zero (third review
+  // round, P2): the retained target and the shown one may differ by a line only one of
+  // them carries, and dropping the shown one would leave a hold copying it nothing to keep.
+  ok('[dedupe] two targets differing by a line only one carries are NOT the same target', !sameTarget({ ...REFERENCE, USDT: 40 }, { ...REFERENCE, USDT: 40, SOL: 3 }));
+  ok('[dedupe] a line carried at zero by one and absent from the other is the same target', sameTarget({ ...REFERENCE, SOL: 0 }, { ...REFERENCE }));
+  ok('[dedupe] the same allocation with float noise is the same target', sameTarget({ ...REFERENCE }, { ...REFERENCE, BTC: 25.001 }));
+
+  // THE DOCUMENTED RESIDUAL of rule 2, pinned so it is a known fact and not a surprise: after
+  // a displacement, a sub-floor revision on a displaced line reads as reachable through the
+  // counterfactual (the standing intention replayed against the lifted book trades that
+  // line), so the void revision passes. Permissive: no order, no dead cycle, the band re-lifts.
+  const nibble = band({ actionType: 'rebalance', intentTarget: { ...REFERENCE, BNB: 13, USDT: 42 }, movements: [], notes: [] });
+  ok('[residual] a sub-floor revision on a band-displaced line passes rule 2 through the counterfactual', checkCoherence(nibble).ok);
+  ok('[residual] the same nibble on an UNDISPLACED book is still refused, as before', rules({ ...nibble, previousIntentMovements: [] }).includes('target_not_executable'));
+
+  // THE RELAUNCH names both targets, so a model that wanted to keep the book is told so.
+  const relaunch = buildRetryPrompt(checkCoherence(rounded).violations);
+  ok('the retry message offers BOTH previous targets as a genuine hold', /your own last target\) or the applied allocation/.test(relaunch));
+  ok('and asks for an exact copy, to the last decimal', /to the last decimal/.test(relaunch));
 }
 
 console.log(`\n${passed} coherence-guard checks passed.`);

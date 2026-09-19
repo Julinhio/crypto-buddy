@@ -568,6 +568,39 @@ ouverte — c'est une de ses conditions d'échec, pas une convention. Au 17/09, 
 1839 BNB et ETH (hausse depuis zéro, réaction 15 au cycle suivant → `maintien`), 1922 ETH et
 1951 BTC (baisse, le modèle redemande 10 → `repetition`). Quatre lectures, aucun verdict.
 
+### Les marques d'intégrité : une proposition conditionnée n'est jamais lue comme libre
+
+Une proposition n'est la parole libre du modèle que si rien ne l'a conditionnée. L'incident des
+18-19/09/2026 (PR #48) en a produit qui ne l'étaient pas, et le fait vit **dans la base**, table
+`decision_integrity_marks` (migration 0039), là où C8 et ce rejeu lisent — jamais dans un
+document à côté, qu'on oublie de consulter au bout de six semaines. Deux types :
+
+| Type | Ce qu'il dit | Ce qu'en fait C8 |
+|---|---|---|
+| `selection_par_le_garde` | après la correction de bande du cycle 2112, le garde de cohérence refusait tout maintien ; ce cycle n'a été décidé que parce qu'il **bougeait** — sélectionné par le garde, pas une réaction à la bande. Quatre cycles, arbitrés à la main : 2115, 2124, 2125, 2126 | `non_attribuable`, sur le cycle de l'épisode comme sur le cycle de réaction, avec la raison durable de la marque |
+| `relance_orientee_par_le_garde` | la proposition journalisée est la **seconde** tentative, produite sous le message de relance du garde (« re-emit the reference target UNCHANGED ») ; dérivé du journal du garde lui-même (`guard_recovered_on_retry` depuis l'activation), sans inférence, la première réponse recopiée en JSON depuis le détail du refus quand la règle 1 l'a citée | la lecture **tient** si la première réponse portait le même poids sur la ligne (1840 a relabellé son hold en gardant sa cible), avec une réserve affichée ; sinon, ou si la première réponse n'est pas journalisée, `non_attribuable` |
+| tout autre type | un fait que le lecteur ne sait pas interpréter | `illisible` — refus de la lecture officielle, jamais une omission |
+
+Les cycles `guard_failed` de l'intervalle ne portent pas de marque : leur statut dit déjà le
+fait, et le protocole les traite comme des trous. Les marques sont **additives** et écrites par
+une migration revue ; aucun chemin de code n'en insère, n'en modifie ni n'en supprime. Le rejeu
+les imprime en tête (« INTÉGRITÉ DE LA MESURE »), les porte dans l'artefact (`integrity.marks`)
+et **refuse** si la table est illisible — un rejeu qui ne lirait aucune marque lirait chaque
+cycle marqué comme la parole libre du modèle.
+
+**L'état du garde, cycle par cycle**, voyage avec elles. `decisions.coherence_guard_armed`
+(0039) est écrit à chaque réveil ; il est NULL sur tout l'historique antérieur et n'est jamais
+reconstruit. Le rejeu le lit en quatre valeurs — `armed` / `disarmed` (la colonne), `armed_by_event`
+(la colonne est muette mais le garde a journalisé un verdict sur ce cycle, ce qu'un garde
+désarmé ne fait jamais), `unknown` (rien ne le dit) — et le porte sur chaque ligne de l'artefact.
+« Inconnu » n'est jamais lu comme armé ni comme désarmé : les cycles décidés pendant le
+désarmement manuel du 19/09, avant le déploiement de la 0039, y sont, et y restent.
+
+Pourquoi cela compte pour la population : un garde armé refuse des cycles qu'un garde désarmé
+laisse passer, et pendant l'incident il refusait **tout maintien**. Une fenêtre qui a changé
+d'état de garde en cours de route n'est pas une population homogène, et la lecture officielle
+doit pouvoir le voir sans qu'un humain pense à aller vérifier.
+
 ### L'exposition que E vise est RECONSTRUITE, jamais lue
 
 `equity_snapshots` ressemblait à la réponse et n'en est pas une : le scheduler la construit
@@ -685,6 +718,14 @@ Entre `clamp.applied` et la porte de transition. Le garde a déjà jugé la prop
 modèle (§3.4.5), la correction ne repasse pas devant lui (§3.4.7), et la porte parle **après**
 elle, sur les mouvements corrigés (§3.4.2). Ce n'est pas une commodité : c'est le seul endroit du
 cycle où les sept clauses tombent juste.
+
+**Ce que ce point d'insertion impose au garde, appris le 18/09.** Le garde juge la proposition
+brute contre un livre que la bande a pu déplacer. Une intention inchangée rejouée contre ce livre
+produit le **renversement des jambes de bande** — des mouvements que le modèle n'a pas décidés et
+que la bande annulera avant tout ordre. Le garde ne les lui attribue plus (PR #48) : une thèse
+n'est due que sur une ligne dont l'intention a changé **et** qui trade, et un `hold` peut
+reprendre l'allocation appliquée que la chaîne a retenue ou que le prompt a montrée. Ni la bande,
+ni la porte, ni le contrat n'ont bougé pour cela ; `contractVersion` non plus.
 
 ### L'instant officiel ne se dépense qu'une fois
 

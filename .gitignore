@@ -66,3 +66,10 @@ out/exposure-band-bite/
 # from the same corpus at any time, and the run prints its SHA-256 so a regenerated copy can
 # be checked against the one that produced the figures.
 out/exposure-band-witnesses/
+
+# Guard/band incident replay artefact — never committed.
+#
+# An extract of the living journal (every response of cycles 2112-2131, both attempts),
+# regenerable at any time with `npm run replay:guard-band-incident`; the run prints its
+# SHA-256 so a regenerated copy can be checked against the one quoted in the PR.
+out/guard-band-incident/

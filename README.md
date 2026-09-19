@@ -626,6 +626,21 @@ either direction can neither deadlock the chain nor cost a retry. Rule 2 asks wh
 change can reach the book, replaying **both** the standing intention and the new one
 against the current book — cancelling a pending order counts as reaching it.
 
+**Since the exposure pilot (PR #48), a hold may keep either kind of previous target.** The
+band can retain an allocation the model never asked for (cycle 2112: the model held at
+33.75% of exposure, the band lifted the book to 45%), so the model's last intention and
+the applied allocation differ durably, and the prompt shows it both. A `hold` is coherent
+when its target re-emits the last intention **or** an applied allocation — the one the
+chain retained last, or the one the memory block showed. And **"a line the model moved"
+is an intersection**: a thesis is owed only on a line whose intention changed *and* whose
+change trades. Book drift and the reversal of a band correction trade lines the model
+never revised — they owe nothing. Before that, a hold after a band correction had no
+satisfiable answer, and the guard killed fifteen of nineteen cycles on 18-19/09/2026;
+the same rule had killed 2027 and 2028 on a pure price drift. Every row now records
+whether the guard was armed (`coherence_guard_armed`, migration 0039), and the
+decisions the incident conditioned are marked where the reports read them — see
+`src/exposure/README.md`, *Les marques d'intégrité*.
+
 | `COHERENCE_GUARD` | Behaviour |
 | --- | --- |
 | **unset** (the default) | Guard **armed**. There is nothing to set to be protected. |
@@ -641,8 +656,11 @@ Traces land in `decision_guard_events`; the three counters are read from
 `decision_guard_counters`. Verify the guard's verdict against every real production
 response with `npm run replay:coherence`; that the intent/executability split moves no
 historical verdict with `npm run replay:intent-split`; what a moved cap costs, before and
-after, with `npm run replay:policy-change` (offline); and its recovery behaviour on a
-single cycle with `npm run replay:retry-1000` (this one makes a real LLM call).
+after, with `npm run replay:policy-change` (offline); its recovery behaviour on a
+single cycle with `npm run replay:retry-1000` (this one makes a real LLM call); and the
+guard/band incident of 18-19/09 replayed in situ — both attempts of every failed cycle,
+the negative controls, the relaunches the whole pilot paid — with
+`npm run replay:guard-band-incident` (read-only).
 
 The set of balance-tracked assets — and the AI's allocation universe — are both
 derived from `tradablePairs` via `tradableAssets()`; there's no separate asset
@@ -669,6 +687,7 @@ src/
 │   ├── athAtlCache.ts       # ATH/ATL seed / maintain / fallback logic
 │   ├── decisions.ts         # load recent + insert decision rows (resilient)
 │   ├── executions.ts        # execution journal: derive ledger (booked intents) + insert rows
+│   ├── decisionIntegrityMarks.ts # READ-ONLY: the marks a measurement reader must see (migration 0039)
 │   └── schedulerState.ts    # bot_state + scheduler_runs RPCs (heartbeat / claim / finish) + incident failure rebuild
 ├── scheduler/
 │   ├── policy.ts            # PURE logic: due/lock, missed beats, backoff, delays, overheating, alert debounce, degraded incident

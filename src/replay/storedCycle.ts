@@ -1,7 +1,7 @@
 import { config } from '../config/index.js';
 import { Decimal, dec } from '../money.js';
 import type { PriceLookup, VirtualPortfolio } from '../portfolio/derive.js';
-import { computeMovements } from '../execution/movements.js';
+import { computeMovements, type Movement } from '../execution/movements.js';
 import { clampAllocation } from '../risk/clamp.js';
 import {
   buildDecisionSchema,
@@ -9,12 +9,13 @@ import {
   type DecisionOutput,
   type ValidatedDecision,
 } from '../decision/schema.js';
-import { checkCoherence, type CoherenceViolation } from '../decision/coherence.js';
+import { checkCoherence, sameTarget, type CoherenceViolation } from '../decision/coherence.js';
 import { restateIntentReference } from '../decision/intentReference.js';
 import {
   resolveEffectiveTarget,
   resolveIntentAllocation,
 } from '../decision/effectiveTarget.js';
+import { allocationsAgree, journaledClampedAllocation } from '../exposure/counterfactual.js';
 
 /**
  * Rebuilding one journaled cycle into the exact inputs the guard would have seen.
@@ -85,6 +86,23 @@ export interface StoredCycle {
    * corpus row.
    */
   applied_divergence_cause?: unknown;
+  /**
+   * THE CLAMPED PROPOSAL AS PRODUCTION'S GUARD SAW IT — `exposure_band_corrections`, embedded
+   * (one row per universe asset, since brick 2 of the pilot). The guard judges the movements
+   * of the RISK-BOUNDED proposal against the book, and since the pilot is armed the row's
+   * `applied_allocation` is no longer that value: it is the allocation the band corrected
+   * AFTER the guard had passed. Judging on it replayed the band's own legs as the model's and
+   * reported seventeen accepted cycles as `moved_line_without_note` — the same misreading the
+   * witnesses replay had to fix for B̂. Empty on every row predating the journal.
+   */
+  exposure_band_corrections?: Array<{ asset: string; clamped_weight_percent: string | number }> | null;
+  /**
+   * Did this cycle BOOK an executed intent — production's own definition of a significant
+   * decision (`loadLastSignificantDecision`: an inner join on an executed intent). It is
+   * what moves the memory the model is shown, and therefore the shown applied target the
+   * guard lets a hold keep. Filled by `loadCorpus`; absent means "not known", not "no".
+   */
+  significant?: boolean;
 }
 
 /** The virtual book EXACTLY as that cycle saw it. */
@@ -158,13 +176,21 @@ export function thesesOf(ctx: StoredContext): Set<string> {
  * back from the last `decided` row.
  *
  *   `intent`   the last INTENTION — the coherence guard's rule-1 operand.
- *   `applied`  the last EFFECTIVE target — what the book pursued. Carried because the
- *              LEGACY operand mode needs it, and because it is what the transition gate
- *              reverts to; the split guard never reads it.
+ *   `applied`  the last EFFECTIVE target — what the book pursued. The LEGACY operand mode
+ *              compares against it (bounded); the split guard reads it as the SECOND target
+ *              a hold may keep (PR #48), restated like the intention. On the corpus before
+ *              the band the two are equal on every row, so nothing there can move.
  */
 export interface ReplayReferences {
   intent: Record<string, number> | null;
   applied: Record<string, number> | null;
+  /**
+   * The applied allocation the model was SHOWN — the effective target of the last
+   * SIGNIFICANT decision before the cycle, the one the prompt's memory block quotes. The
+   * second applied target rule 1 lets a hold keep (PR #48). Null when unknown, and null on
+   * the corpus chain before the band, where it could only equal the applied one anyway.
+   */
+  shownApplied?: Record<string, number> | null;
 }
 
 /**
@@ -237,10 +263,42 @@ export function decodeResponse(
     : { ok: false, reason: validation.error };
 }
 
+/**
+ * WHERE THE GUARD'S MOVEMENT TARGET CAME FROM, so a caller can print it next to a verdict.
+ *
+ *   journal_clamped              the journaled clamp of the proposal — production's exact input
+ *                                to the corrector, and to the guard before it (brick 2 onwards)
+ *   stored_applied               the row's applied allocation, equal to the recomputed clamp:
+ *                                nothing downstream reshaped the proposal, the row is the fact
+ *   clamp_recomputed             no stored applied at all — a fresh response (retry proof)
+ *   clamp_recomputed_diverges    the stored applied is NOT the clamped proposal and no journal
+ *                                says what the clamp was: something downstream of the guard
+ *                                reshaped the target (a band correction with its journal row
+ *                                missing, a gate revert, a stop). The guard never judged that
+ *                                value, so the clamp is recomputed under today's caps — named,
+ *                                because a cap change since would make it a guess.
+ */
+export type GuardTargetSource =
+  | 'journal_clamped'
+  | 'stored_applied'
+  | 'clamp_recomputed'
+  | 'clamp_recomputed_diverges';
+
 export interface JudgeResult {
   ok: boolean;
   violations: CoherenceViolation[];
+  /**
+   * What production wrote as `applied_allocation` — the value the NEXT cycle reads back as
+   * its applied reference. The stored one when the row has it (since the pilot it is the
+   * band-corrected allocation, and that is precisely what the chain reads); the recomputed
+   * clamp otherwise.
+   */
   appliedAllocation: Record<string, number>;
+  /** The target the guard's movements were computed from, and where it came from. */
+  guardTarget: Record<string, number>;
+  guardTargetSource: GuardTargetSource;
+  /** The movements the guard judged — the guard target against the book, 2% floor applied. */
+  guardMovements: Movement[];
   /** The counterfactual plan rule 2 was given, reported so a diff can explain itself. */
   previousIntentMovements: number;
 }
@@ -267,20 +325,43 @@ export function judge(
    */
   storedApplied?: unknown,
   operands: GuardOperands = 'split',
+  /**
+   * The journaled clamp of the proposal (`exposure_band_corrections.clamped_weight_percent`,
+   * reserve reconstructed), when the row carries one. It is the value production's guard
+   * computed its movements from, and it takes precedence over everything else — see
+   * `GuardTargetSource`.
+   */
+  journaledClamp: Record<string, number> | null = null,
 ): JudgeResult {
   const book = bookOf(ctx);
   const reserveAsset = book.reserveAsset;
   const universe = universeOf(ctx);
   const clamp = clampAllocation(decision.targetAllocation, reserveAsset, config);
-  // The row is the fact; the recomputation is a guess that happens to be right today. The
-  // resolver doubles as the validator — an unusable stored value falls back to the clamp
+  // The resolver doubles as the validator — an unusable stored value falls back to the clamp
   // rather than poisoning the judgement.
   const stored = resolveEffectiveTarget({ applied_allocation: storedApplied });
-  const effective = clampAllocation(
-    stored.source === 'applied' ? stored.allocation! : clamp.applied,
-    reserveAsset,
-    config,
-  ).applied;
+  const storedAgreesWithClamp =
+    stored.source === 'applied' &&
+    allocationsAgree(stored.allocation!, clamp.applied, universe.filter((a) => a !== reserveAsset), reserveAsset).agree;
+  // THE GUARD'S TARGET — the clamped PROPOSAL, which is what `evaluate()` in decide() hands
+  // to computeMovements. The journal says exactly what that was; failing a journal, the
+  // row's applied allocation is that value only when nothing downstream reshaped it (the
+  // row is the fact, the recomputation a guess that a cap change could falsify); failing
+  // both, the clamp is recomputed and the divergence is named.
+  const guardTargetSource: GuardTargetSource = journaledClamp
+    ? 'journal_clamped'
+    : stored.source !== 'applied'
+      ? 'clamp_recomputed'
+      : storedAgreesWithClamp
+        ? 'stored_applied'
+        : 'clamp_recomputed_diverges';
+  // NEVER RE-CLAMPED. The journal is what production's clamp produced under the caps of ITS
+  // day; passing it through today's `clampAllocation` would silently rewrite a journaled 40
+  // into 35 the day a cap tightens, while the source still read `journal_clamped`. The stored
+  // applied is offered only when it already equals the recomputed clamp, and the recomputed
+  // clamp is clamped by construction — so nothing here needs a second pass.
+  const effective =
+    journaledClamp ?? (guardTargetSource === 'stored_applied' ? stored.allocation! : clamp.applied);
   const movements = computeMovements(
     book,
     effective,
@@ -310,6 +391,19 @@ export function judge(
       ? restated.value.intent
       : restated.value.bounded
     : null;
+  // THE APPLIED TARGETS a hold may keep — the reference row's applied allocation and the
+  // one the model was shown, each restated through the same pipeline and deduplicated,
+  // exactly as `decide()` derives them. Production reads them; the legacy guard never had
+  // them. A value absent or not restatable is simply not offered, as in production.
+  const appliedReferences: Record<string, number>[] = [];
+  if (operands === 'split') {
+    for (const candidate of [references.applied, references.shownApplied ?? null]) {
+      if (candidate == null) continue;
+      const restatedApplied = restateIntentReference({ reference: candidate, universe, reserveAsset, policy: config });
+      if (!restatedApplied.ok) continue;
+      if (!appliedReferences.some((known) => sameTarget(known, restatedApplied.value.intent))) appliedReferences.push(restatedApplied.value.intent);
+    }
+  }
   const previousIntentMovements =
     operands === 'split' && restated?.ok
       ? computeMovements(
@@ -329,6 +423,7 @@ export function judge(
     // `legacy`, which is what the old code compared.
     intentTarget: operands === 'split' ? decision.targetAllocation : effective,
     intentReference,
+    appliedReferences,
     movements,
     previousIntentMovements,
     reserveAsset,
@@ -337,9 +432,28 @@ export function judge(
   });
   return {
     ...verdict,
-    appliedAllocation: effective,
+    // What the next cycle reads back: the row's own applied allocation when it has one.
+    appliedAllocation: stored.source === 'applied' ? stored.allocation! : effective,
+    guardTarget: effective,
+    guardTargetSource,
+    guardMovements: movements,
     previousIntentMovements: previousIntentMovements.length,
   };
+}
+
+/**
+ * The clamped proposal the corrections journal recorded for a cycle, as an allocation —
+ * reserve included — or null when the row carries no complete journal. Read through the
+ * witnesses' own builder so the two replays cannot disagree about what the journal says.
+ */
+export function journaledClampOf(cycle: StoredCycle): Record<string, number> | null {
+  const rows = cycle.exposure_band_corrections;
+  if (rows == null || rows.length === 0) return null;
+  const ctx = cycle.market_context;
+  const reserveAsset = ctx.account.portfolio.reserveAsset;
+  const universe = universeOf(ctx).filter((asset) => asset !== reserveAsset);
+  const lines = rows.map((row) => ({ asset: row.asset, clampedWeightPercent: Number(row.clamped_weight_percent) }));
+  return journaledClampedAllocation(lines, universe, reserveAsset);
 }
 
 /** One journaled cycle, decoded and judged. */
@@ -359,6 +473,7 @@ export function replayCycle(
     // This IS the response the row recorded, so its persisted applied allocation applies.
     cycle.applied_allocation,
     operands,
+    journaledClampOf(cycle),
   );
   if (!verdict.ok) {
     return { kind: 'rejected', decision: decoded.decision, violations: verdict.violations };
@@ -413,14 +528,20 @@ export function replayInOrder(
   cycles: StoredCycle[],
   operands: GuardOperands = 'split',
 ): ReplayStep[] {
-  let references: ReplayReferences = { intent: null, applied: null };
+  let references: ReplayReferences = { intent: null, applied: null, shownApplied: null };
   const steps: ReplayStep[] = [];
   for (const cycle of cycles) {
     const judgedAgainst = references;
     const verdict = replayCycle(cycle, judgedAgainst, operands);
     steps.push({ cycle, verdict, references: judgedAgainst });
     if (verdict.kind === 'accepted') {
-      references = { intent: verdict.intentAllocation, applied: verdict.appliedAllocation };
+      references = {
+        intent: verdict.intentAllocation,
+        applied: verdict.appliedAllocation,
+        // The memory the NEXT cycle is shown moves only on a SIGNIFICANT cycle — one that
+        // booked an executed intent — exactly like `loadLastSignificantDecision`.
+        shownApplied: cycle.significant ? verdict.appliedAllocation : (judgedAgainst.shownApplied ?? null),
+      };
     }
   }
   return steps;
@@ -438,7 +559,10 @@ export async function loadCorpus(
       .from('decisions')
       .select(
         'id, created_at, raw_response, market_context, target_allocation, intent_allocation, ' +
-          'applied_allocation, applied_divergence_cause',
+          'applied_allocation, applied_divergence_cause, ' +
+          // The clamped proposal the corrector received — embedded through the FK, one row per
+          // universe asset since brick 2, empty before. See StoredCycle.exposure_band_corrections.
+          'exposure_band_corrections(asset, clamped_weight_percent)',
       )
       .eq('status', 'decided')
       .eq('prompt_version', 'v5')
@@ -452,5 +576,23 @@ export async function loadCorpus(
     cycles.push(...page);
     if (page.length < PAGE) break;
   }
+  // SIGNIFICANCE, from the ledger: the decisions that booked an executed intent. One paged
+  // query over the ledger's ids rather than an embed per row — the ledger is small, the
+  // contexts are not.
+  const significant = new Set<number>();
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('executions')
+      .select('decision_id')
+      .eq('event_type', 'intent')
+      .eq('validation_status', 'executed')
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(`replay: could not read the ledger's decision ids (${error.message}).`);
+    const page = (data ?? []) as Array<{ decision_id: number | null }>;
+    for (const row of page) if (row.decision_id != null) significant.add(row.decision_id);
+    if (page.length < PAGE) break;
+  }
+  for (const cycle of cycles) cycle.significant = significant.has(cycle.id);
   return cycles;
 }
