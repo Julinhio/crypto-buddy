@@ -552,7 +552,15 @@ console.log('\nActivity notification — ledger-fact movements, $ amounts, résu
   assert.ok(text.includes('🤖 Crypto-Buddy a bougé · 14h05'), 'header with UTC HHhMM time');
   assert.ok(text.includes('Achat ~50$ de BTC'), 'buy line, dollars, "de BTC" (consonant)');
   assert.ok(text.includes("Vente ~30$ d'ETH"), 'sell line, dollars, "d\'ETH" (vowel elision)');
-  assert.ok(text.includes('Pourquoi : BTC RSI'), 'the why = notification_summary');
+  // The model's text is ITS reasoning, labelled as such — never a global "why" any more
+  // (PR 2 of the guard/band incident: the band and the stop move lines the model never
+  // asked to move, and the old layout attributed their orders to the model's summary).
+  assert.ok(text.includes('Raisonnement du modèle : BTC RSI'), "the model's summary is labelled as its reasoning");
+  assert.ok(!text.includes('Pourquoi :'), 'no global "why" under the movements');
+  // This fixture carries no provenance: nothing is attributed, and the message says so
+  // on every movement rather than guessing an origin.
+  assert.ok(text.includes('Achat ~50$ de BTC — origine non établie'), 'without provenance a movement is explicitly unattributed');
+  assert.ok(text.includes("Vente ~30$ d'ETH — origine non établie"), 'on every movement');
   assert.ok(text.includes('Total : ~500$'), 'resulting total');
   console.log('  ok: movements from the ledger ($ amounts), résultante alloc+total, French elision, mockup layout');
   passed += 1;

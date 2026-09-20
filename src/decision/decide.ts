@@ -21,7 +21,7 @@ import {
 } from '../persistence/transitionObservations.js';
 import { observeBand } from '../exposure/observe.js';
 import { correctToBand, type CorrectionOutcome } from '../exposure/correct.js';
-import { assessBand } from '../exposure/band.js';
+import { assessBand, type BandAssessment } from '../exposure/band.js';
 import { readContext, type ContextState } from '../calibration/exposure/controller.js';
 import {
   contractDigest,
@@ -83,6 +83,7 @@ import {
 import { buildRetryPrompt, checkCoherence, sameTarget, type CoherenceViolation } from './coherence.js';
 import { buildIntentAllocation, restateIntentReference } from './intentReference.js';
 import { resolveEffectiveTarget } from './effectiveTarget.js';
+import type { CycleProvenance } from './provenance.js';
 import {
   loadReferenceAllocations,
   recordGuardEvent,
@@ -138,6 +139,14 @@ export interface DecideResult {
   movements: Movement[];
   /** The real testnet execution outcome (null on a non-decided / unpersisted cycle). */
   execution: ExecutionSummary | null;
+  /**
+   * THE FACTS BEHIND EACH MOVEMENT — what the model emitted, what it was judged against,
+   * its own plan, what the band and the gate did — so the activity notification can say
+   * WHO moved each line instead of printing the model's summary under orders it never
+   * asked for. Gathered on the decided path from values already in hand: no read, no
+   * write, no effect on the orders. Null on every other path. See `provenance.ts`.
+   */
+  provenance: CycleProvenance | null;
   /**
    * THE TYPED CAUSE OF AN LLM CALL FAILURE, when that is what ended the cycle.
    *
@@ -1833,6 +1842,8 @@ export async function decide(): Promise<DecideResult> {
    * which is every cycle today, and every cycle of this deployment.
    */
   let bandCorrection: CorrectionOutcome | null = null;
+  /** The assessment the correction ran on — kept for the provenance's band summary. */
+  let bandAssessment: BandAssessment | null = null;
   let correctedAllocation = clamp.applied;
   let correctedMovements = proposedMovements;
   // THE CONTEXT, read through production's own function. A regime it cannot classify THROWS
@@ -1863,6 +1874,7 @@ export async function decide(): Promise<DecideResult> {
       movementFloorQuote: movementFloor(portfolio.equity, config.execution.minMovementPercent).toNumber(),
       stoppedWeightSurvives: TRANSITION_MODE === 'observe',
     });
+    bandAssessment = assessment;
     bandCorrection = correctToBand({
       assessment,
       clampedAllocation: clamp.applied,
@@ -2175,6 +2187,56 @@ export async function decide(): Promise<DecideResult> {
   // booking). With the guard switched off, this is the only path those refusals have.
   await flushGuardEvents(id);
 
+  /**
+   * THE PROVENANCE, assembled last and from nothing new. Every field is a value this cycle
+   * already computed for its own purposes — the raw target the guard judged, the references
+   * it judged it against, the model's own plan (`proposedMovements`, before the band and the
+   * gate), the correction's per-line facts, the stop exits the code generated, the gate's
+   * verdict. Copying them into one structure is what lets the notification attribute each
+   * booked movement to the layer that caused it, and lets a replay rebuild the same structure
+   * from the journals to print the exact message a past cycle would have sent.
+   */
+  const provenance: CycleProvenance = {
+    reserveAsset: reserveStable,
+    target: v.targetAllocation,
+    clamped: clamp.applied,
+    clampReason: clamp.reason,
+    intentReference,
+    appliedReference: retainedApplied,
+    modelLegs: proposedMovements.map((m) => ({ asset: m.asset, side: m.side, notional: m.notional.toNumber() })),
+    band:
+      bandCorrection != null && bandAssessment != null
+        ? {
+            direction: bandCorrection.direction,
+            label: bandCorrection.label,
+            boundPercent: bandAssessment.requiredExposurePercent,
+            targetExposurePercent: bandAssessment.targetExposurePercent,
+            correctedExposurePercent: bandCorrection.correctedExposurePercent,
+            unrealisablePoints: bandCorrection.unrealisablePoints,
+            consolidated: bandCorrection.consolidated,
+            lines: bandCorrection.lines.map((line) => ({
+              asset: line.asset,
+              correctionPoints: line.correctionPoints,
+              origin: line.origin,
+              cause: line.cause,
+              baseWeightPercent: line.baseWeightPercent,
+              correctedWeightPercent: line.correctedWeightPercent,
+            })),
+          }
+        : null,
+    stopExits: stopExits.map((m) => ({
+      asset: m.asset,
+      notional: m.notional.toNumber(),
+      drawdownFromPeakPercent: verdictsByAsset.get(m.asset)?.drawdownFromPeakPercent ?? null,
+      thresholdPercent: verdictsByAsset.get(m.asset)?.stopThresholdPercent ?? config.transition.peakStopPercent,
+    })),
+    gate: {
+      refused: gateOutcome.refused,
+      reason: gateOutcome.reason,
+      droppedLegs: gateOutcome.droppedLegs.map((m) => ({ asset: m.asset, side: m.side, notional: m.notional.toNumber() })),
+    },
+  };
+
   return {
     status: 'decided',
     persisted,
@@ -2186,6 +2248,7 @@ export async function decide(): Promise<DecideResult> {
     clamp,
     movements,
     execution,
+    provenance,
     // A decided cycle had no LLM call failure by construction — it has a model response.
     llmFailure: null,
   };
@@ -2216,6 +2279,7 @@ function emptyResult(
     clamp: null,
     movements: [],
     execution: null,
+    provenance: null,
     llmFailure,
   };
 }

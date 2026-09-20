@@ -73,3 +73,8 @@ out/exposure-band-witnesses/
 # regenerable at any time with `npm run replay:guard-band-incident`; the run prints its
 # SHA-256 so a regenerated copy can be checked against the one quoted in the PR.
 out/guard-band-incident/
+
+# Activity-attribution replay artefacts — never committed: the rebuilt provenance of real
+# cycles (targets, references, book) and the exact notifications, regenerable from the same
+# journals at any time.
+out/activity-attribution/

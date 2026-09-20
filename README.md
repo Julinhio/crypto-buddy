@@ -443,6 +443,47 @@ plus the recovery that closes the second one:
   between the first and last error. Both numbers degrade to an explicit
   *indisponible* / *inconnu* rather than to a zero.
 
+**Activity notification (Telegram) — who moved each line.** On every wake-up that
+actually booked an order, one message: the movements from the **ledger** (side = sign of
+the base delta, dollars = |quote delta| — never `action_type`), the resulting allocation
+and total from the post-trade book, and nothing at all on a hold. Since PR 2 of the
+guard/band incident (20/09/2026) **each movement carries the origin the cycle's facts
+prove**, because the model is not the only layer that moves the book: the exposure band
+lifted 2112 from 33.75% to 45% under a summary saying *aucune action*, the peak stop sold
+$142 of XRP on 2051 under *maintien de toutes les positions*, and 2139 was the model's
+ETH trim plus two band buys under a text about ETH. The orders were right; the message
+lied by juxtaposition.
+
+The frontier (`src/decision/provenance.ts`): a movement is **the model's** when its
+intention on that line **changed** against its last recorded intention — the guard's own
+frontier and epsilon — *and* its own plan (the clamped target against the book, before
+the band and the gate) trades the line the same way. Everything else is the chain's, each
+layer named by the fact that proves it: a **stop** (the code's synthesized exit, always
+the operational cause first, and it says when it replaced a standing intention); the
+**band** (this cycle's correction changed the line); the band **moving its correction**
+(the line is unchanged and untouched this cycle, but the chain's last applied target sat
+*above* the last intention on it — only the band ever lifts a line above the intention —
+and the band no longer holds it there: 2141's XRP sale, `origin = modele` in the
+journal and still not a decision of the model's); the band **against** the model (its
+correction moved the line the other way); a **return** toward the target after the chain
+had left the line below it (clamp or downward correction, not separable — named as "the
+chain"); **drift** (applied = intention, the book moved by prices past the floor); and
+**not established**, said on the line rather than replaced by the most plausible layer.
+A model-decided movement the band or the risk clamp resized keeps its one origin and
+names the layer — *"son plan initial aurait vendu ~66$ d'ETH"* — never a merged
+"mixed". Without an intention reference only deterministic layers and an unopposed own
+plan are attributed; the guard's permissive "everything is the model's" is deliberately
+not taken over by a message. The model's `notification_summary` stays visible as
+*Raisonnement du modèle*, never again as a global "why".
+
+The facts are gathered by `decide()` from values it already holds on the decided path
+(`DecideResult.provenance` — no new read, nothing persisted, no order changed), and the
+attribution + rendering are pure. `npm run replay:activity-attribution` rebuilds the same
+structure from the journals for 2051, 2112, 2139, 2141 and the controls (a fully
+model-decided cycle, a hold with nothing booked, the band shrinking its own lift, mixed
+cycles) and prints the exact message each would have sent, through the production
+functions — read-only, no Telegram, no cycle.
+
 **Anti-spam (debounce).** Identical for both counter triggers, and **independent**
 per trigger (an overheating alert never masks a degraded one): alert **once** on the
 crossing, stay silent while the counter remains above, **re-arm** when it drops back.
@@ -660,7 +701,9 @@ after, with `npm run replay:policy-change` (offline); its recovery behaviour on 
 single cycle with `npm run replay:retry-1000` (this one makes a real LLM call); and the
 guard/band incident of 18-19/09 replayed in situ — both attempts of every failed cycle,
 the negative controls, the relaunches the whole pilot paid — with
-`npm run replay:guard-band-incident` (read-only).
+`npm run replay:guard-band-incident` (read-only); and the activity notification each
+past cycle would have sent, with its per-movement attribution, with
+`npm run replay:activity-attribution` (read-only).
 
 The set of balance-tracked assets — and the AI's allocation universe — are both
 derived from `tradablePairs` via `tradableAssets()`; there's no separate asset
@@ -694,6 +737,8 @@ src/
 │   └── heartbeat.ts         # one beat: liveness → atomic claim → cycle → reschedule → release → alerts
 ├── alerting/
 │   ├── messages.ts         # PURE alert payloads + Telegram text (trigger, value, time, last error, recovery)
+│   ├── activity.ts         # PURE activity notification: ledger movements, WHO moved each line, résultante
+│   ├── allocation.ts       # shared allocation ordering/formatting for the messages
 │   ├── telegram.ts         # best-effort Telegram sender (never throws, hard timeout)
 │   ├── healthchecks.ts     # best-effort dead-man's-switch ping (never throws, hard timeout)
 │   ├── sendTestMessage.ts  # `notify:test` — prove the Telegram bot end-to-end
@@ -715,6 +760,7 @@ src/
 └── decision/
     ├── schema.ts            # structured-output schema + business validation
     ├── coherence.ts         # the coherence guard: intention vs intention, executability vs the book
+    ├── provenance.ts        # the facts behind each movement + the attribution frontier (model / band / stop / …)
     ├── intentReference.ts   # the ONE pipeline that restates a stored intention into this cycle
     ├── effectiveTarget.ts   # which allocation column answers which question
     ├── prompt.ts            # frozen mandate v2 (caps + portfolio) + per-run user prompt
