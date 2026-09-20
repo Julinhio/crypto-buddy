@@ -49,6 +49,7 @@ const base = (over: Partial<CycleProvenance>): CycleProvenance => ({
   clampReason: null,
   intentReference: null,
   appliedReference: null,
+  appliedReferenceDivergence: null,
   modelLegs: [],
   band: null,
   stopExits: [],
@@ -272,6 +273,31 @@ console.log('\nThe frontier\'s other sides — synthetic:');
   ok('the layer is named as "the chain", because the references cannot separate the clamp from a downward correction', n.attribution.movements[0]!.origin === 'retour_vers_cible' && n.attribution.movements[0]!.note.includes('la chaîne avait laissé BTC à 20 %'));
 }
 {
+  // A GATE REFUSAL also leaves the applied target ABOVE the intention: the model lowered
+  // XRP 15 → 13, the gate refused the vector, the row kept applied 15 with intent 13 and a
+  // divergence cause. Next cycle the model repeats 13 and the line is actionable: the sale
+  // is the line rejoining the intention after the refusal — NOT the band moving anything.
+  const target = { XRP: 13, USDT: 87 };
+  const refused = base({
+    target,
+    clamped: target,
+    intentReference: { ...target },
+    appliedReference: { XRP: 15, USDT: 85 },
+    appliedReferenceDivergence: 'XRP frozen — 1 strategic leg(s) dropped, applied_allocation holds the previous vector',
+    modelLegs: [{ asset: 'XRP', side: 'sell', notional: 25 }],
+  });
+  const n = notification(refused, [{ asset: 'XRP', side: 'sell', usd: 25 }]);
+  ok('an applied target above the intention is NOT read as a band lift when the reference row carries a gate divergence', n.attribution.movements[0]!.origin === 'retour_vers_cible');
+  ok('and the note names the gate', n.attribution.movements[0]!.note.includes('la porte de transition avait refusé la révision précédente et laissé XRP à 15 %'));
+  // The same references WITHOUT a divergence cause: only the band lifts a line above the
+  // intention, so the lift is the band's.
+  const lifted = notification(base({ ...refused, appliedReferenceDivergence: null }), [{ asset: 'XRP', side: 'sell', usd: 25 }]);
+  ok('without a divergence cause the same lift is the band\'s', lifted.attribution.movements[0]!.origin === 'bande_deplacement');
+  // And the band shrinking "its" lift is not claimed either when the gate is the writer.
+  const shrunk = notification(base({ ...refused, band: floorBand({ targetExposurePercent: 13, boundPercent: 14, lines: [{ asset: 'XRP', correctionPoints: 1, origin: 'correction_de_bande', cause: 'aucune', baseWeightPercent: 13, correctedWeightPercent: 14 }] }) }), [{ asset: 'XRP', side: 'sell', usd: 12 }]);
+  ok('a band lift on a gate-displaced line that still sells is plain "bande", not a shrink of a lift the band never made', shrunk.attribution.movements[0]!.origin === 'bande');
+}
+{
   // The risk clamp resized a model decision.
   const prov = base({
     target: { BTC: 25, USDT: 75 },
@@ -337,6 +363,11 @@ console.log('\nWithout an intention reference — only what the chain can prove:
   ok('a stop is still the stop\'s', by.get('XRP')!.origin === 'stop');
   ok('a band-corrected line is still the band\'s', by.get('ETH')!.origin === 'bande');
   ok('a movement the model\'s own plan produces, unopposed by any layer, is the model\'s — with the reference absence named', by.get('BTC')!.origin === 'modele' && by.get('BTC')!.note.includes('première intention enregistrée'));
+  // A first plan the RISK CLAMP resized still books the same-side order: the clamp only
+  // resizes, never flips a side, so the origin stays the model's and the cap is named.
+  const clampedFirst = notification(base({ target: { BTC: 25, USDT: 75 }, clamped: { BTC: 20, USDT: 80 }, clampReason: 'BTC capped', modelLegs: [{ asset: 'BTC', side: 'buy', notional: 200 }] }), [{ asset: 'BTC', side: 'buy', usd: 200 }]);
+  ok('a clamped first plan keeps the model\'s origin, resized by the risk cap', clampedFirst.attribution.movements[0]!.origin === 'modele' && clampedFirst.attribution.movements[0]!.adjustments.some((a) => a.layer === 'plafond_de_risque'));
+  ok('rendered as such', formatActivity(clampedFirst).includes('Achat ~200$ de BTC — modèle, borné par le plafond de risque'));
   ok('the model line says the reference is absent', formatActivity(n).includes('Modèle : aucune intention de référence'));
   // The same BTC buy with an applied reference but no intention: the chain may have
   // displaced the line and nothing can tell — not established.

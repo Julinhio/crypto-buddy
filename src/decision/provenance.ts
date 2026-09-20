@@ -25,15 +25,20 @@
  *   - the BAND: this cycle's correction changed the line's weight (`correctionPoints ≠ 0`);
  *   - the band MOVING its correction: the line is unchanged in intention and untouched by
  *     this cycle's correction, but the chain's last applied target sat ABOVE the model's
- *     last intention on it — only the band ever lifts a line above the intention — and this
- *     cycle the band no longer holds it there, so the line returns to the model's target.
- *     That is 2141 XRP: `origin = modele` in the journal, `correction_points = 0`, and yet
- *     not a decision of the model's, which had not changed its mind about XRP since 2139;
+ *     last intention on it, and this cycle the band no longer holds it there, so the line
+ *     returns to the model's target. Two writers leave an applied target above the
+ *     intention: the band, and a GATE REFUSAL that kept the previous vector while the
+ *     intention went down — told apart by the row's `applied_divergence_cause`, which only
+ *     a refusal sets (the clamp only lowers a line, a stop flattens both columns). With no
+ *     divergence cause on the reference row the lift is the band's. That is 2141 XRP:
+ *     `origin = modele` in the journal, `correction_points = 0`, and yet not a decision of
+ *     the model's, which had not changed its mind about XRP since 2139;
  *   - the band AGAINST the model: the model changed its intention on the line and the
  *     correction moved it the other way (or beyond a change too small to trade);
- *   - a RETURN to the target: the chain had left the line BELOW the intention (the risk
- *     clamp or a downward correction — the two are not separable from the references
- *     alone, so the layer is named as "the chain") and the line climbs back toward it;
+ *   - a RETURN to the target: the chain had left the line away from the intention — below
+ *     it (the risk clamp or a downward correction, not separable from the references alone,
+ *     so the layer is named as "the chain"), or above it because the transition gate refused
+ *     the revision that lowered it (named as the gate) — and the line comes back toward it;
  *   - DRIFT: the line's applied target WAS the intention, nothing changed, and the book
  *     moved by prices past the floor. The standing target reasserts itself. Not a decision;
  *   - NOT ESTABLISHED: anything the facts above cannot explain. Said explicitly, never
@@ -113,6 +118,13 @@ export interface CycleProvenance {
   intentReference: Record<string, number> | null;
   /** The last effective target the chain retained, restated the same way. Null: none. */
   appliedReference: Record<string, number> | null;
+  /**
+   * Why the reference row's applied target differs from its intention when the TRANSITION
+   * GATE caused it (`applied_divergence_cause`); null when it did not refuse that cycle.
+   * The one fact that separates "the band lifted this line" from "a refusal kept the old
+   * vector while the model lowered its intention".
+   */
+  appliedReferenceDivergence: string | null;
   /** The model's OWN plan: the clamped target against the book, before band and gate. */
   modelLegs: ProvenanceLeg[];
   /** This cycle's band correction, when the pilot corrected. Null otherwise. */
@@ -213,7 +225,8 @@ export function attributeCycle(
     };
   }
 
-  const { reserveAsset, target, clamped, intentReference, appliedReference, modelLegs, band, stopExits, gate } = provenance;
+  const { reserveAsset, target, clamped, intentReference, appliedReference, appliedReferenceDivergence, modelLegs, band, stopExits, gate } = provenance;
+  const gateDisplaced = appliedReferenceDivergence != null;
   const stopped = new Map(stopExits.map((s) => [s.asset, s]));
   const bandLine = new Map((band?.lines ?? []).map((l) => [l.asset, l]));
   const modelLeg = new Map(modelLegs.map((l) => [l.asset, l]));
@@ -286,12 +299,15 @@ export function attributeCycle(
       if (bandTouched) {
         return { ...base, origin: 'bande', intentChange: null, adjustments: [], note: bandNote(line!, band!) };
       }
-      if (ownSameSide && !clampTouched && appliedReference == null) {
+      // Its own plan produces this very movement and no chain reference exists that could
+      // have displaced the line: the model's. The risk clamp only RESIZES a line — it never
+      // flips a side — so a clamped first plan keeps its origin and names the cap.
+      if (ownSameSide && appliedReference == null) {
         return {
           ...base,
           origin: 'modele',
           intentChange: { fromPercent: null, toPercent: target[asset] ?? 0 },
-          adjustments: [],
+          adjustments: clampTouched ? [{ layer: 'plafond_de_risque', fromPercent: target[asset] ?? 0, toPercent: clamped[asset] ?? 0 }] : [],
           note: 'première intention enregistrée sur cette ligne — le plan initial du modèle produit ce mouvement',
         };
       }
@@ -326,7 +342,9 @@ export function attributeCycle(
     const intent = intentReference![asset];
     const applied = appliedReference?.[asset];
     const displaced = intent != null && applied != null && changed(applied, intent);
-    const liftedBefore = displaced && applied! > intent!;
+    // Lifted by the BAND, provably: above the intention, and not because a gate refusal kept
+    // the previous vector while the intention went down (see `appliedReferenceDivergence`).
+    const liftedBefore = displaced && applied! > intent! && !gateDisplaced;
     if (bandTouched) {
       // The band's points and the trade point the same way: the band moved the line.
       if (Math.sign(bandPoints) === sideSign) {
@@ -368,7 +386,9 @@ export function attributeCycle(
         origin: 'retour_vers_cible',
         intentChange: null,
         adjustments: [],
-        note: `la chaîne avait laissé ${asset} à ${fmtPct(applied!)} % sous la cible du modèle (${fmtPct(intent!)} %) ; la ligne y revient`,
+        note: gateDisplaced
+          ? `la porte de transition avait refusé la révision précédente et laissé ${asset} à ${fmtPct(applied!)} % ; la ligne rejoint l'intention du modèle (${fmtPct(intent!)} %)`
+          : `la chaîne avait laissé ${asset} à ${fmtPct(applied!)} % sous la cible du modèle (${fmtPct(intent!)} %) ; la ligne y revient`,
       };
     }
     if (!displaced && ownSameSide) {

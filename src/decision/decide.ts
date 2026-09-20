@@ -2203,6 +2203,7 @@ export async function decide(): Promise<DecideResult> {
     clampReason: clamp.reason,
     intentReference,
     appliedReference: retainedApplied,
+    appliedReferenceDivergence: referenceRead.appliedDivergenceCause,
     modelLegs: proposedMovements.map((m) => ({ asset: m.asset, side: m.side, notional: m.notional.toNumber() })),
     band:
       bandCorrection != null && bandAssessment != null

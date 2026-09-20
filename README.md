@@ -462,12 +462,15 @@ layer named by the fact that proves it: a **stop** (the code's synthesized exit,
 the operational cause first, and it says when it replaced a standing intention); the
 **band** (this cycle's correction changed the line); the band **moving its correction**
 (the line is unchanged and untouched this cycle, but the chain's last applied target sat
-*above* the last intention on it — only the band ever lifts a line above the intention —
-and the band no longer holds it there: 2141's XRP sale, `origin = modele` in the
-journal and still not a decision of the model's); the band **against** the model (its
+*above* the last intention on it and the band no longer holds it there: 2141's XRP sale,
+`origin = modele` in the journal and still not a decision of the model's — two writers
+leave an applied target above the intention, the band and a gate refusal that kept the
+previous vector while the intention went down, and the reference row's
+`applied_divergence_cause` tells them apart); the band **against** the model (its
 correction moved the line the other way); a **return** toward the target after the chain
-had left the line below it (clamp or downward correction, not separable — named as "the
-chain"); **drift** (applied = intention, the book moved by prices past the floor); and
+had left the line away from it (below: clamp or downward correction, not separable —
+named as "the chain"; above: a gate refusal, named as the gate); **drift** (applied =
+intention, the book moved by prices past the floor); and
 **not established**, said on the line rather than replaced by the most plausible layer.
 A model-decided movement the band or the risk clamp resized keeps its one origin and
 names the layer — *"son plan initial aurait vendu ~66$ d'ETH"* — never a merged

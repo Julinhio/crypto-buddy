@@ -61,6 +61,14 @@ export interface ReferenceAllocationsRead {
   intent: Record<string, number> | null;
   /** The last accepted EFFECTIVE target, or null when no decision has ever been recorded. */
   applied: Record<string, number> | null;
+  /**
+   * WHY `applied` differs from `intent` on that row, when the TRANSITION GATE is the reason —
+   * `applied_divergence_cause`, already selected above for the intention resolver. Null when
+   * the gate did not refuse that cycle. Read by the movement attribution and by nothing else:
+   * an applied target sitting above the intention is the band's doing OR a refusal that kept
+   * the previous vector while the intention went down, and only this column tells them apart.
+   */
+  appliedDivergenceCause: string | null;
 }
 
 export async function loadReferenceAllocations(
@@ -76,7 +84,7 @@ export async function loadReferenceAllocations(
 ): Promise<ReferenceAllocationsRead> {
   // No persistence configured is a local/dev run, not a failure: there is no history to
   // read, which is honestly "no reference yet".
-  if (!supabase) return { ok: true, intent: null, applied: null };
+  if (!supabase) return { ok: true, intent: null, applied: null, appliedDivergenceCause: null };
 
   try {
     const { data, error } = await supabase
@@ -94,7 +102,7 @@ export async function loadReferenceAllocations(
     if (error) throw new Error(error.message);
 
     const row = (data ?? [])[0] as TargetColumns | undefined;
-    if (!row) return { ok: true, intent: null, applied: null }; // genuinely the first decision
+    if (!row) return { ok: true, intent: null, applied: null, appliedDivergenceCause: null }; // genuinely the first decision
 
     const effective = resolveEffectiveTarget(row);
     const intent = resolveIntentAllocation(row, reserveAsset);
@@ -110,7 +118,7 @@ export async function loadReferenceAllocations(
           `applied=${JSON.stringify(row.applied_allocation)}) — ` +
           'the coherence guard has no reference to compare against.',
       );
-      return { ok: false, intent: null, applied: null };
+      return { ok: false, intent: null, applied: null, appliedDivergenceCause: null };
     }
 
     // Both fallbacks are contracts for older rows, and neither should be a live path for
@@ -141,11 +149,17 @@ export async function loadReferenceAllocations(
           'applied target. A binary without this code wrote that row; check for a rollback.',
       );
     }
-    return { ok: true, intent: intent.allocation, applied: effective.allocation };
+    return {
+      ok: true,
+      intent: intent.allocation,
+      applied: effective.allocation,
+      appliedDivergenceCause:
+        typeof row.applied_divergence_cause === 'string' && row.applied_divergence_cause !== '' ? row.applied_divergence_cause : null,
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[CRITICAL] could not read the reference allocations (${msg}).`);
-    return { ok: false, intent: null, applied: null };
+    return { ok: false, intent: null, applied: null, appliedDivergenceCause: null };
   }
 }
 
