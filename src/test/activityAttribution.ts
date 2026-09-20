@@ -3,6 +3,7 @@ import { attributeCycle, type CycleProvenance, type BandFact } from '../decision
 import { formatActivity, prepareActivityNotification, type ActivityNotification } from '../alerting/activity.js';
 import type { DecideResult } from '../decision/decide.js';
 import { Decimal } from '../money.js';
+import { stopReconstruction, transitionModeOnRecord } from '../replay/attributionRecord.js';
 
 /**
  * WHO MOVED EACH LINE — the attribution the activity notification carries since PR 2 of the
@@ -411,6 +412,26 @@ console.log('\nWithout an intention reference — only what the chain can prove:
   const orphan = notification(base({ target, clamped: target, modelLegs: [] }), [{ asset: 'BTC', side: 'buy', usd: 100 }]);
   ok('a movement nothing explains is `non_etablie`', orphan.attribution.movements[0]!.origin === 'non_etablie');
   ok('and the message says so on the line', formatActivity(orphan).includes('Achat ~100$ de BTC — origine non établie') && formatActivity(orphan).includes('BTC : aucune intention de référence pour juger la ligne.'));
+}
+
+console.log('\nThe replay: the transition mode is on record only while the pilot vouches for it:');
+{
+  const pilot = { activatedDecisionId: 1839, transitionMode: 'enforce' as const };
+  const active = { mode: 'application', pilot_hold: null };
+  ok('a cycle after activation whose observation proves the pilot active under its contract carries the frozen mode', transitionModeOnRecord(pilot, 2051, active) === 'enforce');
+  ok('a cycle BEFORE activation carries no mode', transitionModeOnRecord(pilot, 1764, active) === null);
+  ok('an ABSENT observation is not a null hold: no mode', transitionModeOnRecord(pilot, 2051, null) === null);
+  ok('a hold naming a diverged contract (the mode changed) ends the record', transitionModeOnRecord(pilot, 2200, { mode: 'application', pilot_hold: 'contrat_divergent' }) === null);
+  ok('an interrupted or stopped pilot ends the record too', transitionModeOnRecord(pilot, 2200, { mode: 'application', pilot_hold: 'pilote_interrompu' }) === null && transitionModeOnRecord(pilot, 2200, { mode: 'application', pilot_hold: 'pilote_arrete_drawdown' }) === null);
+  ok('an observation-mode row (mode_inactif) is not the pilot vouching', transitionModeOnRecord(pilot, 2051, { mode: 'observation', pilot_hold: 'mode_inactif' }) === null);
+  ok('a pilot without a frozen mode, or never activated, vouches for nothing', transitionModeOnRecord({ activatedDecisionId: 1839, transitionMode: null }, 2051, active) === null && transitionModeOnRecord({ activatedDecisionId: null, transitionMode: 'enforce' }, 2051, active) === null);
+
+  const verdicts = [{ asset: 'XRP' }];
+  const declined = stopReconstruction(null, verdicts);
+  ok('a stop_exit verdict with an unknown mode DECLINES the cycle rather than guessing', 'declined' in declined && declined.declined.includes('stop attribution declined rather than guessed'));
+  ok('the same verdict under a recorded enforce is the code\'s exit', 'exits' in stopReconstruction('enforce', verdicts) && (stopReconstruction('enforce', verdicts) as { exits: readonly { asset: string }[] }).exits.length === 1);
+  ok('and under a recorded observe it generated nothing', 'exits' in stopReconstruction('observe', verdicts) && (stopReconstruction('observe', verdicts) as { exits: readonly { asset: string }[] }).exits.length === 0);
+  ok('no verdict: nothing to reconstruct and nothing to decline, whatever the mode', 'exits' in stopReconstruction(null, []) && 'exits' in stopReconstruction('enforce', []));
 }
 
 console.log('\nThe notification contract is unchanged where it must be:');

@@ -14,6 +14,7 @@ import type { LedgerEntry } from '../persistence/executions.js';
 import type { VirtualPortfolio } from '../portfolio/derive.js';
 import { writeArtefact } from '../provenance/artefacts.js';
 import { bookOf, pricesOf, universeOf, journaledClampOf, type StoredContext } from './storedCycle.js';
+import { stopReconstruction, transitionModeOnRecord, type PilotRecord } from './attributionRecord.js';
 
 /**
  * WHO MOVED EACH LINE — the activity notification replayed on past cycles.
@@ -40,10 +41,12 @@ import { bookOf, pricesOf, universeOf, journaledClampOf, type StoredContext } fr
  *     and the per-line journal (points, origin, base, corrected) — only when the row says the
  *     correction was APPLIED (`mode = application`, no `pilot_hold`);
  *   - the stop exits: `transition_observations` with `gate = stop_exit`, the held quantity
- *     from the book — ONLY on cycles whose transition mode is on record as `enforce`, which
- *     the pilot's identity freezes from its activation cycle on (migration 0037). Before
- *     that the mode was not journaled and a `stop_exit` verdict may have been observational,
- *     so such a cycle is not replayed rather than attributed on a guess;
+ *     from the book — ONLY on cycles whose transition mode is on record as `enforce`: the
+ *     pilot's identity freezes the mode at activation (migration 0037), and THIS cycle's band
+ *     observation must prove the pilot was still active under that contract (`pilot_hold`
+ *     null — an absent observation is not a null hold). Otherwise the mode is unknown, and a
+ *     cycle carrying a `stop_exit` verdict is declined rather than attributed on a guess. See
+ *     `attributionRecord.ts`;
  *   - the gate's dropped legs, on a refused cycle: the vector the gate JUDGED — the band's
  *     corrected plan (`planned_side` / `planned_notional_quote`) when the correction was
  *     applied, the model's own legs otherwise — minus the deterministic exits the gate
@@ -190,10 +193,7 @@ async function loadBooked(supabase: Supabase, id: number): Promise<IntentRead[]>
 }
 
 /** The pilot's identity: from which cycle the transition mode is on record, and which. */
-interface PilotRead {
-  activatedDecisionId: number | null;
-  transitionMode: 'observe' | 'enforce' | null;
-}
+type PilotRead = PilotRecord;
 
 async function loadPilot(supabase: Supabase): Promise<PilotRead> {
   const { data, error } = await supabase.from('exposure_pilot').select('activated_decision_id, transition_mode').limit(1).maybeSingle();
@@ -216,7 +216,7 @@ interface Rebuilt {
   createdAt: string;
   provenance: CycleProvenance;
   /** Where the clamped target and the model's own plan came from, and the gate's mode on record. */
-  sources: { clamped: 'journal' | 'recomputed'; modelPlan: 'recomputed'; transitionMode: 'enforce' | 'observe' };
+  sources: { clamped: 'journal' | 'recomputed'; modelPlan: 'recomputed'; transitionMode: 'enforce' | 'observe' | 'unknown' };
   bookedLedger: LedgerEntry[];
   portfolioAfter: VirtualPortfolio;
   summary: string;
@@ -317,18 +317,18 @@ async function rebuild(supabase: Supabase, id: number, pilot: PilotRead): Promis
       }
     : null;
 
-  // THE TRANSITION MODE ON RECORD. The pilot's identity freezes it from the activation cycle
-  // on; before that nothing journals it, and a `stop_exit` verdict under `observe` generated
-  // no order. A cycle whose mode cannot be established is declined when a stop verdict is
-  // present — a stop attributed on a guess would be the very defect this PR removes.
-  const onRecord = pilot.activatedDecisionId != null && pilot.transitionMode != null && row.id >= pilot.activatedDecisionId;
+  // THE TRANSITION MODE ON RECORD — the pilot's frozen mode, vouched for by THIS cycle's
+  // observation (the pilot active under its contract: `pilot_hold` null). Unknown otherwise,
+  // and a cycle with a `stop_exit` verdict and an unknown mode is declined, never guessed.
+  // See `attributionRecord.ts`.
+  const modeOnRecord = transitionModeOnRecord(pilot, row.id, observation);
   const stopVerdicts = transition.filter((t) => t.gate === 'stop_exit');
-  if (!onRecord && stopVerdicts.length > 0) {
-    return { declined: `a stop_exit verdict on ${stopVerdicts.map((t) => t.asset).join(', ')} but the transition mode of this cycle is not on record (before the pilot's activation) — stop attribution declined` };
-  }
-  const transitionMode: 'enforce' | 'observe' = onRecord ? pilot.transitionMode! : 'observe';
+  const stops = stopReconstruction(modeOnRecord, stopVerdicts);
+  if ('declined' in stops) return { declined: stops.declined };
+  const transitionMode: 'enforce' | 'observe' | 'unknown' = modeOnRecord ?? 'unknown';
   // The stop exits the code generated: a `stop_exit` gate on a held line, under `enforce`.
-  const stopExits = (transitionMode === 'enforce' ? stopVerdicts : [])
+  const stopExits = transition
+    .filter((t) => stops.exits.some((e) => e.asset === t.asset))
     .flatMap((t) => {
       const held = book.positions.find((p) => p.asset === t.asset);
       if (held == null || !held.qty.gt(0)) return [];
