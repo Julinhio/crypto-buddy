@@ -30,7 +30,10 @@
  *     intention: the band, and a GATE REFUSAL that kept the previous vector while the
  *     intention went down — told apart by the row's `applied_divergence_cause`, which only
  *     a refusal sets (the clamp only lowers a line, a stop flattens both columns). With no
- *     divergence cause on the reference row the lift is the band's. That is 2141 XRP:
+ *     divergence cause on the reference row the lift is the band's; WITH one, nothing here
+ *     can say which lines the refusal itself displaced and which the kept vector already
+ *     carried from an earlier correction, so no line of that row is claimed for the band —
+ *     it is "the chain", with the refusal named as the fact on record. That is 2141 XRP:
  *     `origin = modele` in the journal, `correction_points = 0`, and yet not a decision of
  *     the model's, which had not changed its mind about XRP since 2139;
  *   - the band AGAINST the model: the model changed its intention on the line and the
@@ -244,12 +247,15 @@ export function attributeCycle(
     return { changed: changed(to, from), from };
   };
 
+  // EVERY line the model revised, stopped ones included: the stop owns the booked movement,
+  // but a model that itself took a stopped line to zero did revise it, and a summary that
+  // dropped that revision would read "maintien" under a stop note saying the model was
+  // exiting the line on its own. The raw target is compared, not the stop-flattened intent.
   const revisions: IntentRevision[] = [];
   const bookedAssets = new Set(booked.map((m) => m.asset));
   if (intentReference != null) {
     for (const asset of new Set([...Object.keys(target), ...Object.keys(intentReference)])) {
       if (asset === reserveAsset) continue; // the cash side follows the lines; it is not a line
-      if (stopped.has(asset)) continue; // the stop owns the line; the intent is forced flat on it
       const change = intentChangeOf(asset);
       if (change?.changed) {
         revisions.push({ asset, fromPercent: change.from, toPercent: target[asset] ?? 0, traded: bookedAssets.has(asset) });
@@ -386,8 +392,11 @@ export function attributeCycle(
         origin: 'retour_vers_cible',
         intentChange: null,
         adjustments: [],
+        // With a refusal on the reference row the note states the refusal and the line's
+        // position, and nothing about WHICH layer put the line there: the refused legs of
+        // that cycle are not in hand, and the kept vector may carry an older band lift.
         note: gateDisplaced
-          ? `la porte de transition avait refusé la révision précédente et laissé ${asset} à ${fmtPct(applied!)} % ; la ligne rejoint l'intention du modèle (${fmtPct(intent!)} %)`
+          ? `la porte de transition avait refusé le vecteur précédent ; ${asset} était resté à ${fmtPct(applied!)} % ${applied! > intent! ? 'au-dessus de' : 'sous'} l'intention du modèle (${fmtPct(intent!)} %) et y revient`
           : `la chaîne avait laissé ${asset} à ${fmtPct(applied!)} % sous la cible du modèle (${fmtPct(intent!)} %) ; la ligne y revient`,
       };
     }

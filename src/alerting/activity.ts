@@ -169,6 +169,10 @@ function modelLine(n: ActivityNotification): string {
           text += ` (borné par le plafond de risque à ${pct(adj.toPercent)})`;
         }
       }
+    } else if (movedByAnother?.origin === 'stop') {
+      // The stop exited the line the model was revising: the exit is the code's, the
+      // revision stays the model's.
+      text += ' (ligne sortie par le stop)';
     } else if (movedByAnother) {
       // The line traded, but not on the model's account: its revision alone produced no
       // movement (a sub-floor change, or a weight the book already held).

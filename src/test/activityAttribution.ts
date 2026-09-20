@@ -95,6 +95,12 @@ console.log('\n2051 — the peak stop sells XRP under a hold:');
   ok('the stop line carries the drawdown and the threshold', text.includes("Stop de pic : sortie totale de XRP (12,8 % sous le pic pendant une transition, seuil 10 %) — remplace l'intention du modèle (XRP 13 %)."));
   ok('the model\'s text is labelled as its reasoning, and no global "Pourquoi" remains', text.includes('Raisonnement du modèle : Maintien de toutes') && !text.includes('Pourquoi'));
   ok('no band line: the band moved nothing', !text.includes('Bande :'));
+  // The model ITSELF took the stopped line to zero this cycle: the exit is still the
+  // stop's, and the revision is still listed — the summary must not read "maintien"
+  // under a stop note saying the model was exiting the line on its own.
+  const exiting = notification({ ...prov, target: { ...target, XRP: 0, USDT: 68.25 }, clamped: { ...target, XRP: 0, USDT: 68.25 } }, [{ asset: 'XRP', side: 'sell', usd: 141.95 }]);
+  ok('a stopped line the model also zeroed keeps the stop as origin and says the model was exiting itself', exiting.attribution.movements[0]!.origin === 'stop' && exiting.attribution.movements[0]!.note === 'le modèle sortait lui-même la ligne');
+  ok('and the revision is listed, marked as exited by the stop', exiting.attribution.revisions.length === 1 && formatActivity(exiting).includes('Modèle : révision XRP 13 → 0 % (ligne sortie par le stop).'));
   // The same stop, but its exit never booked (a venue filter) while another line did.
   const unbooked = notification({ ...prov, stopExits: prov.stopExits, band: null, modelLegs: [{ asset: 'BTC', side: 'sell', notional: 30 }], target: { ...target, BTC: 5 } }, [{ asset: 'BTC', side: 'sell', usd: 30 }]);
   ok('a stop exit the ledger does not carry is reported as NOT booked, never as an exit that happened', formatActivity(unbooked).includes("Stop de pic : sortie totale de XRP générée par le code (12,8 % sous le pic pendant une transition, seuil 10 %) — NON comptabilisée ce cycle, voir le journal d'exécution."));
@@ -288,7 +294,7 @@ console.log('\nThe frontier\'s other sides — synthetic:');
   });
   const n = notification(refused, [{ asset: 'XRP', side: 'sell', usd: 25 }]);
   ok('an applied target above the intention is NOT read as a band lift when the reference row carries a gate divergence', n.attribution.movements[0]!.origin === 'retour_vers_cible');
-  ok('and the note names the gate', n.attribution.movements[0]!.note.includes('la porte de transition avait refusé la révision précédente et laissé XRP à 15 %'));
+  ok('and the note states the refusal and the line\'s position, without claiming which layer put it there', n.attribution.movements[0]!.note === "la porte de transition avait refusé le vecteur précédent ; XRP était resté à 15 % au-dessus de l'intention du modèle (13 %) et y revient");
   // The same references WITHOUT a divergence cause: only the band lifts a line above the
   // intention, so the lift is the band's.
   const lifted = notification(base({ ...refused, appliedReferenceDivergence: null }), [{ asset: 'XRP', side: 'sell', usd: 25 }]);

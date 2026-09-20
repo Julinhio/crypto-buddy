@@ -40,7 +40,15 @@ import { bookOf, pricesOf, universeOf, journaledClampOf, type StoredContext } fr
  *     and the per-line journal (points, origin, base, corrected) — only when the row says the
  *     correction was APPLIED (`mode = application`, no `pilot_hold`);
  *   - the stop exits: `transition_observations` with `gate = stop_exit`, the held quantity
- *     from the book;
+ *     from the book — ONLY on cycles whose transition mode is on record as `enforce`, which
+ *     the pilot's identity freezes from its activation cycle on (migration 0037). Before
+ *     that the mode was not journaled and a `stop_exit` verdict may have been observational,
+ *     so such a cycle is not replayed rather than attributed on a guess;
+ *   - the gate's dropped legs, on a refused cycle: the vector the gate JUDGED — the band's
+ *     corrected plan (`planned_side` / `planned_notional_quote`) when the correction was
+ *     applied, the model's own legs otherwise — minus the deterministic exits the gate
+ *     keeps, exactly as `applyGate` does. Not `transition_observations.leg_*`, which
+ *     production journals from the PRE-band vector;
  *   - what booked: the executed intents of the ledger.
  *
  * Read-only: nothing is written to the database, nothing is sent to Telegram, no cycle runs.
@@ -77,6 +85,8 @@ interface DecisionRead {
 
 interface CorrectionRead {
   asset: string;
+  planned_side: 'buy' | 'sell' | null;
+  planned_notional_quote: string | number | null;
   clamped_weight_percent: string | number;
   base_weight_percent: string | number;
   correction_points: string | number;
@@ -140,7 +150,7 @@ async function loadPreviousDecided(supabase: Supabase, id: number): Promise<Deci
 async function loadCorrections(supabase: Supabase, id: number): Promise<CorrectionRead[]> {
   const { data, error } = await supabase
     .from('exposure_band_corrections')
-    .select('asset, clamped_weight_percent, base_weight_percent, correction_points, corrected_weight_percent, origin, cause')
+    .select('asset, planned_side, planned_notional_quote, clamped_weight_percent, base_weight_percent, correction_points, corrected_weight_percent, origin, cause')
     .eq('decision_id', id)
     .order('asset');
   if (error) throw new Error(`attribution replay: could not read the corrections of ${id} (${error.message}).`);
@@ -179,6 +189,22 @@ async function loadBooked(supabase: Supabase, id: number): Promise<IntentRead[]>
   return (data ?? []) as IntentRead[];
 }
 
+/** The pilot's identity: from which cycle the transition mode is on record, and which. */
+interface PilotRead {
+  activatedDecisionId: number | null;
+  transitionMode: 'observe' | 'enforce' | null;
+}
+
+async function loadPilot(supabase: Supabase): Promise<PilotRead> {
+  const { data, error } = await supabase.from('exposure_pilot').select('activated_decision_id, transition_mode').limit(1).maybeSingle();
+  if (error) throw new Error(`attribution replay: could not read the pilot's identity (${error.message}).`);
+  const row = data as { activated_decision_id: number | null; transition_mode: string | null } | null;
+  return {
+    activatedDecisionId: row?.activated_decision_id ?? null,
+    transitionMode: row?.transition_mode === 'observe' || row?.transition_mode === 'enforce' ? row.transition_mode : null,
+  };
+}
+
 const num = (v: string | number | null | undefined): number | null => {
   if (v == null) return null;
   const n = Number(v);
@@ -189,8 +215,8 @@ interface Rebuilt {
   id: number;
   createdAt: string;
   provenance: CycleProvenance;
-  /** Where the clamped target and the model's own plan came from. */
-  sources: { clamped: 'journal' | 'recomputed'; modelPlan: 'recomputed' };
+  /** Where the clamped target and the model's own plan came from, and the gate's mode on record. */
+  sources: { clamped: 'journal' | 'recomputed'; modelPlan: 'recomputed'; transitionMode: 'enforce' | 'observe' };
   bookedLedger: LedgerEntry[];
   portfolioAfter: VirtualPortfolio;
   summary: string;
@@ -217,7 +243,10 @@ function bookAfter(book: VirtualPortfolio, booked: readonly LedgerEntry[]): Virt
   return { ...book, cash, positions: kept, equity, deployedPercent: equity.gt(0) ? equity.minus(cash).div(equity).times(100) : new Decimal(0) };
 }
 
-async function rebuild(supabase: Supabase, id: number): Promise<Rebuilt | null> {
+/** Why a cycle cannot be replayed honestly. */
+type Declined = { declined: string };
+
+async function rebuild(supabase: Supabase, id: number, pilot: PilotRead): Promise<Rebuilt | Declined | null> {
   const row = await loadDecision(supabase, id);
   if (row == null || row.status !== 'decided' || row.target_allocation == null) return null;
   const [previous, corrections, observation, transition, intents] = await Promise.all([
@@ -288,21 +317,41 @@ async function rebuild(supabase: Supabase, id: number): Promise<Rebuilt | null> 
       }
     : null;
 
-  // The stop exits the code generated: a `stop_exit` gate on a held line.
-  const stopExits = transition
-    .filter((t) => t.gate === 'stop_exit')
+  // THE TRANSITION MODE ON RECORD. The pilot's identity freezes it from the activation cycle
+  // on; before that nothing journals it, and a `stop_exit` verdict under `observe` generated
+  // no order. A cycle whose mode cannot be established is declined when a stop verdict is
+  // present — a stop attributed on a guess would be the very defect this PR removes.
+  const onRecord = pilot.activatedDecisionId != null && pilot.transitionMode != null && row.id >= pilot.activatedDecisionId;
+  const stopVerdicts = transition.filter((t) => t.gate === 'stop_exit');
+  if (!onRecord && stopVerdicts.length > 0) {
+    return { declined: `a stop_exit verdict on ${stopVerdicts.map((t) => t.asset).join(', ')} but the transition mode of this cycle is not on record (before the pilot's activation) — stop attribution declined` };
+  }
+  const transitionMode: 'enforce' | 'observe' = onRecord ? pilot.transitionMode! : 'observe';
+  // The stop exits the code generated: a `stop_exit` gate on a held line, under `enforce`.
+  const stopExits = (transitionMode === 'enforce' ? stopVerdicts : [])
     .flatMap((t) => {
       const held = book.positions.find((p) => p.asset === t.asset);
       if (held == null || !held.qty.gt(0)) return [];
       return [{ asset: t.asset, notional: held.value.toNumber(), drawdownFromPeakPercent: num(t.drawdown_from_peak_percent), thresholdPercent: num(t.stop_threshold_percent) ?? config.transition.peakStopPercent }];
     });
 
+  // THE GATE'S DROPPED LEGS, on a refused cycle, rebuilt from the vector the gate JUDGED and
+  // the rule it applies: every strategic leg of that vector is dropped, the deterministic
+  // exits survive (a stop's line is superseded, a risk_off reduction's sell is kept). The
+  // vector is the band's corrected plan when the correction was applied — the journal's
+  // `planned_*` per line — and the model's own legs otherwise. `transition_observations.leg_*`
+  // would be wrong here: production journals those from the PRE-band vector.
+  const refused = row.applied_divergence_cause != null;
+  const gateOf = new Map(transition.map((t) => [t.asset, t.gate]));
+  const judgedVector = bandApplied
+    ? corrections.filter((c) => c.planned_side != null).map((c) => ({ asset: c.asset, side: c.planned_side!, notional: num(c.planned_notional_quote) ?? 0 }))
+    : modelLegs;
   const gate = {
-    refused: row.applied_divergence_cause != null,
+    refused,
     reason: row.applied_divergence_cause ?? '',
-    droppedLegs: transition
-      .filter((t) => (t.leg_verdict === 'forbidden' || t.leg_verdict === 'cancelled_atomic') && t.leg_side != null)
-      .map((t) => ({ asset: t.asset, side: t.leg_side!, notional: num(t.leg_notional) ?? 0 })),
+    droppedLegs: refused
+      ? judgedVector.filter((l) => gateOf.get(l.asset) !== 'stop_exit' && !(gateOf.get(l.asset) === 'risk_off_reduction' && l.side === 'sell'))
+      : [],
   };
 
   const bookedLedger: LedgerEntry[] = intents.map((e) => ({
@@ -329,7 +378,7 @@ async function rebuild(supabase: Supabase, id: number): Promise<Rebuilt | null> 
       stopExits,
       gate,
     },
-    sources: { clamped: journaled ? 'journal' : 'recomputed', modelPlan: 'recomputed' },
+    sources: { clamped: journaled ? 'journal' : 'recomputed', modelPlan: 'recomputed', transitionMode },
     bookedLedger,
     portfolioAfter: bookAfter(book, bookedLedger),
     summary: row.notification_summary ?? '',
@@ -378,7 +427,7 @@ function record(id: string, title: string, passed: boolean, detail: string[]): v
 function printCycle(r: Rebuilt, rendered: Rendered): void {
   console.log('');
   console.log(`──── cycle ${r.id} · ${r.createdAt} ────`);
-  console.log(`  sources : clamped=${r.sources.clamped}, model plan=${r.sources.modelPlan}, references=${r.provenance.intentReference ? 'previous decided row' : 'none'}`);
+  console.log(`  sources : clamped=${r.sources.clamped}, model plan=${r.sources.modelPlan}, references=${r.provenance.intentReference ? 'previous decided row' : 'none'}, transition mode on record=${r.sources.transitionMode}`);
   console.log(`  model plan : ${r.provenance.modelLegs.map((l) => `${l.side} ${l.asset} ~${l.notional.toFixed(0)}$`).join(', ') || '(no leg above the floor)'}`);
   console.log(`  booked     : ${r.bookedLedger.map((e) => `${e.side} ${e.symbol} ${e.quoteDelta.abs().toFixed(2)}$`).join(', ') || '(nothing)'}`);
   if (rendered.text == null) {
@@ -400,12 +449,19 @@ async function main(): Promise<void> {
   console.log('ACTIVITY ATTRIBUTION — the notification each cycle would send under the new layout');
   console.log(`cycles: ${ids.join(', ')}`);
 
+  const pilot = await loadPilot(supabase);
+  console.log(`transition mode on record: ${pilot.transitionMode ?? 'none'} from cycle ${pilot.activatedDecisionId ?? 'n/a'} (the pilot's identity)`);
+
   const rebuilt = new Map<number, Rebuilt>();
   const rendered = new Map<number, Rendered>();
   for (const id of ids) {
-    const r = await rebuild(supabase, id);
+    const r = await rebuild(supabase, id, pilot);
     if (r == null) {
       console.log(`\n──── cycle ${id}: not a decided cycle, skipped ────`);
+      continue;
+    }
+    if ('declined' in r) {
+      console.log(`\n──── cycle ${id}: DECLINED — ${r.declined} ────`);
       continue;
     }
     const out = render(r);
