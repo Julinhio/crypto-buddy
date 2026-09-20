@@ -14,7 +14,7 @@ import type { LedgerEntry } from '../persistence/executions.js';
 import type { VirtualPortfolio } from '../portfolio/derive.js';
 import { writeArtefact } from '../provenance/artefacts.js';
 import { bookOf, pricesOf, universeOf, journaledClampOf, type StoredContext } from './storedCycle.js';
-import { stopReconstruction, transitionModeOnRecord, type PilotRecord } from './attributionRecord.js';
+import { journalCoverage, stopReconstruction, transitionModeOnRecord, type PilotRecord } from './attributionRecord.js';
 
 /**
  * WHO MOVED EACH LINE — the activity notification replayed on past cycles.
@@ -53,6 +53,14 @@ import { stopReconstruction, transitionModeOnRecord, type PilotRecord } from './
  *     keeps, exactly as `applyGate` does. Not `transition_observations.leg_*`, which
  *     production journals from the PRE-band vector;
  *   - what booked: the executed intents of the ledger.
+ *
+ * COVERAGE, NOT PRESENCE. Both journals above are best-effort writes in production; a batch
+ * that timed out leaves an empty or partial journal, and reading that as "no stop", "no
+ * dropped leg" or "the band moved nothing" would rebuild an intervention-free cycle out of a
+ * missing fact. So the transition journal must carry one row per universe asset on every
+ * replayed cycle, and the band's per-line journal one row per universe asset whenever the
+ * observation says a correction ran; otherwise the cycle is DECLINED with the missing assets
+ * named (`journalCoverage`).
  *
  * Read-only: nothing is written to the database, nothing is sent to Telegram, no cycle runs.
  * Run with `npm run replay:activity-attribution [id,id,...]`; exits non-zero if a criterion
@@ -295,8 +303,23 @@ async function rebuild(supabase: Supabase, id: number, pilot: PilotRead): Promis
     notional: m.notional.toNumber(),
   }));
 
+  // THE JOURNALS THIS REPLAY NEEDS MUST COVER THE UNIVERSE — see the header. The transition
+  // journal on every cycle (stops, deterministic legs); the band's per-line journal whenever
+  // the observation says a correction ran (the clamped target, the corrected plan). Absent or
+  // partial evidence declines the cycle; it is never read as "no intervention".
+  const universeAssets = universe.filter((asset) => asset !== reserve);
+  const transitionCoverage = journalCoverage(universeAssets, transition);
+  if (!transitionCoverage.complete) {
+    return { declined: `the transition journal does not cover the cycle's universe (missing ${transitionCoverage.missing.join(', ')}) — stops and gate facts cannot be established` };
+  }
   // The band, only when the journal says the correction reached the orders.
-  const bandApplied = observation != null && observation.mode === 'application' && observation.pilot_hold == null && observation.direction != null && corrections.length > 0;
+  const bandApplied = observation != null && observation.mode === 'application' && observation.pilot_hold == null && observation.direction != null;
+  if (bandApplied) {
+    const bandCoverage = journalCoverage(universeAssets, corrections);
+    if (!bandCoverage.complete) {
+      return { declined: `the observation says a correction ran but the band's per-line journal does not cover the universe (missing ${bandCoverage.missing.join(', ')}) — the corrected vector cannot be established` };
+    }
+  }
   const band: BandFact | null = bandApplied
     ? {
         direction: observation.direction!,

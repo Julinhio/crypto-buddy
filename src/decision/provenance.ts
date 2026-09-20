@@ -43,7 +43,12 @@
  *     so the layer is named as "the chain"), or above it because the transition gate refused
  *     the revision that lowered it (named as the gate) — and the line comes back toward it;
  *   - DRIFT: the line's applied target WAS the intention, nothing changed, and the book
- *     moved by prices past the floor. The standing target reasserts itself. Not a decision;
+ *     moved by prices past the floor. The standing target reasserts itself. Not a decision.
+ *     A correction that moved the line the OTHER way than the movement (the band lifting a
+ *     target the book had drifted above, softening the sale) only RESIZED that drift — or
+ *     that return toward the target — and is named as the layer that adjusted the amount,
+ *     never as the cause. The band is the cause only when its points and the trade point
+ *     the same way, or when it is unwinding a lift it made itself;
  *   - NOT ESTABLISHED: anything the facts above cannot explain. Said explicitly, never
  *     replaced by the most plausible layer.
  *
@@ -369,27 +374,32 @@ export function attributeCycle(
     // Lifted by the BAND, provably: above the intention, and not because a gate refusal kept
     // the previous vector while the intention went down (see `appliedReferenceDivergence`).
     const liftedBefore = displaced && applied! > intent! && !gateDisplaced;
-    if (bandTouched) {
+    const towardIntent = intent != null && applied != null && Math.sign(intent - applied) === sideSign;
+    // The band moved this line the OTHER way than the movement: it did not cause it, it
+    // resized it. Carried as an adjustment on the drift or the return the own plan proves.
+    const softenedByBand: AmountAdjustment[] =
+      bandTouched && own != null && Math.sign(bandPoints) !== sideSign ? [{ layer: 'bande', points: bandPoints, modelPlanNotional: own.notional }] : [];
+    if (bandTouched && Math.sign(bandPoints) === sideSign) {
       // The band's points and the trade point the same way: the band moved the line.
-      if (Math.sign(bandPoints) === sideSign) {
-        return { ...base, origin: 'bande', intentChange: null, adjustments: [], note: bandNote(line!, band!) };
-      }
-      // They point OPPOSITE ways — the band ADDED points to a line that SELLS (2115 BNB:
-      // +1.84 on a line going from 14.5 to 11.84). The line was sitting above the intention
-      // because a previous correction lifted it, and this cycle's correction holds it lower:
-      // the band is shrinking its own displacement, not pushing the line.
-      if (liftedBefore && line != null && changed(line.correctedWeightPercent, applied!)) {
-        return {
-          ...base,
-          origin: 'bande_deplacement',
-          intentChange: null,
-          adjustments: [],
-          note: `${asset}, porté à ${fmtPct(applied!)} % par la correction précédente, est ramené à ${fmtPct(line.correctedWeightPercent)} % (${bandBound(band!)})`,
-        };
-      }
       return { ...base, origin: 'bande', intentChange: null, adjustments: [], note: bandNote(line!, band!) };
     }
-    const towardIntent = intent != null && applied != null && Math.sign(intent - applied) === sideSign;
+    if (bandTouched && liftedBefore && line != null && changed(line.correctedWeightPercent, applied!)) {
+      // Opposite ways, on a line the band itself had lifted — the band ADDED points to a
+      // line that SELLS (2115 BNB: +1.84 on a line going from 14.5 to 11.84). The band is
+      // shrinking its own displacement, not pushing the line.
+      return {
+        ...base,
+        origin: 'bande_deplacement',
+        intentChange: null,
+        adjustments: [],
+        note: `${asset}, porté à ${fmtPct(applied!)} % par la correction précédente, est ramené à ${fmtPct(line.correctedWeightPercent)} % (${bandBound(band!)})`,
+      };
+    }
+    if (bandTouched && !ownSameSide) {
+      // Opposite ways and no own leg to soften: a correction against the movement cannot
+      // have produced it, and nothing else on record did.
+      return { ...base, origin: 'non_etablie', intentChange: null, adjustments: [], note: `la bande a corrigé ${asset} à l'opposé du mouvement et aucun plan ne le porte` };
+    }
     if (liftedBefore && towardIntent) {
       // Above the intention with no refusal on the reference row: the band's lift, proven by
       // the two references and the divergence cause (see `liftedBefore`).
@@ -404,12 +414,12 @@ export function attributeCycle(
           (liftedNow.length > 0 ? `la bande porte désormais ses points sur ${liftedNow.join(', ')}` : 'la bande ne le tient plus'),
       };
     }
-    if (displaced && towardIntent) {
+    if (displaced && towardIntent && ownSameSide) {
       return {
         ...base,
         origin: 'retour_vers_cible',
         intentChange: null,
-        adjustments: [],
+        adjustments: softenedByBand,
         // With a refusal on the reference row the note states the refusal and the line's
         // position, and nothing about WHICH layer put the line there: the refused legs of
         // that cycle are not in hand, and the kept vector may carry an older band lift.
@@ -423,7 +433,7 @@ export function attributeCycle(
         ...base,
         origin: 'derive',
         intentChange: null,
-        adjustments: [],
+        adjustments: softenedByBand,
         note: `cible maintenue à ${fmtPct(intent ?? target[asset] ?? 0)} % ; le livre avait dérivé par les prix`,
       };
     }

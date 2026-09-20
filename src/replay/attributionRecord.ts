@@ -54,6 +54,26 @@ export function transitionModeOnRecord(
   return pilot.transitionMode;
 }
 
+/**
+ * Whether a journal covers the cycle's universe — one row per expected asset.
+ *
+ * Production writes the transition journal for every tradable asset on every decided cycle,
+ * and the band's per-line journal for every universe line whenever a correction ran. Both
+ * writes are best-effort: a batch that timed out leaves the cycle with an empty or partial
+ * journal, and a replay that read that as "no stop fired" or "the band moved nothing" would
+ * reconstruct an intervention-free cycle out of a missing fact. So a journal the replay needs
+ * is checked for COVERAGE — every expected asset present — and a cycle whose evidence is absent
+ * or incomplete is declined, never defaulted.
+ */
+export function journalCoverage(
+  expectedAssets: readonly string[],
+  rows: ReadonlyArray<{ asset: string }>,
+): { complete: boolean; missing: string[] } {
+  const present = new Set(rows.map((r) => r.asset));
+  const missing = expectedAssets.filter((asset) => !present.has(asset));
+  return { complete: missing.length === 0, missing };
+}
+
 export interface StopVerdictRecord {
   asset: string;
 }

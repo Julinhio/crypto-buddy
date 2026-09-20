@@ -125,28 +125,30 @@ const pts = (n: number): string => `${n > 0 ? '+' : ''}${formatPercent(n)} pt${M
 
 /** The short tag after a movement — the origin, and the layers that resized it. */
 function originTag(m: AttributedMovement): string {
-  switch (m.origin) {
-    case 'modele': {
-      const resized = m.adjustments.map((a) =>
-        a.layer === 'bande' ? 'montant ajusté par la bande' : 'borné par le plafond de risque',
-      );
-      return ['modèle', ...resized].join(', ');
+  const resized = m.adjustments.map((a) =>
+    a.layer === 'bande' ? 'montant ajusté par la bande' : 'borné par le plafond de risque',
+  );
+  const origin = ((): string => {
+    switch (m.origin) {
+      case 'modele':
+        return 'modèle';
+      case 'stop':
+        return 'stop de pic (code)';
+      case 'bande':
+        return 'bande';
+      case 'bande_deplacement':
+        return 'bande (déplacement de correction)';
+      case 'bande_contre_modele':
+        return "bande, contre l'intention du modèle";
+      case 'retour_vers_cible':
+        return 'retour vers la cible (chaîne)';
+      case 'derive':
+        return 'rééquilibrage de dérive (cible maintenue)';
+      case 'non_etablie':
+        return 'origine non établie';
     }
-    case 'stop':
-      return 'stop de pic (code)';
-    case 'bande':
-      return 'bande';
-    case 'bande_deplacement':
-      return 'bande (déplacement de correction)';
-    case 'bande_contre_modele':
-      return "bande, contre l'intention du modèle";
-    case 'retour_vers_cible':
-      return 'retour vers la cible (chaîne)';
-    case 'derive':
-      return 'rééquilibrage de dérive (cible maintenue)';
-    case 'non_etablie':
-      return 'origine non établie';
-  }
+  })();
+  return [origin, ...resized].join(', ');
 }
 
 /** The model's line: what it decided this cycle, judged on its intention alone. */
@@ -266,7 +268,14 @@ export function formatActivity(n: ActivityNotification): string {
   }
   for (const m of n.attribution.movements) {
     if (m.origin === 'non_etablie' || m.origin === 'retour_vers_cible' || m.origin === 'derive') {
-      lines.push(`${m.asset} : ${m.note}.`);
+      // A band correction that opposed the movement resized it: said with what the
+      // movement alone would have been, the band never becoming its cause.
+      const softened = m.adjustments.find((a) => a.layer === 'bande');
+      const resized =
+        softened != null && softened.layer === 'bande'
+          ? ` — la bande a ajusté le montant (${pts(softened.points)} sur la cible ; seul, le mouvement aurait ${m.side === 'buy' ? 'acheté' : 'vendu'} ${fmtUsd(softened.modelPlanNotional)})`
+          : '';
+      lines.push(`${m.asset} : ${m.note}${resized}.`);
     }
   }
   if (n.modelReasoning) lines.push(`Raisonnement du modèle : ${truncate(n.modelReasoning, 300)}`);

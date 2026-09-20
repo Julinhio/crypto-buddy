@@ -3,7 +3,7 @@ import { attributeCycle, type CycleProvenance, type BandFact } from '../decision
 import { formatActivity, prepareActivityNotification, type ActivityNotification } from '../alerting/activity.js';
 import type { DecideResult } from '../decision/decide.js';
 import { Decimal } from '../money.js';
-import { stopReconstruction, transitionModeOnRecord } from '../replay/attributionRecord.js';
+import { journalCoverage, stopReconstruction, transitionModeOnRecord } from '../replay/attributionRecord.js';
 
 /**
  * WHO MOVED EACH LINE — the attribution the activity notification carries since PR 2 of the
@@ -272,6 +272,43 @@ console.log('\nThe frontier\'s other sides — synthetic:');
   ok('rendered with the maintained target', formatActivity(n).includes('Vente ~30$ de BTC — rééquilibrage de dérive (cible maintenue)') && formatActivity(n).includes('BTC : cible maintenue à 20 %'));
 }
 {
+  // DRIFT the band SOFTENED: an unchanged 10% target, a book drifted to 15%, and an upward
+  // correction lifting the target to 11%. The own plan sells (15 → 10); the corrected plan
+  // still sells, less. The band opposed the movement — it resized a drift, it did not cause it.
+  const target = { BTC: 10, USDT: 90 };
+  const prov = base({
+    target,
+    clamped: target,
+    intentReference: { ...target },
+    appliedReference: { ...target },
+    modelLegs: [{ asset: 'BTC', side: 'sell', notional: 50 }],
+    band: floorBand({ targetExposurePercent: 10, boundPercent: 11, lines: [{ asset: 'BTC', correctionPoints: 1, origin: 'correction_de_bande', cause: 'aucune', baseWeightPercent: 10, correctedWeightPercent: 11 }] }),
+  });
+  const n = notification(prov, [{ asset: 'BTC', side: 'sell', usd: 40 }]);
+  const [btc] = n.attribution.movements;
+  ok('a drift the band opposed stays a drift, with the band as the layer that adjusted the amount', btc!.origin === 'derive' && btc!.adjustments.length === 1 && btc!.adjustments[0]!.layer === 'bande');
+  const text = formatActivity(n);
+  ok('rendered as a drift resized by the band, never as the band\'s movement', text.includes('Vente ~40$ de BTC — rééquilibrage de dérive (cible maintenue), montant ajusté par la bande') && !text.includes('Vente ~40$ de BTC — bande'));
+  ok('and the line says what the movement alone would have been', text.includes('BTC : cible maintenue à 10 % ; le livre avait dérivé par les prix — la bande a ajusté le montant (+1 pt sur la cible ; seul, le mouvement aurait vendu ~50$).'));
+  // The symmetric case: a downward correction softening a return BUY toward a target the
+  // chain had left the line under.
+  const returning = notification(base({
+    target: { BTC: 25, USDT: 75 },
+    clamped: { BTC: 25, USDT: 75 },
+    intentReference: { BTC: 25, USDT: 75 },
+    appliedReference: { BTC: 20, USDT: 80 },
+    modelLegs: [{ asset: 'BTC', side: 'buy', notional: 50 }],
+    band: floorBand({ direction: 'down', label: 'baisse_vers_plafond', targetExposurePercent: 25, boundPercent: 23, lines: [{ asset: 'BTC', correctionPoints: -2, origin: 'correction_de_bande', cause: 'aucune', baseWeightPercent: 25, correctedWeightPercent: 23 }] }),
+  }), [{ asset: 'BTC', side: 'buy', usd: 30 }]);
+  ok('a return toward the target that a downward correction softened stays a return, resized by the band', returning.attribution.movements[0]!.origin === 'retour_vers_cible' && returning.attribution.movements[0]!.adjustments.some((a) => a.layer === 'bande'));
+  // Opposite-signed points with NO own leg: nothing on record produced the movement.
+  const orphan = notification(base({ ...prov, modelLegs: [] }), [{ asset: 'BTC', side: 'sell', usd: 40 }]);
+  ok('opposite-signed points without an own leg are not established — the band is not blamed for a movement it opposed', orphan.attribution.movements[0]!.origin === 'non_etablie');
+  // Same-signed points remain the band's movement, unchanged.
+  const pushed = notification(base({ ...prov, modelLegs: [], band: floorBand({ targetExposurePercent: 10, boundPercent: 13, lines: [{ asset: 'BTC', correctionPoints: 3, origin: 'correction_de_bande', cause: 'aucune', baseWeightPercent: 10, correctedWeightPercent: 13 }] }) }), [{ asset: 'BTC', side: 'buy', usd: 30 }]);
+  ok('points and trade the same way: still the band\'s movement', pushed.attribution.movements[0]!.origin === 'bande');
+}
+{
   // RETURN toward the target: the chain had left the line BELOW the intention (a clamp or
   // a downward correction — not separable), and the line climbs back.
   const target = { BTC: 25, USDT: 75 };
@@ -302,7 +339,10 @@ console.log('\nThe frontier\'s other sides — synthetic:');
   ok('without a divergence cause the same lift is the band\'s', lifted.attribution.movements[0]!.origin === 'bande_deplacement');
   // And the band shrinking "its" lift is not claimed either when the gate is the writer.
   const shrunk = notification(base({ ...refused, band: floorBand({ targetExposurePercent: 13, boundPercent: 14, lines: [{ asset: 'XRP', correctionPoints: 1, origin: 'correction_de_bande', cause: 'aucune', baseWeightPercent: 13, correctedWeightPercent: 14 }] }) }), [{ asset: 'XRP', side: 'sell', usd: 12 }]);
-  ok('a band lift on a gate-displaced line that still sells is plain "bande", not a shrink of a lift the band never made', shrunk.attribution.movements[0]!.origin === 'bande');
+  // The band lifted the target by a point while the line SOLD back toward the intention: the
+  // band opposed the movement, so it only resized the return — it is not "shrinking a lift"
+  // it never made (the gate displaced the line), and it is not the cause either.
+  ok('a band lift on a gate-displaced line that still sells is the return toward the intention, resized by the band — neither a shrink of a lift the band never made nor the band movement', shrunk.attribution.movements[0]!.origin === 'retour_vers_cible' && shrunk.attribution.movements[0]!.adjustments.some((x) => x.layer === 'bande') && shrunk.attribution.movements[0]!.note.includes('la porte de transition avait refusé le vecteur précédent'));
 }
 {
   // The risk clamp resized a model decision.
@@ -432,6 +472,16 @@ console.log('\nThe replay: the transition mode is on record only while the pilot
   ok('the same verdict under a recorded enforce is the code\'s exit', 'exits' in stopReconstruction('enforce', verdicts) && (stopReconstruction('enforce', verdicts) as { exits: readonly { asset: string }[] }).exits.length === 1);
   ok('and under a recorded observe it generated nothing', 'exits' in stopReconstruction('observe', verdicts) && (stopReconstruction('observe', verdicts) as { exits: readonly { asset: string }[] }).exits.length === 0);
   ok('no verdict: nothing to reconstruct and nothing to decline, whatever the mode', 'exits' in stopReconstruction(null, []) && 'exits' in stopReconstruction('enforce', []));
+
+  // COVERAGE, not presence: a journal the replay needs must carry one row per universe asset.
+  const universe = ['BNB', 'BTC', 'ETH', 'XRP'];
+  ok('a journal with every universe asset is complete', journalCoverage(universe, universe.map((asset) => ({ asset }))).complete);
+  const partial = journalCoverage(universe, [{ asset: 'BNB' }, { asset: 'BTC' }, { asset: 'ETH' }]);
+  ok('a journal missing one asset is incomplete, and names it', !partial.complete && partial.missing.join(',') === 'XRP');
+  const empty = journalCoverage(universe, []);
+  ok('an empty journal is incomplete — a lost batch is never read as "no intervention"', !empty.complete && empty.missing.length === 4);
+  ok('rows beyond the universe do not make up for a missing one', !journalCoverage(universe, [{ asset: 'BNB' }, { asset: 'BTC' }, { asset: 'ETH' }, { asset: 'SOL' }]).complete);
+  ok('an empty universe is trivially covered', journalCoverage([], []).complete);
 }
 
 console.log('\nThe notification contract is unchanged where it must be:');
