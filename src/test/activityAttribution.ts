@@ -295,8 +295,8 @@ console.log('\nThe frontier\'s other sides — synthetic:');
   const n = notification(refused, [{ asset: 'XRP', side: 'sell', usd: 25 }]);
   ok('an applied target above the intention is NOT read as a band lift when the reference row carries a gate divergence', n.attribution.movements[0]!.origin === 'retour_vers_cible');
   ok('and the note states the refusal and the line\'s position, without claiming which layer put it there', n.attribution.movements[0]!.note === "la porte de transition avait refusé le vecteur précédent ; XRP était resté à 15 % au-dessus de l'intention du modèle (13 %) et y revient");
-  // The same references WITHOUT a divergence cause: only the band lifts a line above the
-  // intention, so the lift is the band's.
+  // The same references WITHOUT a divergence cause: nothing but the band leaves a line
+  // above the intention then, so the lift is the band's.
   const lifted = notification(base({ ...refused, appliedReferenceDivergence: null }), [{ asset: 'XRP', side: 'sell', usd: 25 }]);
   ok('without a divergence cause the same lift is the band\'s', lifted.attribution.movements[0]!.origin === 'bande_deplacement');
   // And the band shrinking "its" lift is not claimed either when the gate is the writer.
@@ -341,6 +341,34 @@ console.log('\nThe frontier\'s other sides — synthetic:');
   });
   const n = notification(prov, [{ asset: 'SOL', side: 'buy', usd: 50 }]);
   ok('an opened line is a revision of the model\'s', n.attribution.movements[0]!.origin === 'modele' && formatActivity(n).includes('Modèle : révision SOL ouvert → 5 %.'));
+}
+
+console.log('\nA refused vector names the layer behind each dropped leg:');
+{
+  // The gate refused the corrected vector: the model's ETH trim (its own plan), the band's
+  // BTC lift, and a leg neither plan explains. A risk_off BNB sale survived and booked.
+  const target = { BNB: 5, BTC: 14, ETH: 3, USDT: 78 };
+  const prov = base({
+    target,
+    clamped: target,
+    intentReference: { BNB: 10, BTC: 14, ETH: 9, USDT: 67 },
+    appliedReference: { BNB: 10, BTC: 14, ETH: 9, USDT: 67 },
+    modelLegs: [{ asset: 'ETH', side: 'sell', notional: 66 }, { asset: 'BNB', side: 'sell', notional: 55 }],
+    band: floorBand({ lines: [
+      { asset: 'BTC', correctionPoints: 2, origin: 'correction_de_bande', cause: 'aucune', baseWeightPercent: 14, correctedWeightPercent: 16 },
+      { asset: 'ETH', correctionPoints: 0, origin: 'modele', cause: 'aucune', baseWeightPercent: 3, correctedWeightPercent: 3 },
+    ] }),
+    gate: {
+      refused: true,
+      reason: 'ETH frozen — 3 strategic leg(s) dropped, 1 risk_off reduction(s) kept',
+      droppedLegs: [{ asset: 'ETH', side: 'sell', notional: 66 }, { asset: 'BTC', side: 'buy', notional: 22 }, { asset: 'XRP', side: 'buy', notional: 10 }],
+    },
+  });
+  const n = notification(prov, [{ asset: 'BNB', side: 'sell', usd: 55 }]);
+  const legs = Object.fromEntries(n.attribution.gate!.droppedLegs.map((l) => [l.asset, l.origin]));
+  ok('the model\'s own dropped leg is the model\'s, the band\'s is the band\'s, the unexplained one is not established', legs['ETH'] === 'modele' && legs['BTC'] === 'bande' && legs['XRP'] === 'non_etablie');
+  ok('the gate line names each dropped leg with its layer, never "the model\'s legs" as a whole', formatActivity(n).includes('Porte de transition : vecteur refusé — 3 jambe(s) non exécutée(s) : vente ETH (modèle), achat BTC (bande), achat XRP (origine non établie) ; ETH frozen'));
+  ok('the surviving risk_off sale is attributed on its own facts', n.attribution.movements[0]!.origin === 'modele');
 }
 
 console.log('\nWithout an intention reference — only what the chain can prove:');

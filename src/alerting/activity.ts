@@ -253,10 +253,14 @@ export function formatActivity(n: ActivityNotification): string {
   if (band) lines.push(band);
   const gate = n.attribution.gate;
   if (gate) {
-    const dropped = gate.droppedLegs.map((l) => l.asset).join(', ');
+    // The dropped vector is the one the gate judged — corrected by the band when the pilot
+    // corrected — so each dropped leg names the layer whose plan carried it, never "the
+    // model's" as a whole.
+    const legOrigin = { modele: 'modèle', derive: 'cible maintenue', bande: 'bande', non_etablie: 'origine non établie' } as const;
+    const dropped = gate.droppedLegs.map((l) => `${l.side === 'buy' ? 'achat' : 'vente'} ${l.asset} (${legOrigin[l.origin]})`).join(', ');
     lines.push(
-      `Porte de transition : vecteur refusé — ${gate.droppedLegs.length} jambe(s) du modèle non exécutée(s)` +
-        (dropped ? ` (${dropped})` : '') +
+      `Porte de transition : vecteur refusé — ${gate.droppedLegs.length} jambe(s) non exécutée(s)` +
+        (dropped ? ` : ${dropped}` : '') +
         ` ; ${truncate(gate.reason, 160)}.`,
     );
   }

@@ -179,6 +179,24 @@ export interface IntentRevision {
   traded: boolean;
 }
 
+/** A leg the gate dropped, with the layer whose plan carried it. */
+export interface AttributedDroppedLeg extends ProvenanceLeg {
+  /**
+   * The dropped vector is the one the gate JUDGED — the band's corrected plan when the
+   * pilot corrected — so a dropped leg is not necessarily the model's. `modele` when the
+   * model's own plan carried that leg on a line it revised, `derive` when its own plan
+   * carried it on an unchanged line, `bande` when the band's correction moved the line
+   * that way, `non_etablie` otherwise.
+   */
+  origin: 'modele' | 'derive' | 'bande' | 'non_etablie';
+}
+
+export interface AttributedGate {
+  refused: boolean;
+  reason: string;
+  droppedLegs: AttributedDroppedLeg[];
+}
+
 export interface CycleAttribution {
   movements: AttributedMovement[];
   /** Whether a reference existed to judge the model's intention against. */
@@ -188,7 +206,7 @@ export interface CycleAttribution {
   /** The band's summary, when it corrected and at least one booked movement is its doing. */
   band: BandFact | null;
   stopExits: StopExitFact[];
-  gate: GateFact | null;
+  gate: AttributedGate | null;
 }
 
 const changed = (a: number, b: number): boolean => Math.abs(a - b) > PROVENANCE_EPSILON;
@@ -373,8 +391,8 @@ export function attributeCycle(
     }
     const towardIntent = intent != null && applied != null && Math.sign(intent - applied) === sideSign;
     if (liftedBefore && towardIntent) {
-      // Only the band ever lifts a line above the intention: the previous correction is the
-      // band's, proven by the two references alone.
+      // Above the intention with no refusal on the reference row: the band's lift, proven by
+      // the two references and the divergence cause (see `liftedBefore`).
       const liftedNow = (band?.lines ?? []).filter((l) => l.correctionPoints > PROVENANCE_EPSILON).map((l) => l.asset);
       return {
         ...base,
@@ -412,6 +430,21 @@ export function attributeCycle(
     return { ...base, origin: 'non_etablie', intentChange: null, adjustments: [], note: 'intention inchangée, aucune couche identifiée' };
   });
 
+  // The gate's dropped legs, each with the layer whose plan carried it — see AttributedDroppedLeg.
+  const droppedLegs: AttributedDroppedLeg[] = gate.droppedLegs.map((leg) => {
+    const own = modelLeg.get(leg.asset);
+    const line = bandLine.get(leg.asset);
+    const legSign = leg.side === 'buy' ? 1 : -1;
+    const change = intentChangeOf(leg.asset);
+    if (own != null && own.side === leg.side) {
+      return { ...leg, origin: change == null || change.changed ? 'modele' : 'derive' };
+    }
+    if (line != null && Math.abs(line.correctionPoints) > PROVENANCE_EPSILON && Math.sign(line.correctionPoints) === legSign) {
+      return { ...leg, origin: 'bande' };
+    }
+    return { ...leg, origin: 'non_etablie' };
+  });
+
   const bandCaused = movements.some(
     (m) =>
       m.origin === 'bande' ||
@@ -425,7 +458,7 @@ export function attributeCycle(
     revisions,
     band: bandCaused ? band : null,
     stopExits,
-    gate: gate.refused ? gate : null,
+    gate: gate.refused ? { refused: true, reason: gate.reason, droppedLegs } : null,
   };
 }
 
