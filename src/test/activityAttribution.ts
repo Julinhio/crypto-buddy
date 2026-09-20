@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { attributeCycle, type CycleProvenance, type BandFact } from '../decision/provenance.js';
+import { attributeCycle, closerOnTheSameSide, type CycleProvenance, type BandFact } from '../decision/provenance.js';
 import { formatActivity, prepareActivityNotification, type ActivityNotification } from '../alerting/activity.js';
 import type { DecideResult } from '../decision/decide.js';
 import { Decimal } from '../money.js';
-import { journalCoverage, stopReconstruction, transitionModeOnRecord } from '../replay/attributionRecord.js';
+import { historicalClamp, journalCoverage, stopReconstruction, transitionModeOnRecord } from '../replay/attributionRecord.js';
 
 /**
  * WHO MOVED EACH LINE — the attribution the activity notification carries since PR 2 of the
@@ -226,6 +226,73 @@ console.log('\n2115 — the band shrinks its own previous lift (points added, li
   ok('the model line lists the ETH revision as one without a movement of its own', formatActivity(n).includes('Modèle : révision ETH 10 → 14,5 % (sans mouvement propre).'));
 }
 
+console.log('\nA band opposing the movement is credited with MOVING its correction only when the corrected target comes strictly closer to the intention, on the same side — above and below:');
+{
+  // The geometry, closed as a rule: previous applied → corrected, against an intention of 10.
+  ok('closer, same side (15 → 12 above; 8 → 9 below)', closerOnTheSameSide(12, 15, 10) && closerOnTheSameSide(9, 8, 10));
+  ok('landing exactly on the intention counts as closer', closerOnTheSameSide(10, 15, 10) && closerOnTheSameSide(10, 8, 10));
+  ok('the same distance is not closer (15 → 15; 8 → 8)', !closerOnTheSameSide(15, 15, 10) && !closerOnTheSameSide(8, 8, 10));
+  ok('farther is not closer (15 → 16; 8 → 7)', !closerOnTheSameSide(16, 15, 10) && !closerOnTheSameSide(7, 8, 10));
+  ok('crossing the intention is not closer even when nearer in distance (15 → 9; 8 → 11)', !closerOnTheSameSide(9, 15, 10) && !closerOnTheSameSide(11, 8, 10));
+  ok('the mirror of the same distance (15 → 5) is a crossing, not a displacement', !closerOnTheSameSide(5, 15, 10));
+
+  // ABOVE: unchanged intention 10, previous applied 15 (the band's lift), the book drifted
+  // above, the band's points oppose the SALE. Four corrected targets, four readings.
+  const above = (corrected: number, clampedTo = 10) => {
+    const target = { BTC: 10, USDT: 90 };
+    const prov = base({
+      target,
+      clamped: { BTC: clampedTo, USDT: 100 - clampedTo },
+      intentReference: { ...target },
+      appliedReference: { BTC: 15, USDT: 85 },
+      modelLegs: [{ asset: 'BTC', side: 'sell', notional: 70 }],
+      band: floorBand({ targetExposurePercent: clampedTo, boundPercent: corrected, lines: [{ asset: 'BTC', correctionPoints: corrected - clampedTo, origin: 'correction_de_bande', cause: 'aucune', baseWeightPercent: clampedTo, correctedWeightPercent: corrected }] }),
+    });
+    return notification(prov, [{ asset: 'BTC', side: 'sell', usd: 40 }]).attribution.movements[0]!;
+  };
+  const toward = above(12);
+  ok('ABOVE, toward the intention (15 → 12): the band moves its own correction — its lift shrinks', toward.origin === 'bande_deplacement' && toward.note === 'BTC, porté à 15 % par la correction précédente, est ramené à 12 % (plancher 12 %)');
+  const away = above(16);
+  ok('ABOVE, away from the intention (15 → 16): not the band\'s — a return toward the target the band only softened', away.origin === 'retour_vers_cible' && away.adjustments.some((a) => a.layer === 'bande'));
+  const same = above(15);
+  ok('ABOVE, same distance (15 → 15): not the band\'s either', same.origin === 'retour_vers_cible' && same.adjustments.some((a) => a.layer === 'bande'));
+  const crossing = above(9, 8);
+  ok('ABOVE, across the intention (15 → 9, from a clamped 8): not the band\'s', crossing.origin === 'retour_vers_cible' && crossing.adjustments.some((a) => a.layer === 'bande'));
+
+  // BELOW: unchanged intention 10, previous applied 8 (the chain left it under), the book
+  // drifted lower still, the band's points oppose the BUY.
+  const below = (corrected: number, points: number) => {
+    const target = { BTC: 10, USDT: 90 };
+    const prov = base({
+      target,
+      clamped: target,
+      intentReference: { ...target },
+      appliedReference: { BTC: 8, USDT: 92 },
+      modelLegs: [{ asset: 'BTC', side: 'buy', notional: 40 }],
+      band: floorBand({ direction: 'down', label: 'baisse_vers_plafond', targetExposurePercent: 10, boundPercent: corrected, lines: [{ asset: 'BTC', correctionPoints: points, origin: 'correction_de_bande', cause: 'aucune', baseWeightPercent: 10, correctedWeightPercent: corrected }] }),
+    });
+    return notification(prov, [{ asset: 'BTC', side: 'buy', usd: 30 }]).attribution.movements[0]!;
+  };
+  const upToward = below(9, -1);
+  ok('BELOW, toward the intention (8 → 9): the band moves its correction nearer — credited, with a note that does not claim the earlier displacement', upToward.origin === 'bande_deplacement' && upToward.note === "la chaîne avait laissé BTC à 8 % sous l'intention du modèle (10 %) ; la bande le remonte à 9 % (plafond 9 %)");
+  const upAway = below(7, -3);
+  ok('BELOW, away from the intention (8 → 7): a return the band only softened', upAway.origin === 'retour_vers_cible' && upAway.adjustments.some((a) => a.layer === 'bande'));
+  const upSame = below(8, -2);
+  ok('BELOW, same distance (8 → 8): a return the band only softened', upSame.origin === 'retour_vers_cible' && upSame.adjustments.some((a) => a.layer === 'bande'));
+  // A crossing from below cannot arise from a clamped target (the clamp never raises a line),
+  // but the rule is geometric and closed regardless: the fixture states the corrected weight
+  // directly, base + points not being something the attribution asserts.
+  const upCrossing = below(11, -1);
+  ok('BELOW, across the intention (8 → 11): not the band\'s', upCrossing.origin === 'retour_vers_cible' && upCrossing.adjustments.some((a) => a.layer === 'bande'));
+  // And with the reference row refused by the gate, nothing is claimed for the band above or below.
+  const refusedAbove = notification(base({
+    target: { BTC: 10, USDT: 90 }, clamped: { BTC: 10, USDT: 90 }, intentReference: { BTC: 10, USDT: 90 }, appliedReference: { BTC: 15, USDT: 85 },
+    appliedReferenceDivergence: 'BTC frozen — 1 strategic leg(s) dropped', modelLegs: [{ asset: 'BTC', side: 'sell', notional: 70 }],
+    band: floorBand({ targetExposurePercent: 10, boundPercent: 12, lines: [{ asset: 'BTC', correctionPoints: 2, origin: 'correction_de_bande', cause: 'aucune', baseWeightPercent: 10, correctedWeightPercent: 12 }] }),
+  }), [{ asset: 'BTC', side: 'sell', usd: 40 }]).attribution.movements[0]!;
+  ok('with a gate refusal on the reference row, even a closer corrected target is not credited to the band', refusedAbove.origin === 'retour_vers_cible');
+}
+
 console.log('\nA fully model-decided cycle stays the model\'s:');
 {
   const target = { BNB: 10, BTC: 9, ETH: 12, XRP: 8, USDT: 61 };
@@ -291,14 +358,16 @@ console.log('\nThe frontier\'s other sides — synthetic:');
   ok('rendered as a drift resized by the band, never as the band\'s movement', text.includes('Vente ~40$ de BTC — rééquilibrage de dérive (cible maintenue), montant ajusté par la bande') && !text.includes('Vente ~40$ de BTC — bande'));
   ok('and the line says what the movement alone would have been', text.includes('BTC : cible maintenue à 10 % ; le livre avait dérivé par les prix — la bande a ajusté le montant (+1 pt sur la cible ; seul, le mouvement aurait vendu ~50$).'));
   // The symmetric case: a downward correction softening a return BUY toward a target the
-  // chain had left the line under.
+  // chain had left the line under (20), the corrected target (18) landing FARTHER from the
+  // intention (25) than the previous applied — the band resized the return, it did not move
+  // its correction nearer (that case is the symmetric rule, proven in its own section).
   const returning = notification(base({
     target: { BTC: 25, USDT: 75 },
     clamped: { BTC: 25, USDT: 75 },
     intentReference: { BTC: 25, USDT: 75 },
     appliedReference: { BTC: 20, USDT: 80 },
     modelLegs: [{ asset: 'BTC', side: 'buy', notional: 50 }],
-    band: floorBand({ direction: 'down', label: 'baisse_vers_plafond', targetExposurePercent: 25, boundPercent: 23, lines: [{ asset: 'BTC', correctionPoints: -2, origin: 'correction_de_bande', cause: 'aucune', baseWeightPercent: 25, correctedWeightPercent: 23 }] }),
+    band: floorBand({ direction: 'down', label: 'baisse_vers_plafond', targetExposurePercent: 25, boundPercent: 18, lines: [{ asset: 'BTC', correctionPoints: -7, origin: 'correction_de_bande', cause: 'aucune', baseWeightPercent: 25, correctedWeightPercent: 18 }] }),
   }), [{ asset: 'BTC', side: 'buy', usd: 30 }]);
   ok('a return toward the target that a downward correction softened stays a return, resized by the band', returning.attribution.movements[0]!.origin === 'retour_vers_cible' && returning.attribution.movements[0]!.adjustments.some((a) => a.layer === 'bande'));
   // Opposite-signed points with NO own leg: nothing on record produced the movement.
@@ -482,6 +551,15 @@ console.log('\nThe replay: the transition mode is on record only while the pilot
   ok('an empty journal is incomplete — a lost batch is never read as "no intervention"', !empty.complete && empty.missing.length === 4);
   ok('rows beyond the universe do not make up for a missing one', !journalCoverage(universe, [{ asset: 'BNB' }, { asset: 'BTC' }, { asset: 'ETH' }, { asset: 'SOL' }]).complete);
   ok('an empty universe is trivially covered', journalCoverage([], []).complete);
+
+  // THE HISTORICAL CLAMP comes from the journal, and from nowhere else.
+  const rows = [{ asset: 'BNB', clamped_weight_percent: '10' }, { asset: 'BTC', clamped_weight_percent: 8.75 }, { asset: 'ETH', clamped_weight_percent: '10' }, { asset: 'XRP', clamped_weight_percent: '5' }];
+  const read = historicalClamp(rows, universe, 'USDT');
+  ok('a complete journal yields the clamped target the guard saw, reserve derived', 'clamped' in read && read.clamped['BTC'] === 8.75 && read.clamped['USDT'] === 66.25);
+  const missingOne = historicalClamp(rows.slice(0, 3), universe, 'USDT');
+  ok('a journal missing one line declines the cycle, naming the line — nothing is re-clamped', 'declined' in missingOne && missingOne.declined.includes('not journaled for XRP') && missingOne.declined.includes('not reconstructible'));
+  ok('an empty journal (a cycle before the journal, or a lost batch) declines the cycle', 'declined' in historicalClamp([], universe, 'USDT'));
+  ok('a journaled value that is not a number declines rather than coerces', 'declined' in historicalClamp([...rows.slice(0, 3), { asset: 'XRP', clamped_weight_percent: 'n/a' }], universe, 'USDT'));
 }
 
 console.log('\nThe notification contract is unchanged where it must be:');

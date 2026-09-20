@@ -48,7 +48,11 @@
  *     target the book had drifted above, softening the sale) only RESIZED that drift — or
  *     that return toward the target — and is named as the layer that adjusted the amount,
  *     never as the cause. The band is the cause only when its points and the trade point
- *     the same way, or when it is unwinding a lift it made itself;
+ *     the same way, or when it is MOVING ITS OWN CORRECTION: the corrected target comes
+ *     STRICTLY CLOSER to the unchanged intention than the previous applied target, on the
+ *     same side of it — whether the line sat above or below the intention. A corrected
+ *     target at the same distance, farther away, or across the intention is not the band
+ *     unwinding anything, and the movement keeps its drift or return origin;
  *   - NOT ESTABLISHED: anything the facts above cannot explain. Said explicitly, never
  *     replaced by the most plausible layer.
  *
@@ -383,16 +387,23 @@ export function attributeCycle(
       // The band's points and the trade point the same way: the band moved the line.
       return { ...base, origin: 'bande', intentChange: null, adjustments: [], note: bandNote(line!, band!) };
     }
-    if (bandTouched && liftedBefore && line != null && changed(line.correctedWeightPercent, applied!)) {
-      // Opposite ways, on a line the band itself had lifted — the band ADDED points to a
-      // line that SELLS (2115 BNB: +1.84 on a line going from 14.5 to 11.84). The band is
-      // shrinking its own displacement, not pushing the line.
+    if (bandTouched && displaced && !gateDisplaced && line != null && closerOnTheSameSide(line.correctedWeightPercent, applied!, intent!)) {
+      // Opposite ways, and the corrected target comes STRICTLY CLOSER to the intention than
+      // the previous applied, on the same side of it: the band is moving its own correction
+      // back toward the intention (2115 BNB: +1.84 on a line going from 14.5 to 11.84, the
+      // book selling down to the new, lower hold). Symmetric below the intention — a line the
+      // chain had left under it, that the band now holds nearer to it. The same distance,
+      // farther away, or across the intention is NOT that: the band then only resized a
+      // drift or a return, handled below.
       return {
         ...base,
         origin: 'bande_deplacement',
         intentChange: null,
         adjustments: [],
-        note: `${asset}, porté à ${fmtPct(applied!)} % par la correction précédente, est ramené à ${fmtPct(line.correctedWeightPercent)} % (${bandBound(band!)})`,
+        note:
+          applied! > intent!
+            ? `${asset}, porté à ${fmtPct(applied!)} % par la correction précédente, est ramené à ${fmtPct(line.correctedWeightPercent)} % (${bandBound(band!)})`
+            : `la chaîne avait laissé ${asset} à ${fmtPct(applied!)} % sous l'intention du modèle (${fmtPct(intent!)} %) ; la bande le remonte à ${fmtPct(line.correctedWeightPercent)} % (${bandBound(band!)})`,
       };
     }
     if (bandTouched && !ownSameSide) {
@@ -400,9 +411,12 @@ export function attributeCycle(
       // have produced it, and nothing else on record did.
       return { ...base, origin: 'non_etablie', intentChange: null, adjustments: [], note: `la bande a corrigé ${asset} à l'opposé du mouvement et aucun plan ne le porte` };
     }
-    if (liftedBefore && towardIntent) {
-      // Above the intention with no refusal on the reference row: the band's lift, proven by
-      // the two references and the divergence cause (see `liftedBefore`).
+    if (!bandTouched && liftedBefore && towardIntent) {
+      // The band did NOT touch the line this cycle, and the line sat above the intention with
+      // no refusal on the reference row: the band's lift, proven by the two references and
+      // the divergence cause (see `liftedBefore`), that the band no longer holds — 2141 XRP.
+      // When the band DID touch the line, the closer-same-side test above is the only way
+      // to this origin.
       const liftedNow = (band?.lines ?? []).filter((l) => l.correctionPoints > PROVENANCE_EPSILON).map((l) => l.asset);
       return {
         ...base,
@@ -470,6 +484,19 @@ export function attributeCycle(
     stopExits,
     gate: gate.refused ? { refused: true, reason: gate.reason, droppedLegs } : null,
   };
+}
+
+/**
+ * Is `next` strictly closer to `intent` than `previous`, without crossing it. The one test
+ * that decides whether a correction opposing the movement is the band MOVING its own
+ * correction (closer, same side) or merely resizing a drift or a return (same distance,
+ * farther, or across the intention). Landing exactly on the intention counts as closer.
+ */
+export function closerOnTheSameSide(next: number, previous: number, intent: number): boolean {
+  const before = previous - intent;
+  const after = next - intent;
+  if (Math.abs(after) >= Math.abs(before) - PROVENANCE_EPSILON) return false;
+  return Math.abs(after) <= PROVENANCE_EPSILON || Math.sign(after) === Math.sign(before);
 }
 
 /** The bound the band moved the target to, named. */

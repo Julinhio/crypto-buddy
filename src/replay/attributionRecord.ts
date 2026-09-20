@@ -26,6 +26,8 @@
  * DECLINES such a cycle instead.
  */
 
+import { journaledClampedAllocation } from '../exposure/counterfactual.js';
+
 export interface PilotRecord {
   activatedDecisionId: number | null;
   transitionMode: 'observe' | 'enforce' | null;
@@ -72,6 +74,41 @@ export function journalCoverage(
   const present = new Set(rows.map((r) => r.asset));
   const missing = expectedAssets.filter((asset) => !present.has(asset));
   return { complete: missing.length === 0, missing };
+}
+
+/**
+ * THE HISTORICAL CLAMP — the risk-bounded target the guard saw that cycle, read from the
+ * band's per-line journal (`clamped_weight_percent`, one row per universe asset since brick 2
+ * of the pilot) and from nowhere else.
+ *
+ * Never recomputed. `clampAllocation` binds to the RUNNING configuration, and the caps are
+ * mutable: a plan rebuilt under a later policy is a different plan from the one that ran, and
+ * an attribution derived from it would present a guess as the exact notification. A cycle
+ * whose journal does not carry the clamp for every universe line — a cycle before the journal
+ * existed, or one whose batch was lost — is declined as not reconstructible.
+ */
+export function historicalClamp(
+  rows: ReadonlyArray<{ asset: string; clamped_weight_percent: string | number }>,
+  universeAssets: readonly string[],
+  reserveAsset: string,
+): { clamped: Record<string, number> } | { declined: string } {
+  const coverage = journalCoverage(universeAssets, rows);
+  if (!coverage.complete) {
+    return {
+      declined:
+        `the historical clamp is not journaled for ${coverage.missing.join(', ')} — the model's plan cannot be rebuilt ` +
+        'without re-clamping under today\'s caps, which are not the caps of that day; not reconstructible',
+    };
+  }
+  const clamped = journaledClampedAllocation(
+    rows.map((row) => ({ asset: row.asset, clampedWeightPercent: Number(row.clamped_weight_percent) })),
+    universeAssets,
+    reserveAsset,
+  );
+  if (clamped == null) {
+    return { declined: 'the journaled clamp carries a value that is not a number — not reconstructible' };
+  }
+  return { clamped };
 }
 
 export interface StopVerdictRecord {

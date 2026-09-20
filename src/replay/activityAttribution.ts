@@ -4,7 +4,6 @@ import { getSupabaseClient } from '../persistence/supabase.js';
 import { config } from '../config/index.js';
 import { Decimal } from '../money.js';
 import { computeMovements } from '../execution/movements.js';
-import { clampAllocation } from '../risk/clamp.js';
 import { restateIntentReference } from '../decision/intentReference.js';
 import { resolveEffectiveTarget, resolveIntentAllocation } from '../decision/effectiveTarget.js';
 import type { DecideResult } from '../decision/decide.js';
@@ -13,8 +12,8 @@ import { prepareActivityNotification, formatActivity } from '../alerting/activit
 import type { LedgerEntry } from '../persistence/executions.js';
 import type { VirtualPortfolio } from '../portfolio/derive.js';
 import { writeArtefact } from '../provenance/artefacts.js';
-import { bookOf, pricesOf, universeOf, journaledClampOf, type StoredContext } from './storedCycle.js';
-import { journalCoverage, stopReconstruction, transitionModeOnRecord, type PilotRecord } from './attributionRecord.js';
+import { bookOf, pricesOf, universeOf, type StoredContext } from './storedCycle.js';
+import { historicalClamp, journalCoverage, stopReconstruction, transitionModeOnRecord, type PilotRecord } from './attributionRecord.js';
 
 /**
  * WHO MOVED EACH LINE — the activity notification replayed on past cycles.
@@ -32,7 +31,9 @@ import { journalCoverage, stopReconstruction, transitionModeOnRecord, type Pilot
  *     production resolvers and restated in the cycle's universe by the production
  *     restatement — exactly `loadReferenceAllocations` + `restateIntentReference`;
  *   - the clamped target: `exposure_band_corrections.clamped_weight_percent`, the value the
- *     guard saw (never re-clamped under today's caps when the journal has it);
+ *     guard saw. NEVER re-clamped under today's caps: the caps are mutable, and a plan
+ *     rebuilt under a later policy is not the plan that ran. A cycle whose journal does not
+ *     carry the clamp for every universe line is declined as not reconstructible;
  *   - the book and the prices: the cycle's own `market_context`, as the model saw them;
  *   - the model's OWN plan: RECOMPUTED — `computeMovements` on the clamped target against
  *     that book, under today's fee and floor (unchanged since the journal began). It is the
@@ -224,7 +225,7 @@ interface Rebuilt {
   createdAt: string;
   provenance: CycleProvenance;
   /** Where the clamped target and the model's own plan came from, and the gate's mode on record. */
-  sources: { clamped: 'journal' | 'recomputed'; modelPlan: 'recomputed'; transitionMode: 'enforce' | 'observe' | 'unknown' };
+  sources: { clamped: 'journal'; modelPlan: 'recomputed'; transitionMode: 'enforce' | 'observe' | 'unknown' };
   bookedLedger: LedgerEntry[];
   portfolioAfter: VirtualPortfolio;
   summary: string;
@@ -272,17 +273,12 @@ async function rebuild(supabase: Supabase, id: number, pilot: PilotRead): Promis
   const universe = universeOf(ctx);
   const target = row.target_allocation;
 
-  // The clamped target the guard saw — the journal when it exists, today's caps otherwise.
-  const journaled = journaledClampOf({
-    id: row.id,
-    created_at: row.created_at,
-    raw_response: '',
-    market_context: ctx,
-    target_allocation: target,
-    applied_allocation: row.applied_allocation,
-    exposure_band_corrections: corrections.map((c) => ({ asset: c.asset, clamped_weight_percent: c.clamped_weight_percent })),
-  });
-  const clamped = journaled ?? clampAllocation(target, reserve, config).applied;
+  // THE CLAMPED TARGET THE GUARD SAW — the journal, and only the journal. Not reconstructible
+  // without it: today's caps are not the caps of that day. See `historicalClamp`.
+  const universeAssets = universe.filter((asset) => asset !== reserve);
+  const clampRead = historicalClamp(corrections, universeAssets, reserve);
+  if ('declined' in clampRead) return { declined: clampRead.declined };
+  const clamped = clampRead.clamped;
 
   // The references, resolved and restated exactly as production does.
   const restate = (reference: Record<string, number> | null): Record<string, number> | null => {
@@ -304,10 +300,10 @@ async function rebuild(supabase: Supabase, id: number, pilot: PilotRead): Promis
   }));
 
   // THE JOURNALS THIS REPLAY NEEDS MUST COVER THE UNIVERSE — see the header. The transition
-  // journal on every cycle (stops, deterministic legs); the band's per-line journal whenever
-  // the observation says a correction ran (the clamped target, the corrected plan). Absent or
-  // partial evidence declines the cycle; it is never read as "no intervention".
-  const universeAssets = universe.filter((asset) => asset !== reserve);
+  // journal on every cycle (stops, deterministic legs); the band's per-line journal on every
+  // cycle for the clamp (checked above) and, whenever the observation says a correction ran,
+  // for the corrected plan. Absent or partial evidence declines the cycle; it is never read
+  // as "no intervention".
   const transitionCoverage = journalCoverage(universeAssets, transition);
   if (!transitionCoverage.complete) {
     return { declined: `the transition journal does not cover the cycle's universe (missing ${transitionCoverage.missing.join(', ')}) — stops and gate facts cannot be established` };
@@ -401,7 +397,7 @@ async function rebuild(supabase: Supabase, id: number, pilot: PilotRead): Promis
       stopExits,
       gate,
     },
-    sources: { clamped: journaled ? 'journal' : 'recomputed', modelPlan: 'recomputed', transitionMode },
+    sources: { clamped: 'journal', modelPlan: 'recomputed', transitionMode },
     bookedLedger,
     portfolioAfter: bookAfter(book, bookedLedger),
     summary: row.notification_summary ?? '',
