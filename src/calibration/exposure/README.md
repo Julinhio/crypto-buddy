@@ -1,5 +1,13 @@
 # Harnais de calibration de la bande d'exposition
 
+> **RETIRÉ (banc v1.3, 17/10/2026).** Ce harnais calculait sa timeline sur tout le bundle
+> `crypto-buddy-exposure-v1`, qui contient la fenêtre de validation scellée du protocole
+> v1.3. Son chargeur refuse désormais de s'exécuter, ses commandes `calibrate:exposure` et
+> `validate:exposure` sont retirées, et le bundle v1 n'est plus dans l'arbre. Le code reste
+> parce que la production importe `controller.ts` et `config.ts`. Les chiffres de la PR #36 se
+> reproduisent depuis l'historique (`c10adb9`). Le banc en vigueur est `src/bench/exposure/`
+> (`docs/RAPPORT-BANC-ETAPE-1.md`).
+
 ## Ce que cette expérience mesure, et ce qu'elle ne mesure pas
 
 **Le modèle n'est pas dans l'expérience.** Le replay est entièrement déterministe. On calibre
