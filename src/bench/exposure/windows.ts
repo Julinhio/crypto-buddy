@@ -1,3 +1,5 @@
+import { isGenuineOpening, type VerificationOpening } from './opening.js';
+
 /**
  * THE WINDOWS OF PROTOCOL v1.3, AND THE ONE RULE THAT DECIDES WHICH OF THEM MAY BE READ.
  *
@@ -55,21 +57,6 @@ export const CALIBRATION: Window = Object.freeze({
   toMs: SEAL_INSTANT_MS,
 });
 
-/**
- * THE PROOF THAT THE INTERNAL VERIFICATION MAY BE READ.
- *
- * Constructed in exactly one place, `openVerification` in `freeze.ts`, after it has checked
- * that the freeze file exists, verifies its own digest, is committed at HEAD, that the working
- * tree is clean and that the source tree is the one that froze. A test asserts that no other
- * file constructs it. Nothing else opens the window: `assertMeasurable` and the tape both
- * demand this object.
- */
-export class VerificationOpening {
-  constructor(
-    readonly evidence: { freezeSha256: string; freezeCommit: string; sourceTreeSha: string },
-  ) {}
-}
-
 export class ClosedWindowError extends Error {
   constructor(window: Window, why: string) {
     super(`window "${window.name}" is closed: ${why}`);
@@ -92,7 +79,8 @@ export function assertMeasurable(window: Window, opening?: VerificationOpening):
     return;
   }
   if (window.name === 'verification') {
-    if (!(opening instanceof VerificationOpening)) {
+    // A GENUINE opening, issued by `openVerification` (opening.ts) — never a look-alike.
+    if (!isGenuineOpening(opening)) {
       throw new ClosedWindowError(window, 'it opens only on a committed freeze of the candidate (protocol v1.3, point 10)');
     }
     if (window.fromMs !== VERIFICATION.fromMs || window.toMs !== VERIFICATION.toMs) {

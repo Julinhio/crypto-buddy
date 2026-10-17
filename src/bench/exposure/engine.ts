@@ -6,7 +6,8 @@ import type { Tape } from './tape.js';
 import { allocate, stateFromGate, type AllocLine, type Allocation } from './allocate.js';
 import { applyRebalanceThreshold, confirmedBullish, type Policy } from './policy.js';
 import { executeAllocation } from './execute.js';
-import { assertMeasurable, type VerificationOpening, type Window } from './windows.js';
+import { assertMeasurable, type Window } from './windows.js';
+import type { VerificationOpening } from './opening.js';
 
 /**
  * THE v1.3 REPLAY ENGINE — one walk over the 4h grid, the same for every policy.

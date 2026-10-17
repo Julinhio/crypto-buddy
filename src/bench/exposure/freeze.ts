@@ -1,10 +1,7 @@
-import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { canonicalJson, currentSourceTreeSha, isCommittedAtHead, sha256Of } from '../../provenance/artefacts.js';
-import type { ComponentName, ComponentVector } from './components.js';
-import { compositeScore, linearTarget, type Normalisation } from './score.js';
-import { VerificationOpening } from './windows.js';
+import { canonicalJson, sha256Of } from '../../provenance/artefacts.js';
+import type { ComponentName } from './components.js';
 
 /**
  * THE FREEZE OF THE CANDIDATE — everything the internal verification is judged against, written
@@ -19,10 +16,8 @@ import { VerificationOpening } from './windows.js';
  *   the bootstrap    10 000 draws, seed 20261101, one-sided 95 % lower bound;
  *   the rules        every qualification filter and the verdict rules, as numbers and as text.
  *
- * `openVerification` is the only way to obtain the `VerificationOpening` the tape and the engine
- * demand. It refuses unless this file verifies its own digest, is committed at HEAD with this
- * exact content, the working tree is clean outside the verification artefacts, and the source
- * tree is the one that wrote the freeze.
+ * The opening of the verification on this freeze lives in `opening.ts` (an unforgeable
+ * capability, Codex PR #50 P1). This module only writes, signs and loads the freeze.
  */
 
 export const FREEZE_FILE = path.join('out', 'bench-exposure', 'development', 'freeze.json');
@@ -97,25 +92,6 @@ export function freezeDigest(freeze: Omit<CandidateFreeze, 'decisions_sha256'>):
   return sha256Of(canonicalJson(rest));
 }
 
-/** The candidate's score at each bar, from the FROZEN normalisations — never refitted. */
-export function frozenCandidateScore(
-  freeze: CandidateFreeze,
-  components: Map<number, ComponentVector>,
-): (t: number) => number | null {
-  const terms = freeze.candidate.normalisations.map((n) => ({
-    normalisation: { component: n.component, mean: n.mean, sd: n.sd, learnedOn: 'development', n: n.n } as Normalisation,
-    weight: 1 / freeze.candidate.normalisations.length,
-  }));
-  return (t) => {
-    const v = components.get(t);
-    return v ? compositeScore(v, terms) : null;
-  };
-}
-
-export function frozenCandidateTransform(freeze: CandidateFreeze): (score: number) => number {
-  return linearTarget(freeze.candidate.transform.zAtZeroPercent, freeze.candidate.transform.zAtHundredPercent);
-}
-
 export class FreezeRefusedError extends Error {
   constructor(message: string) {
     super(`internal verification refused: ${message}`);
@@ -138,42 +114,4 @@ export function loadFreeze(rootDir: string): CandidateFreeze {
     throw new FreezeRefusedError(`the freeze was edited after it was signed (declared ${freeze.decisions_sha256}, recomputed ${recomputed})`);
   }
   return freeze;
-}
-
-export interface OpeningEnv {
-  committed: boolean | null;
-  dirtyPaths: string[];
-  sourceTreeSha: string | null;
-  freezeCommit: string | null;
-}
-
-/** The git facts the opening rests on. Injectable so each refusal is provable in a test. */
-export function realOpeningEnv(rootDir: string, artefactDir: string): OpeningEnv {
-  const file = path.resolve(rootDir, FREEZE_FILE);
-  const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=all', '--', '.', `:!${artefactDir.split(path.sep).join('/')}`], {
-    cwd: rootDir,
-    encoding: 'utf8',
-  });
-  let freezeCommit: string | null = null;
-  try {
-    freezeCommit = execFileSync('git', ['log', '-1', '--format=%H', '--', FREEZE_FILE.split(path.sep).join('/')], { cwd: rootDir, encoding: 'utf8' }).trim() || null;
-  } catch {
-    freezeCommit = null;
-  }
-  return {
-    committed: isCommittedAtHead(file),
-    dirtyPaths: status.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0),
-    sourceTreeSha: currentSourceTreeSha(),
-    freezeCommit,
-  };
-}
-
-export function openVerification(freeze: CandidateFreeze, env: OpeningEnv): VerificationOpening {
-  if (env.committed !== true) throw new FreezeRefusedError(`${FREEZE_FILE} is not committed at HEAD with this content`);
-  if (env.dirtyPaths.length > 0) throw new FreezeRefusedError(`the working tree is not clean (${env.dirtyPaths.slice(0, 5).join('; ')})`);
-  if (env.sourceTreeSha == null || env.sourceTreeSha !== freeze.source_tree_sha) {
-    throw new FreezeRefusedError(`the source tree ${env.sourceTreeSha} is not the one that froze (${freeze.source_tree_sha})`);
-  }
-  if (env.freezeCommit == null) throw new FreezeRefusedError('no commit carries the freeze');
-  return new VerificationOpening({ freezeSha256: freeze.decisions_sha256, freezeCommit: env.freezeCommit, sourceTreeSha: env.sourceTreeSha });
 }

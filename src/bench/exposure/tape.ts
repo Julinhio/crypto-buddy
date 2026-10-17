@@ -3,7 +3,8 @@ import { stickyTimelines, type StickyPoint } from '../../market/transition.js';
 import { timeframeMs } from '../../market/klines.js';
 import { config as productionConfig } from '../../config/index.js';
 import { CORE_PIN, SOL_PIN, loadCertifiedPart, type BenchCandle } from './bundle.js';
-import { DEVELOPMENT, SEAL_INSTANT_MS, VerificationOpening } from './windows.js';
+import { DEVELOPMENT, SEAL_INSTANT_MS } from './windows.js';
+import { isGenuineOpening, type VerificationOpening } from './opening.js';
 
 /**
  * THE SHARED TAPE — computed once from the certified calibration parts, read by every policy.
@@ -110,7 +111,7 @@ export function prepareCalibrationTape(rootDir: string, untilMs: number, opening
   if (!(untilMs <= SEAL_INSTANT_MS)) throw new Error('bench tape: untilMs is past the seal');
   // Past the development window is the internal verification: the data is not even truncated
   // in, let alone computed on, without the committed freeze.
-  if (untilMs > DEVELOPMENT.toMs && !(opening instanceof VerificationOpening)) {
+  if (untilMs > DEVELOPMENT.toMs && !isGenuineOpening(opening)) {
     throw new Error('bench tape: candles past 2023-01-01 belong to the internal verification — refused without a committed freeze');
   }
   const core = loadCertifiedPart(CORE_PIN, rootDir);

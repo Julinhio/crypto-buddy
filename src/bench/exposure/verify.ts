@@ -10,8 +10,11 @@ import { computeRunMetrics, dailyLogReturns, type RunMetrics } from './metrics.j
 import { computeComponents } from './components.js';
 import { stationaryBootstrap } from './stats.js';
 import { topDecileOfRun } from './variants.js';
-import { FREEZE_FILE, frozenCandidateScore, frozenCandidateTransform, loadFreeze, openVerification, realOpeningEnv, type CandidateFreeze } from './freeze.js';
-import { CALIBRATION, DEVELOPMENT, SEAL_INSTANT_MS, VERIFICATION, type VerificationOpening } from './windows.js';
+import { FREEZE_FILE, loadFreeze, type CandidateFreeze } from './freeze.js';
+import { openVerification, type VerificationOpening } from './opening.js';
+import { compositeScore, linearTarget, type Normalisation } from './score.js';
+import type { ComponentVector } from './components.js';
+import { CALIBRATION, DEVELOPMENT, SEAL_INSTANT_MS, VERIFICATION } from './windows.js';
 
 /**
  * THE INTERNAL VERIFICATION — opened once, on the committed freeze, and filtered without adjustment.
@@ -28,6 +31,25 @@ import { CALIBRATION, DEVELOPMENT, SEAL_INSTANT_MS, VERIFICATION, type Verificat
  */
 
 export const VERIFICATION_OUT_DIR = path.join('out', 'bench-exposure', 'verification');
+
+/** The candidate's score at each bar, from the FROZEN normalisations — never refitted. */
+export function frozenCandidateScore(
+  freeze: CandidateFreeze,
+  components: Map<number, ComponentVector>,
+): (t: number) => number | null {
+  const terms = freeze.candidate.normalisations.map((n) => ({
+    normalisation: { component: n.component, mean: n.mean, sd: n.sd, learnedOn: 'development', n: n.n } as Normalisation,
+    weight: 1 / freeze.candidate.normalisations.length,
+  }));
+  return (t) => {
+    const v = components.get(t);
+    return v ? compositeScore(v, terms) : null;
+  };
+}
+
+export function frozenCandidateTransform(freeze: CandidateFreeze): (score: number) => number {
+  return linearTarget(freeze.candidate.transform.zAtZeroPercent, freeze.candidate.transform.zAtHundredPercent);
+}
 
 export interface Qualification {
   f1: { pass: boolean; candidateMaxDrawdownOnCalibration: number; limit: number };
@@ -141,8 +163,9 @@ function continuous(params: {
 }
 
 export function runVerification(rootDir = process.cwd()): { files: WrittenFile[]; summary: unknown } {
+  const opening = openVerification(rootDir, VERIFICATION_OUT_DIR);
   const freeze = loadFreeze(rootDir);
-  const opening = openVerification(freeze, realOpeningEnv(rootDir, VERIFICATION_OUT_DIR));
+  if (freeze.decisions_sha256 !== opening.evidence.freezeSha256) throw new Error('verification refused: the freeze changed under the opening');
 
   const cfg = buildBenchConfig();
   if (benchConfigSha256(cfg) !== freeze.bench_config_sha256) throw new Error('verification refused: the bench configuration moved since the freeze');

@@ -21,7 +21,12 @@ import { HORIZONS_DAYS, runPredictiveStudy } from '../bench/exposure/predictive.
 import { compositeScore, fitNormalisation, linearTarget, stepTarget, topDecileMedianExposure } from '../bench/exposure/score.js';
 import { laggedProducts, mulberry32, neweyWest, politisWhite, stationaryBootstrap } from '../bench/exposure/stats.js';
 import { ClosedWindowError, DEVELOPMENT, SEAL_INSTANT_MS, VALIDATION, VERIFICATION, assertMeasurable, insideWithEmbargo, type Window } from '../bench/exposure/windows.js';
-import { FreezeRefusedError, freezeDigest, loadFreeze, openVerification, type CandidateFreeze, type OpeningEnv } from '../bench/exposure/freeze.js';
+import { FreezeRefusedError, freezeDigest, type CandidateFreeze } from '../bench/exposure/freeze.js';
+import { checkOpeningConditions, isGenuineOpening, openVerification, type OpeningEnv } from '../bench/exposure/opening.js';
+import * as openingModule from '../bench/exposure/opening.js';
+import * as freezeModule from '../bench/exposure/freeze.js';
+import * as windowsModule from '../bench/exposure/windows.js';
+import { execFileSync } from 'node:child_process';
 import { applyQualification } from '../bench/exposure/verify.js';
 import { TC44, TC44_TARGET_PERCENT } from '../bench/exposure/policy.js';
 
@@ -551,8 +556,8 @@ console.log('\nProof 11 — the six SCORE variants, as validated on 17/10:');
   ok('the conviction decile reads the exposure of the NEXT bar', dec != null && dec.bars === 2 && near(dec.medianExposurePercent, ((18 + 19) / 2) * 5));
 }
 
-// ── PROOF 12 — the internal verification opens only on a committed freeze ─────────────
-console.log('\nProof 12 — the opening of the internal verification, refusal by refusal (synthetic):');
+// ── PROOF 12 — the internal verification opens only on a committed, intact freeze ─────
+console.log('\nProof 12 — the opening is an unforgeable capability, and it checks the dependency lock:');
 {
   ok('TC44 is a constant 44.226403 % whose gate sees the risk_off, like the candidate', TC44_TARGET_PERCENT === 44.226403 && TC44.gateSeesRiskOff &&
     TC44.decide({ point: { global: { riskOff: true } } as never, sticky: {}, excludedBefore: new Set() }).totalTargetPercent === 44.226403);
@@ -562,49 +567,118 @@ console.log('\nProof 12 — the opening of the internal verification, refusal by
   assert.throws(() => prepareCalibrationTape(ROOT, SEAL_INSTANT_MS));
   ok('the tape refuses candles past 2023-01-01 without an opening, before reading them', true);
 
-  // A synthetic freeze, signed, and the git facts it would need.
-  const body = { schema_version: 1, kind: 'bench-exposure-candidate-freeze', source_tree_sha: 'abc', qualification_rules: {} } as unknown as Omit<CandidateFreeze, 'decisions_sha256'>;
+  // ── FORGERIES (Codex P1): nothing that was not issued by openVerification passes a gate ──
+  const evidence = { freezeSha256: 'x', freezeCommit: 'y', sourceTreeSha: 'z', depsLockSha: 'w' };
+  class VerificationOpening { readonly evidence = evidence; }
+  class GenuineOpening { readonly evidence = evidence; }
+  const forgeries: Array<[string, unknown]> = [
+    ['a plain object with the right shape', { evidence }],
+    ['a frozen look-alike', Object.freeze({ evidence: Object.freeze({ ...evidence }) })],
+    ['an instance of a class named VerificationOpening', new VerificationOpening()],
+    ['an instance of a class named GenuineOpening', new GenuineOpening()],
+    ['an object with no prototype', Object.assign(Object.create(null), { evidence })],
+  ];
+  for (const [label, forged] of forgeries) {
+    assert.throws(() => assertMeasurable(VERIFICATION, forged as never), ClosedWindowError, label);
+    assert.throws(() => prepareCalibrationTape(ROOT, SEAL_INSTANT_MS, forged as never), Error, label);
+    ok(`refused by the window AND the tape: ${label}`, !isGenuineOpening(forged));
+  }
+  // The public surface: no class is exported, and nothing but openVerification issues.
+  const surfaces: Record<string, Record<string, unknown>> = { opening: openingModule, freeze: freezeModule, windows: windowsModule };
+  const classes = Object.entries(surfaces).flatMap(([m, ns]) =>
+    Object.entries(ns).filter(([, v]) => typeof v === 'function' && /^class\s/.test(Function.prototype.toString.call(v)) && !/Error$/.test(String((v as { name?: string }).name)))
+      .map(([k]) => `${m}.${k}`));
+  ok(`no opening class is exported by opening.ts, freeze.ts or windows.ts (${classes.join(', ') || 'none'})`, classes.length === 0);
+  ok('opening.ts exports exactly the check, the guard and the issuer',
+    Object.keys(openingModule).sort().join(',') === 'checkOpeningConditions,isGenuineOpening,openVerification');
+  const sources = (() => {
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const e of readdirSync(dir)) {
+        const p = path.join(dir, e);
+        if (statSync(p).isDirectory()) walk(p);
+        else if (p.endsWith('.ts')) files.push(p);
+      }
+    };
+    walk(path.join(ROOT, 'src'));
+    return files;
+  })();
+  const writers = sources.filter((f) => /ISSUED\.add\(/.test(readFileSync(f, 'utf8')));
+  ok('only opening.ts ever adds to the registry of issued openings', writers.length === 1 && writers[0]!.endsWith(path.join('bench', 'exposure', 'opening.ts')));
+
+  // ── THE PURE CHECK: every refusal, with an injected environment, issuing nothing ──
+  const body = { schema_version: 1, kind: 'bench-exposure-candidate-freeze', source_tree_sha: 'abc', deps_lock_sha: 'lock1', qualification_rules: {} } as unknown as Omit<CandidateFreeze, 'decisions_sha256'>;
   const fake = { ...body, decisions_sha256: freezeDigest(body) } as CandidateFreeze;
-  const good: OpeningEnv = { committed: true, dirtyPaths: [], sourceTreeSha: 'abc', freezeCommit: 'f00' };
-  const opening = openVerification(fake, good);
-  assertMeasurable(VERIFICATION, opening);
-  ok('a committed, intact freeze on a clean tree of the same source opens it', opening.evidence.freezeCommit === 'f00');
+  const good: OpeningEnv = { committed: true, dirtyPaths: [], sourceTreeSha: 'abc', depsLockSha: 'lock1', freezeCommit: 'f00' };
+  const checked = checkOpeningConditions(fake, good);
+  ok('the pure check accepts the good facts and returns NOTHING to open with', checked === undefined);
   for (const [label, env] of [
     ['an uncommitted freeze', { ...good, committed: false }],
     ['git unable to say whether it is committed', { ...good, committed: null }],
     ['a dirty working tree', { ...good, dirtyPaths: [' M src/bench/exposure/policy.ts'] }],
     ['another source tree than the one that froze', { ...good, sourceTreeSha: 'def' }],
+    ['another dependency lock than the one that froze', { ...good, depsLockSha: 'lock2' }],
+    ['no readable dependency lock', { ...good, depsLockSha: null }],
     ['no commit carrying the freeze', { ...good, freezeCommit: null }],
   ] as Array<[string, OpeningEnv]>) {
-    assert.throws(() => openVerification(fake, env), FreezeRefusedError, label);
+    assert.throws(() => checkOpeningConditions(fake, env), FreezeRefusedError, label);
     ok(`refused: ${label}`, true);
   }
-  assert.throws(() => assertMeasurable({ ...VERIFICATION, toMs: SEAL_INSTANT_MS + H4 }, opening), ClosedWindowError);
-  ok('even opened, a "verification" window cannot reach past the seal', true);
 
-  // A freeze edited after signing is refused on load.
-  const sandbox = mkdtempSync(path.join(tmpdir(), 'bench-freeze-'));
-  mkdirSync(path.join(sandbox, 'out', 'bench-exposure', 'development'), { recursive: true });
-  const fpath = path.join(sandbox, 'out', 'bench-exposure', 'development', 'freeze.json');
-  writeFileSync(fpath, JSON.stringify(fake));
-  ok('an intact freeze loads', loadFreeze(sandbox).decisions_sha256 === fake.decisions_sha256);
-  writeFileSync(fpath, JSON.stringify({ ...fake, source_tree_sha: 'tampered' }));
-  assert.throws(() => loadFreeze(sandbox), FreezeRefusedError);
-  ok('a freeze edited after signing is refused', true);
-  rmSync(sandbox, { recursive: true, force: true });
-
-  // Only freeze.ts constructs the opening.
-  const files: string[] = [];
-  const walk = (dir: string): void => {
-    for (const e of readdirSync(dir)) {
-      const p = path.join(dir, e);
-      if (statSync(p).isDirectory()) walk(p);
-      else if (p.endsWith('.ts')) files.push(p);
-    }
+  // ── THE PUBLIC PATH, end to end, in a throw-away git repository ──
+  const repo = mkdtempSync(path.join(tmpdir(), 'bench-opening-'));
+  const g = (...args: string[]): string =>
+    execFileSync('git', ['-c', 'user.email=bench@test', '-c', 'user.name=bench', '-c', 'core.autocrlf=false', ...args], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  const ART = path.join('out', 'bench-exposure', 'verification');
+  const freezePath = path.join(repo, 'out', 'bench-exposure', 'development', 'freeze.json');
+  const writeFreeze = (fields: Record<string, unknown>): void => {
+    const b = { schema_version: 1, kind: 'bench-exposure-candidate-freeze', ...fields } as unknown as Omit<CandidateFreeze, 'decisions_sha256'>;
+    writeFileSync(freezePath, `${JSON.stringify({ ...b, decisions_sha256: freezeDigest(b) }, null, 2)}\n`);
   };
-  walk(path.join(ROOT, 'src'));
-  const minters = files.filter((f) => /new VerificationOpening\(/.test(readFileSync(f, 'utf8')));
-  ok('only freeze.ts constructs a VerificationOpening', minters.length === 1 && minters[0]!.endsWith(path.join('bench', 'exposure', 'freeze.ts')));
+  g('init', '-q');
+  mkdirSync(path.join(repo, 'src'), { recursive: true });
+  mkdirSync(path.dirname(freezePath), { recursive: true });
+  writeFileSync(path.join(repo, 'src', 'a.ts'), 'export const a = 1;\n');
+  writeFileSync(path.join(repo, 'package-lock.json'), '{"lockfileVersion":3}\n');
+  g('add', '-A');
+  g('commit', '-q', '-m', 'code');
+  assert.throws(() => openVerification(repo, ART), FreezeRefusedError);
+  ok('public path: no freeze at all — refused', true);
+
+  writeFreeze({ source_tree_sha: g('rev-parse', 'HEAD:src'), deps_lock_sha: g('rev-parse', 'HEAD:package-lock.json') });
+  assert.throws(() => openVerification(repo, ART), FreezeRefusedError);
+  ok('public path: a freeze written but not committed — refused', true);
+
+  g('add', '-A');
+  g('commit', '-q', '-m', 'freeze');
+  const genuine = openVerification(repo, ART);
+  ok('public path: a committed, intact freeze on a clean tree issues a GENUINE opening', isGenuineOpening(genuine));
+  assertMeasurable(VERIFICATION, genuine);
+  ok('…which the window accepts', true);
+  const rebuilt = new (genuine.constructor as new (e: unknown) => object)(genuine.evidence);
+  ok("re-using the genuine opening's own constructor yields nothing a gate accepts", !isGenuineOpening(rebuilt));
+  assert.throws(() => assertMeasurable(VERIFICATION, rebuilt as never), ClosedWindowError);
+  ok('…the window refuses it', true);
+  assert.throws(() => assertMeasurable({ ...VERIFICATION, toMs: SEAL_INSTANT_MS + H4 }, genuine), ClosedWindowError);
+  ok('even genuinely opened, a "verification" window cannot reach past the seal', true);
+
+  writeFileSync(path.join(repo, 'package-lock.json'), '{"lockfileVersion":3,"packages":{"x":{}}}\n');
+  assert.throws(() => openVerification(repo, ART), FreezeRefusedError);
+  ok('public path: a MODIFIED dependency lock, not yet committed — refused (dirty tree)', true);
+  g('add', '-A');
+  g('commit', '-q', '-m', 'bump a dependency, src untouched');
+  assert.throws(() => openVerification(repo, ART), /dependency lock/);
+  ok('public path: a dependency bump COMMITTED without touching src — refused on the lock (Codex P2)', true);
+
+  g('reset', '-q', '--hard', 'HEAD~1');
+  ok('public path: back on the frozen lock, it opens again', isGenuineOpening(openVerification(repo, ART)));
+  const raw = JSON.parse(readFileSync(freezePath, 'utf8')) as Record<string, unknown>;
+  writeFileSync(freezePath, `${JSON.stringify({ ...raw, source_tree_sha: 'tampered' }, null, 2)}\n`);
+  g('add', '-A');
+  g('commit', '-q', '-m', 'tamper');
+  assert.throws(() => openVerification(repo, ART), /edited after it was signed/);
+  ok('public path: a freeze edited after signing, even committed — refused', true);
+  rmSync(repo, { recursive: true, force: true });
 }
 
 // ── PROOF 13 — the qualification filters, branch by branch (synthetic numbers) ────────
