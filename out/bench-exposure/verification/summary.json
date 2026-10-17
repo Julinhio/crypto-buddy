@@ -1,0 +1,1325 @@
+{
+  "kind": "bench-exposure-verification",
+  "protocol": "docs/PROTOCOLE-EXPOSITION-v1.3.md, with the amendments of 17/10 (re-entry; TC44 and qualification)",
+  "freeze": {
+    "file": "out/bench-exposure/development/freeze.json",
+    "decisions_sha256": "0da173c7fd41deee00d9885764de16520b3201a433fb2ea5a52f4cdff5d4b16f",
+    "commit": "77e3f70257a784b774a3ad46bfffdc361947e836"
+  },
+  "windows": {
+    "development": {
+      "from": "2021-01-01T00:00:00.000Z",
+      "to_exclusive": "2023-01-01T00:00:00.000Z"
+    },
+    "verification": {
+      "from": "2023-01-01T00:00:00.000Z",
+      "to_exclusive": "2024-07-01T00:00:00.000Z"
+    },
+    "calibration": {
+      "from": "2021-01-01T00:00:00.000Z",
+      "to_exclusive": "2024-07-01T00:00:00.000Z"
+    }
+  },
+  "note": "continuous trajectory over the whole calibration; nothing adjusted after reading; the sealed validation window is not opened",
+  "policies": {
+    "SCORE-C-linear": {
+      "development": {
+        "policy": "SCORE-C-linear",
+        "window": "development",
+        "bars": 4380,
+        "openingEquity": 1000,
+        "closingEquity": 2053.5453639361585,
+        "netReturnPercent": 105.35453639361587,
+        "annualisedReturnPercent": 43.33728449730208,
+        "maxDrawdownPercent": 43.88376119191224,
+        "timeUnderHighPercent": 98.08219178082192,
+        "longestUnderHighDays": 598.8333333333334,
+        "feesPaid": 241.51390573052265,
+        "slippageCost": 120.72684695407735,
+        "tradedNotional": 241513.90573052253,
+        "turnover": 95.10715520081152,
+        "exposure": {
+          "median": 40.42909671822051,
+          "q1": 14.701942983944075,
+          "q3": 70.06148536292096,
+          "p90": 97.6633747856571,
+          "timeInZonePercent": {
+            "0-20": 30.799086757990867,
+            "20-50": 25.205479452054796,
+            "50-80": 25.319634703196346,
+            "80-100": 18.67579908675799
+          },
+          "mean": 44.226403268898906
+        },
+        "stopExits": 109,
+        "barsWithCapacityShortfall": 1122,
+        "barsWithOverExposure": 79,
+        "suppressedLegs": {
+          "movement_floor": 7290,
+          "dust": 4992,
+          "no_budget": 24
+        },
+        "pendingNotExecuted": 1,
+        "turnoverByCause": {
+          "drift_or_other": 1.861430349992688,
+          "line_state_change": 11.569175275926044,
+          "stop_exit": 21.752704818648738,
+          "policy_target_change": 36.17648281099343,
+          "release_after_stop": 23.747361945250624
+        },
+        "bySubperiod": [
+          {
+            "period": "2021",
+            "bars": 2190,
+            "startEquity": 1000,
+            "endEquity": 2800.928661454128,
+            "returnPercent": 180.09286614541278,
+            "maxDrawdownPercent": 35.804765344615355,
+            "meanExposurePercent": 54.14039842306156,
+            "fees": 144.29327978363082,
+            "slippageCost": 72.12885984570413,
+            "stopExits": 78
+          },
+          {
+            "period": "2022",
+            "bars": 2190,
+            "startEquity": 2800.928661454128,
+            "endEquity": 2053.5453639361585,
+            "returnPercent": -26.683410677441476,
+            "maxDrawdownPercent": 43.88376119191224,
+            "meanExposurePercent": 34.3124081147363,
+            "fees": 97.22062594689177,
+            "slippageCost": 48.59798710837322,
+            "stopExits": 31
+          }
+        ],
+        "frictionPercentOfOpening": 36.22407526846
+      },
+      "verification": {
+        "policy": "SCORE-C-linear",
+        "window": "verification",
+        "bars": 3282,
+        "openingEquity": 2053.535337795256,
+        "closingEquity": 2739.4684745547797,
+        "netReturnPercent": 33.4025484799285,
+        "annualisedReturnPercent": 21.220544025496267,
+        "maxDrawdownPercent": 43.813992314945956,
+        "timeUnderHighPercent": 100,
+        "longestUnderHighDays": 547,
+        "feesPaid": 151.24703253854034,
+        "slippageCost": 75.60467056793313,
+        "tradedNotional": 151247.03253854014,
+        "turnover": 61.573323663512625,
+        "exposure": {
+          "median": 50.10650013698084,
+          "q1": 22.246564169376363,
+          "q3": 71.83432330970875,
+          "p90": 97.90923765888986,
+          "timeInZonePercent": {
+            "0-20": 21.480804387568554,
+            "20-50": 27.879341864716633,
+            "50-80": 34.12553321145643,
+            "80-100": 16.514320536258378
+          },
+          "mean": 47.948729586581784
+        },
+        "stopExits": 37,
+        "barsWithCapacityShortfall": 362,
+        "barsWithOverExposure": 75,
+        "suppressedLegs": {
+          "dust": 3509,
+          "movement_floor": 6436,
+          "no_budget": 20
+        },
+        "pendingNotExecuted": 1,
+        "turnoverByCause": {
+          "policy_target_change": 33.52227803715672,
+          "line_state_change": 10.884019360224661,
+          "stop_exit": 7.67656039551785,
+          "release_after_stop": 9.114944845846017,
+          "drift_or_other": 0.375521024767414
+        },
+        "bySubperiod": [
+          {
+            "period": "2023",
+            "bars": 2190,
+            "startEquity": 2053.535337795256,
+            "endEquity": 2385.6196346792062,
+            "returnPercent": 16.171345619037993,
+            "maxDrawdownPercent": 43.813992314945956,
+            "meanExposurePercent": 41.54115821531086,
+            "fees": 91.98094147306765,
+            "slippageCost": 45.9789491254487,
+            "stopExits": 17
+          },
+          {
+            "period": "2024",
+            "bars": 1092,
+            "startEquity": 2385.6196346792062,
+            "endEquity": 2739.4684745547797,
+            "returnPercent": 14.832575769068711,
+            "maxDrawdownPercent": 39.125921247428046,
+            "meanExposurePercent": 60.799078765229304,
+            "fees": 59.26609106547266,
+            "slippageCost": 29.625721442484434,
+            "stopExits": 20
+          }
+        ],
+        "frictionPercentOfOpening": 11.046885774560325
+      },
+      "calibration": {
+        "policy": "SCORE-C-linear",
+        "window": "calibration",
+        "bars": 7662,
+        "openingEquity": 1000,
+        "closingEquity": 2739.4684745547797,
+        "netReturnPercent": 173.946847455478,
+        "annualisedReturnPercent": 33.408088099144216,
+        "maxDrawdownPercent": 43.88376119191224,
+        "timeUnderHighPercent": 98.90368050117463,
+        "longestUnderHighDays": 1145.8333333333333,
+        "feesPaid": 392.7609382690629,
+        "slippageCost": 196.33151752201044,
+        "tradedNotional": 392760.93826906226,
+        "turnover": 156.8641711727333,
+        "exposure": {
+          "median": 45.45143883311188,
+          "q1": 18.57711573794043,
+          "q3": 71.14459735574442,
+          "p90": 97.70691725715416,
+          "timeInZonePercent": {
+            "0-20": 26.807622030801358,
+            "20-50": 26.350822239624115,
+            "50-80": 29.09162098668755,
+            "80-100": 17.749934742886975
+          },
+          "mean": 45.820853148125515
+        },
+        "stopExits": 146,
+        "barsWithCapacityShortfall": 1484,
+        "barsWithOverExposure": 154,
+        "suppressedLegs": {
+          "movement_floor": 13726,
+          "dust": 8501,
+          "no_budget": 44
+        },
+        "pendingNotExecuted": 1,
+        "turnoverByCause": {
+          "drift_or_other": 2.2562699076797332,
+          "line_state_change": 22.411212174959562,
+          "stop_exit": 29.5926997657675,
+          "policy_target_change": 69.57718201344862,
+          "release_after_stop": 33.02680731087814
+        },
+        "bySubperiod": [
+          {
+            "period": "2021",
+            "bars": 2190,
+            "startEquity": 1000,
+            "endEquity": 2800.928661454128,
+            "returnPercent": 180.09286614541278,
+            "maxDrawdownPercent": 35.804765344615355,
+            "meanExposurePercent": 54.14039842306156,
+            "fees": 144.29327978363082,
+            "slippageCost": 72.12885984570413,
+            "stopExits": 78
+          },
+          {
+            "period": "2022",
+            "bars": 2190,
+            "startEquity": 2800.928661454128,
+            "endEquity": 2053.5453639361585,
+            "returnPercent": -26.683410677441476,
+            "maxDrawdownPercent": 43.88376119191224,
+            "meanExposurePercent": 34.3124081147363,
+            "fees": 97.22062594689177,
+            "slippageCost": 48.59798710837322,
+            "stopExits": 31
+          },
+          {
+            "period": "2023",
+            "bars": 2190,
+            "startEquity": 2053.5453639361585,
+            "endEquity": 2385.6196346792062,
+            "returnPercent": 16.17077842909398,
+            "maxDrawdownPercent": 43.813992314945956,
+            "meanExposurePercent": 41.54115821531086,
+            "fees": 91.98094147306765,
+            "slippageCost": 45.9789491254487,
+            "stopExits": 17
+          },
+          {
+            "period": "2024",
+            "bars": 1092,
+            "startEquity": 2385.6196346792062,
+            "endEquity": 2739.4684745547797,
+            "returnPercent": 14.832575769068711,
+            "maxDrawdownPercent": 39.125921247428046,
+            "meanExposurePercent": 60.799078765229304,
+            "fees": 59.26609106547266,
+            "slippageCost": 29.625721442484434,
+            "stopExits": 20
+          }
+        ],
+        "frictionPercentOfOpening": 58.90924557910734
+      }
+    },
+    "TC44": {
+      "development": {
+        "policy": "TC44",
+        "window": "development",
+        "bars": 4380,
+        "openingEquity": 1000,
+        "closingEquity": 1171.4024700297102,
+        "netReturnPercent": 17.14024700297103,
+        "annualisedReturnPercent": 8.237212037640118,
+        "maxDrawdownPercent": 49.32899726694049,
+        "timeUnderHighPercent": 97.28310502283105,
+        "longestUnderHighDays": 416.3333333333333,
+        "feesPaid": 100.77299957101437,
+        "slippageCost": 50.373882054871956,
+        "tradedNotional": 100772.99957101443,
+        "turnover": 65.31887836069261,
+        "exposure": {
+          "median": 43.64332326561146,
+          "q1": 34.96448747862187,
+          "q3": 44.50081018795976,
+          "p90": 45.19502402681491,
+          "timeInZonePercent": {
+            "0-20": 17.511415525114156,
+            "20-50": 82.48858447488584,
+            "50-80": 0,
+            "80-100": 0
+          },
+          "mean": 35.98711355092342
+        },
+        "stopExits": 136,
+        "barsWithCapacityShortfall": 1383,
+        "barsWithOverExposure": 57,
+        "suppressedLegs": {
+          "movement_floor": 8006,
+          "dust": 5779,
+          "no_budget": 13
+        },
+        "pendingNotExecuted": 1,
+        "turnoverByCause": {
+          "drift_or_other": 1.5377465302246855,
+          "stop_exit": 27.849155864956195,
+          "line_state_change": 6.819650136615952,
+          "release_after_stop": 29.112325828895724
+        },
+        "bySubperiod": [
+          {
+            "period": "2021",
+            "bars": 2190,
+            "startEquity": 1000,
+            "endEquity": 1750.119525910746,
+            "returnPercent": 75.0119525910746,
+            "maxDrawdownPercent": 26.785197443334884,
+            "meanExposurePercent": 34.708197866978644,
+            "fees": 62.61309723867971,
+            "slippageCost": 31.298736275784968,
+            "stopExits": 79
+          },
+          {
+            "period": "2022",
+            "bars": 2190,
+            "startEquity": 1750.119525910746,
+            "endEquity": 1171.4024700297102,
+            "returnPercent": -33.067287537397014,
+            "maxDrawdownPercent": 49.32899726694049,
+            "meanExposurePercent": 37.26602923486839,
+            "fees": 38.159902332334674,
+            "slippageCost": 19.07514577908697,
+            "stopExits": 57
+          }
+        ],
+        "frictionPercentOfOpening": 15.114688162588633
+      },
+      "verification": {
+        "policy": "TC44",
+        "window": "verification",
+        "bars": 3282,
+        "openingEquity": 1171.3960703001173,
+        "closingEquity": 1757.5215287632361,
+        "netReturnPercent": 50.03648836835781,
+        "annualisedReturnPercent": 31.115034722936286,
+        "maxDrawdownPercent": 45.72887934828937,
+        "timeUnderHighPercent": 100,
+        "longestUnderHighDays": 547,
+        "feesPaid": 37.67812054910947,
+        "slippageCost": 18.83439937966326,
+        "tradedNotional": 37678.12054910947,
+        "turnover": 25.275536824318174,
+        "exposure": {
+          "median": 44.127484686382076,
+          "q1": 43.48705243079319,
+          "q3": 44.74040461245516,
+          "p90": 45.797909113045876,
+          "timeInZonePercent": {
+            "0-20": 3.9000609384521634,
+            "20-50": 96.09993906154783,
+            "50-80": 0,
+            "80-100": 0
+          },
+          "mean": 42.60055010391525
+        },
+        "stopExits": 52,
+        "barsWithCapacityShortfall": 317,
+        "barsWithOverExposure": 44,
+        "suppressedLegs": {
+          "dust": 4257,
+          "movement_floor": 7624,
+          "no_budget": 9
+        },
+        "pendingNotExecuted": 1,
+        "turnoverByCause": {
+          "drift_or_other": 0.4492990893894779,
+          "line_state_change": 3.6958870486374638,
+          "stop_exit": 10.77541601889218,
+          "release_after_stop": 10.354934667399053
+        },
+        "bySubperiod": [
+          {
+            "period": "2023",
+            "bars": 2190,
+            "startEquity": 1171.3960703001173,
+            "endEquity": 1579.4738678326908,
+            "returnPercent": 34.83687608991397,
+            "maxDrawdownPercent": 45.72887934828937,
+            "meanExposurePercent": 43.172900267695006,
+            "fees": 19.10986512925521,
+            "slippageCost": 9.552579171876255,
+            "stopExits": 28
+          },
+          {
+            "period": "2024",
+            "bars": 1092,
+            "startEquity": 1579.4738678326908,
+            "endEquity": 1757.5215287632361,
+            "returnPercent": 11.272593016993525,
+            "maxDrawdownPercent": 29.389893202683986,
+            "meanExposurePercent": 41.45270499523608,
+            "fees": 18.568255419854253,
+            "slippageCost": 9.281820207787007,
+            "stopExits": 24
+          }
+        ],
+        "frictionPercentOfOpening": 4.824373357705899
+      },
+      "calibration": {
+        "policy": "TC44",
+        "window": "calibration",
+        "bars": 7662,
+        "openingEquity": 1000,
+        "closingEquity": 1757.5215287632361,
+        "netReturnPercent": 75.75215287632362,
+        "annualisedReturnPercent": 17.50245939002406,
+        "maxDrawdownPercent": 49.32899726694049,
+        "timeUnderHighPercent": 98.44688070999739,
+        "longestUnderHighDays": 963.3333333333334,
+        "feesPaid": 138.45112012012376,
+        "slippageCost": 69.20828143453512,
+        "tradedNotional": 138451.12012012384,
+        "turnover": 91.05795375869111,
+        "exposure": {
+          "median": 43.94000476958688,
+          "q1": 42.55991601186696,
+          "q3": 44.59805260513691,
+          "p90": 45.444340379706226,
+          "timeInZonePercent": {
+            "0-20": 11.681023231532237,
+            "20-50": 88.31897676846776,
+            "50-80": 0,
+            "80-100": 0
+          },
+          "mean": 38.819963820685814
+        },
+        "stopExits": 188,
+        "barsWithCapacityShortfall": 1700,
+        "barsWithOverExposure": 101,
+        "suppressedLegs": {
+          "movement_floor": 15630,
+          "dust": 10036,
+          "no_budget": 22
+        },
+        "pendingNotExecuted": 1,
+        "turnoverByCause": {
+          "drift_or_other": 2.000812553338753,
+          "stop_exit": 38.822224034646105,
+          "line_state_change": 10.543232906118668,
+          "release_after_stop": 39.69168426458759
+        },
+        "bySubperiod": [
+          {
+            "period": "2021",
+            "bars": 2190,
+            "startEquity": 1000,
+            "endEquity": 1750.119525910746,
+            "returnPercent": 75.0119525910746,
+            "maxDrawdownPercent": 26.785197443334884,
+            "meanExposurePercent": 34.708197866978644,
+            "fees": 62.61309723867971,
+            "slippageCost": 31.298736275784968,
+            "stopExits": 79
+          },
+          {
+            "period": "2022",
+            "bars": 2190,
+            "startEquity": 1750.119525910746,
+            "endEquity": 1171.4024700297102,
+            "returnPercent": -33.067287537397014,
+            "maxDrawdownPercent": 49.32899726694049,
+            "meanExposurePercent": 37.26602923486839,
+            "fees": 38.159902332334674,
+            "slippageCost": 19.07514577908697,
+            "stopExits": 57
+          },
+          {
+            "period": "2023",
+            "bars": 2190,
+            "startEquity": 1171.4024700297102,
+            "endEquity": 1579.4738678326908,
+            "returnPercent": 34.83613943486312,
+            "maxDrawdownPercent": 45.72887934828937,
+            "meanExposurePercent": 43.172900267695006,
+            "fees": 19.10986512925521,
+            "slippageCost": 9.552579171876255,
+            "stopExits": 28
+          },
+          {
+            "period": "2024",
+            "bars": 1092,
+            "startEquity": 1579.4738678326908,
+            "endEquity": 1757.5215287632361,
+            "returnPercent": 11.272593016993525,
+            "maxDrawdownPercent": 29.389893202683986,
+            "meanExposurePercent": 41.45270499523608,
+            "fees": 18.568255419854253,
+            "slippageCost": 9.281820207787007,
+            "stopExits": 24
+          }
+        ],
+        "frictionPercentOfOpening": 20.765940155465888
+      }
+    },
+    "T100": {
+      "development": {
+        "policy": "T100",
+        "window": "development",
+        "bars": 4380,
+        "openingEquity": 1000,
+        "closingEquity": 1418.9015023502818,
+        "netReturnPercent": 41.89015023502818,
+        "annualisedReturnPercent": 19.131925905450498,
+        "maxDrawdownPercent": 71.83077602805072,
+        "timeUnderHighPercent": 97.21461187214612,
+        "longestUnderHighDays": 416.3333333333333,
+        "feesPaid": 179.72684332619605,
+        "slippageCost": 89.84087014152686,
+        "tradedNotional": 179726.84332619587,
+        "turnover": 72.8481435744023,
+        "exposure": {
+          "median": 88.01829822269588,
+          "q1": 35.02216957350802,
+          "q3": 100,
+          "p90": 100,
+          "timeInZonePercent": {
+            "0-20": 17.73972602739726,
+            "20-50": 13.378995433789953,
+            "50-80": 13.698630136986301,
+            "80-100": 55.182648401826484
+          },
+          "mean": 67.27956600769285
+        },
+        "stopExits": 136,
+        "barsWithCapacityShortfall": 2888,
+        "barsWithOverExposure": 0,
+        "suppressedLegs": {
+          "movement_floor": 8094,
+          "dust": 5591,
+          "no_budget": 23
+        },
+        "pendingNotExecuted": 0,
+        "turnoverByCause": {
+          "drift_or_other": 3.0112042760876756,
+          "stop_exit": 33.67436489572382,
+          "release_after_stop": 33.983582860487125,
+          "line_state_change": 2.1789915421037263
+        },
+        "bySubperiod": [
+          {
+            "period": "2021",
+            "bars": 2190,
+            "startEquity": 1000,
+            "endEquity": 3256.911253392696,
+            "returnPercent": 225.69112533926958,
+            "maxDrawdownPercent": 42.08013904184305,
+            "meanExposurePercent": 64.21277898292006,
+            "fees": 113.85667404229525,
+            "slippageCost": 56.91405293519016,
+            "stopExits": 79
+          },
+          {
+            "period": "2022",
+            "bars": 2190,
+            "startEquity": 3256.911253392696,
+            "endEquity": 1418.9015023502818,
+            "returnPercent": -56.43413676463476,
+            "maxDrawdownPercent": 71.83077602805072,
+            "meanExposurePercent": 70.34635303246571,
+            "fees": 65.8701692839008,
+            "slippageCost": 32.926817206336686,
+            "stopExits": 57
+          }
+        ],
+        "frictionPercentOfOpening": 26.95677134677229
+      },
+      "verification": {
+        "policy": "T100",
+        "window": "verification",
+        "bars": 3282,
+        "openingEquity": 1418.8831619843081,
+        "closingEquity": 3093.8926905849335,
+        "netReturnPercent": 118.05126549377923,
+        "annualisedReturnPercent": 68.29328498024809,
+        "maxDrawdownPercent": 70.50536175865362,
+        "timeUnderHighPercent": 100,
+        "longestUnderHighDays": 547,
+        "feesPaid": 64.33111631630746,
+        "slippageCost": 32.157724744443975,
+        "tradedNotional": 64331.11631630744,
+        "turnover": 27.997130124993088,
+        "exposure": {
+          "median": 97.809044958496,
+          "q1": 83.6275313336556,
+          "q3": 100,
+          "p90": 100,
+          "timeInZonePercent": {
+            "0-20": 3.3820840950639854,
+            "20-50": 4.661791590493602,
+            "50-80": 16.514320536258378,
+            "80-100": 75.44180377818404
+          },
+          "mean": 84.99583208782877
+        },
+        "stopExits": 52,
+        "barsWithCapacityShortfall": 1623,
+        "barsWithOverExposure": 0,
+        "suppressedLegs": {
+          "dust": 4077,
+          "movement_floor": 7623,
+          "no_budget": 5
+        },
+        "pendingNotExecuted": 1,
+        "turnoverByCause": {
+          "drift_or_other": 0.3630079016073235,
+          "line_state_change": 1.371704758243222,
+          "stop_exit": 13.259042446201937,
+          "release_after_stop": 13.003375018940607
+        },
+        "bySubperiod": [
+          {
+            "period": "2023",
+            "bars": 2190,
+            "startEquity": 1418.8831619843081,
+            "endEquity": 2459.441151019759,
+            "returnPercent": 73.33641112353682,
+            "maxDrawdownPercent": 70.50536175865362,
+            "meanExposurePercent": 86.88199503744548,
+            "fees": 27.445734245879642,
+            "slippageCost": 13.719442407984904,
+            "stopExits": 28
+          },
+          {
+            "period": "2024",
+            "bars": 1092,
+            "startEquity": 2459.441151019759,
+            "endEquity": 3093.8926905849335,
+            "returnPercent": 25.796573311059355,
+            "maxDrawdownPercent": 51.84493757757242,
+            "meanExposurePercent": 81.21314265590489,
+            "fees": 36.885382070427795,
+            "slippageCost": 18.438282336459057,
+            "stopExits": 24
+          }
+        ],
+        "frictionPercentOfOpening": 6.800337310777005
+      },
+      "calibration": {
+        "policy": "T100",
+        "window": "calibration",
+        "bars": 7662,
+        "openingEquity": 1000,
+        "closingEquity": 3093.8926905849335,
+        "netReturnPercent": 209.38926905849337,
+        "annualisedReturnPercent": 38.13230391514679,
+        "maxDrawdownPercent": 71.83077602805072,
+        "timeUnderHighPercent": 98.4077264421822,
+        "longestUnderHighDays": 963.3333333333334,
+        "feesPaid": 244.0579596425034,
+        "slippageCost": 121.99859488597082,
+        "tradedNotional": 244057.9596425035,
+        "turnover": 101.92034072106252,
+        "exposure": {
+          "median": 89.92511573498403,
+          "q1": 54.63284538544753,
+          "q3": 100,
+          "p90": 100,
+          "timeInZonePercent": {
+            "0-20": 11.58966327329679,
+            "20-50": 9.64500130514226,
+            "50-80": 14.904724614983033,
+            "80-100": 63.860610806577924
+          },
+          "mean": 74.86828765674069
+        },
+        "stopExits": 188,
+        "barsWithCapacityShortfall": 4511,
+        "barsWithOverExposure": 0,
+        "suppressedLegs": {
+          "movement_floor": 15717,
+          "dust": 9668,
+          "no_budget": 28
+        },
+        "pendingNotExecuted": 1,
+        "turnoverByCause": {
+          "drift_or_other": 3.4507646411083743,
+          "stop_exit": 47.41753440923869,
+          "release_after_stop": 47.49079057116222,
+          "line_state_change": 3.561251099553228
+        },
+        "bySubperiod": [
+          {
+            "period": "2021",
+            "bars": 2190,
+            "startEquity": 1000,
+            "endEquity": 3256.911253392696,
+            "returnPercent": 225.69112533926958,
+            "maxDrawdownPercent": 42.08013904184305,
+            "meanExposurePercent": 64.21277898292006,
+            "fees": 113.85667404229525,
+            "slippageCost": 56.91405293519016,
+            "stopExits": 79
+          },
+          {
+            "period": "2022",
+            "bars": 2190,
+            "startEquity": 3256.911253392696,
+            "endEquity": 1418.9015023502818,
+            "returnPercent": -56.43413676463476,
+            "maxDrawdownPercent": 71.83077602805072,
+            "meanExposurePercent": 70.34635303246571,
+            "fees": 65.8701692839008,
+            "slippageCost": 32.926817206336686,
+            "stopExits": 57
+          },
+          {
+            "period": "2023",
+            "bars": 2190,
+            "startEquity": 1418.9015023502818,
+            "endEquity": 2459.441151019759,
+            "returnPercent": 73.33417062043543,
+            "maxDrawdownPercent": 70.50536175865362,
+            "meanExposurePercent": 86.88199503744548,
+            "fees": 27.445734245879642,
+            "slippageCost": 13.719442407984904,
+            "stopExits": 28
+          },
+          {
+            "period": "2024",
+            "bars": 1092,
+            "startEquity": 2459.441151019759,
+            "endEquity": 3093.8926905849335,
+            "returnPercent": 25.796573311059355,
+            "maxDrawdownPercent": 51.84493757757242,
+            "meanExposurePercent": 81.21314265590489,
+            "fees": 36.885382070427795,
+            "slippageCost": 18.438282336459057,
+            "stopExits": 24
+          }
+        ],
+        "frictionPercentOfOpening": 36.605655452847415
+      }
+    },
+    "R100/0": {
+      "development": {
+        "policy": "R100/0",
+        "window": "development",
+        "bars": 4380,
+        "openingEquity": 1000,
+        "closingEquity": 1510.4557670639056,
+        "netReturnPercent": 51.04557670639056,
+        "annualisedReturnPercent": 22.917960086780088,
+        "maxDrawdownPercent": 68.05105344913322,
+        "timeUnderHighPercent": 97.30593607305936,
+        "longestUnderHighDays": 416.3333333333333,
+        "feesPaid": 253.484832831404,
+        "slippageCost": 126.71066127482004,
+        "tradedNotional": 253484.8328314041,
+        "turnover": 97.25960612207356,
+        "exposure": {
+          "median": 88.8854416423655,
+          "q1": 34.673392873997415,
+          "q3": 100,
+          "p90": 100,
+          "timeInZonePercent": {
+            "0-20": 20.54794520547945,
+            "20-50": 10.593607305936073,
+            "50-80": 12.442922374429223,
+            "80-100": 56.41552511415525
+          },
+          "mean": 66.74494073604211
+        },
+        "stopExits": 113,
+        "barsWithCapacityShortfall": 2300,
+        "barsWithOverExposure": 0,
+        "suppressedLegs": {
+          "movement_floor": 7854,
+          "dust": 5057,
+          "no_budget": 34
+        },
+        "pendingNotExecuted": 0,
+        "turnoverByCause": {
+          "drift_or_other": 2.5174814482310452,
+          "stop_exit": 29.309689250024373,
+          "release_after_stop": 28.69607302586862,
+          "line_state_change": 8.01941218812471,
+          "policy_target_change": 28.716950209824812
+        },
+        "bySubperiod": [
+          {
+            "period": "2021",
+            "bars": 2190,
+            "startEquity": 1000,
+            "endEquity": 3305.6342308214516,
+            "returnPercent": 230.56342308214516,
+            "maxDrawdownPercent": 39.23168169269957,
+            "meanExposurePercent": 63.500640163650246,
+            "fees": 122.77425075373046,
+            "slippageCost": 61.3720935760431,
+            "stopExits": 77
+          },
+          {
+            "period": "2022",
+            "bars": 2190,
+            "startEquity": 3305.6342308214516,
+            "endEquity": 1510.4557670639056,
+            "returnPercent": -54.30662736425752,
+            "maxDrawdownPercent": 68.05105344913322,
+            "meanExposurePercent": 69.98924130843373,
+            "fees": 130.71058207767362,
+            "slippageCost": 65.33856769877701,
+            "stopExits": 36
+          }
+        ],
+        "frictionPercentOfOpening": 38.0195494106224
+      },
+      "verification": {
+        "policy": "R100/0",
+        "window": "verification",
+        "bars": 3282,
+        "openingEquity": 1510.4370573533788,
+        "closingEquity": 3736.6289493112067,
+        "netReturnPercent": 147.3872665610185,
+        "annualisedReturnPercent": 83.09271637515565,
+        "maxDrawdownPercent": 68.15985321840162,
+        "timeUnderHighPercent": 100,
+        "longestUnderHighDays": 547,
+        "feesPaid": 115.83733523574764,
+        "slippageCost": 57.90444547228442,
+        "tradedNotional": 115837.33523574767,
+        "turnover": 41.913829480408864,
+        "exposure": {
+          "median": 97.81193299866743,
+          "q1": 84.61145069771662,
+          "q3": 100,
+          "p90": 100,
+          "timeInZonePercent": {
+            "0-20": 6.703229737964655,
+            "20-50": 2.9250457038391224,
+            "50-80": 14.503351614868981,
+            "80-100": 75.86837294332724
+          },
+          "mean": 83.43180195255765
+        },
+        "stopExits": 36,
+        "barsWithCapacityShortfall": 1445,
+        "barsWithOverExposure": 0,
+        "suppressedLegs": {
+          "dust": 3807,
+          "movement_floor": 7377,
+          "no_budget": 36
+        },
+        "pendingNotExecuted": 1,
+        "turnoverByCause": {
+          "line_state_change": 5.059362086931364,
+          "stop_exit": 9.16192697265205,
+          "drift_or_other": 0.34742152947448646,
+          "release_after_stop": 9.206087468249626,
+          "policy_target_change": 18.13903142310132
+        },
+        "bySubperiod": [
+          {
+            "period": "2023",
+            "bars": 2190,
+            "startEquity": 1510.4370573533788,
+            "endEquity": 3083.4007076218004,
+            "returnPercent": 104.13963578360578,
+            "maxDrawdownPercent": 68.15985321840162,
+            "meanExposurePercent": 84.78332706569346,
+            "fees": 50.459733987222926,
+            "slippageCost": 25.223570561384193,
+            "stopExits": 16
+          },
+          {
+            "period": "2024",
+            "bars": 1092,
+            "startEquity": 3083.4007076218004,
+            "endEquity": 3736.6289493112067,
+            "returnPercent": 21.18531788861253,
+            "maxDrawdownPercent": 38.574896083488895,
+            "meanExposurePercent": 80.72132576412558,
+            "fees": 65.37760124852468,
+            "slippageCost": 32.680874910900215,
+            "stopExits": 20
+          }
+        ],
+        "frictionPercentOfOpening": 11.50274881447005
+      },
+      "calibration": {
+        "policy": "R100/0",
+        "window": "calibration",
+        "bars": 7662,
+        "openingEquity": 1000,
+        "closingEquity": 3736.6289493112067,
+        "netReturnPercent": 273.66289493112066,
+        "annualisedReturnPercent": 45.794729690303804,
+        "maxDrawdownPercent": 68.15985321840162,
+        "timeUnderHighPercent": 98.45993213260246,
+        "longestUnderHighDays": 963.3333333333334,
+        "feesPaid": 369.3221680671514,
+        "slippageCost": 184.61510674710445,
+        "tradedNotional": 369322.1680671516,
+        "turnover": 138.13118781390247,
+        "exposure": {
+          "median": 90.07475811309676,
+          "q1": 54.973932587335405,
+          "q3": 100,
+          "p90": 100,
+          "timeInZonePercent": {
+            "0-20": 14.617593317671625,
+            "20-50": 7.308796658835813,
+            "50-80": 13.325502479770297,
+            "80-100": 64.74810754372227
+          },
+          "mean": 73.89271918978812
+        },
+        "stopExits": 149,
+        "barsWithCapacityShortfall": 3745,
+        "barsWithOverExposure": 0,
+        "suppressedLegs": {
+          "movement_floor": 15231,
+          "dust": 8864,
+          "no_budget": 70
+        },
+        "pendingNotExecuted": 1,
+        "turnoverByCause": {
+          "drift_or_other": 2.8131018628780042,
+          "stop_exit": 38.040763098030055,
+          "release_after_stop": 37.488270257333944,
+          "line_state_change": 13.046807509287113,
+          "policy_target_change": 46.742245086373394
+        },
+        "bySubperiod": [
+          {
+            "period": "2021",
+            "bars": 2190,
+            "startEquity": 1000,
+            "endEquity": 3305.6342308214516,
+            "returnPercent": 230.56342308214516,
+            "maxDrawdownPercent": 39.23168169269957,
+            "meanExposurePercent": 63.500640163650246,
+            "fees": 122.77425075373046,
+            "slippageCost": 61.3720935760431,
+            "stopExits": 77
+          },
+          {
+            "period": "2022",
+            "bars": 2190,
+            "startEquity": 3305.6342308214516,
+            "endEquity": 1510.4557670639056,
+            "returnPercent": -54.30662736425752,
+            "maxDrawdownPercent": 68.05105344913322,
+            "meanExposurePercent": 69.98924130843373,
+            "fees": 130.71058207767362,
+            "slippageCost": 65.33856769877701,
+            "stopExits": 36
+          },
+          {
+            "period": "2023",
+            "bars": 2190,
+            "startEquity": 1510.4557670639056,
+            "endEquity": 3083.4007076218004,
+            "returnPercent": 104.13710714716649,
+            "maxDrawdownPercent": 68.15985321840162,
+            "meanExposurePercent": 84.78332706569346,
+            "fees": 50.459733987222926,
+            "slippageCost": 25.223570561384193,
+            "stopExits": 16
+          },
+          {
+            "period": "2024",
+            "bars": 1092,
+            "startEquity": 3083.4007076218004,
+            "endEquity": 3736.6289493112067,
+            "returnPercent": 21.18531788861253,
+            "maxDrawdownPercent": 38.574896083488895,
+            "meanExposurePercent": 80.72132576412558,
+            "fees": 65.37760124852468,
+            "slippageCost": 32.680874910900215,
+            "stopExits": 20
+          }
+        ],
+        "frictionPercentOfOpening": 55.39372748142558
+      }
+    },
+    "RPA": {
+      "development": {
+        "policy": "RPA",
+        "window": "development",
+        "bars": 4380,
+        "openingEquity": 1000,
+        "closingEquity": 1863.8594518405255,
+        "netReturnPercent": 86.38594518405253,
+        "annualisedReturnPercent": 36.55235279832789,
+        "maxDrawdownPercent": 51.440270350323324,
+        "timeUnderHighPercent": 97.8310502283105,
+        "longestUnderHighDays": 416.3333333333333,
+        "feesPaid": 273.28666812872257,
+        "slippageCost": 136.60929434385383,
+        "tradedNotional": 273286.6681287225,
+        "turnover": 112.22623000737853,
+        "exposure": {
+          "median": 52.4383892356942,
+          "q1": 0,
+          "q3": 90.0522494555649,
+          "p90": 100,
+          "timeInZonePercent": {
+            "0-20": 36.78082191780822,
+            "20-50": 12.168949771689498,
+            "50-80": 14.61187214611872,
+            "80-100": 36.43835616438356
+          },
+          "mean": 48.75622449499908
+        },
+        "stopExits": 72,
+        "barsWithCapacityShortfall": 1974,
+        "barsWithOverExposure": 47,
+        "suppressedLegs": {
+          "dust": 4545,
+          "movement_floor": 5595,
+          "no_budget": 17
+        },
+        "pendingNotExecuted": 0,
+        "turnoverByCause": {
+          "drift_or_other": 1.6981152389900067,
+          "line_state_change": 67.503055238075,
+          "stop_exit": 17.514366849289285,
+          "release_after_stop": 20.80456571417595,
+          "policy_target_change": 4.706126966848242
+        },
+        "bySubperiod": [
+          {
+            "period": "2021",
+            "bars": 2190,
+            "startEquity": 1000,
+            "endEquity": 2796.242924593373,
+            "returnPercent": 179.62429245933734,
+            "maxDrawdownPercent": 37.20337732329189,
+            "meanExposurePercent": 53.820696261942295,
+            "fees": 150.80157603036608,
+            "slippageCost": 75.38219526970256,
+            "stopExits": 56
+          },
+          {
+            "period": "2022",
+            "bars": 2190,
+            "startEquity": 2796.242924593373,
+            "endEquity": 1863.8594518405255,
+            "returnPercent": -33.34415134509223,
+            "maxDrawdownPercent": 51.440270350323324,
+            "meanExposurePercent": 43.69175272805586,
+            "fees": 122.48509209835629,
+            "slippageCost": 61.2270990741512,
+            "stopExits": 16
+          }
+        ],
+        "frictionPercentOfOpening": 40.989596247257644
+      },
+      "verification": {
+        "policy": "RPA",
+        "window": "verification",
+        "bars": 3282,
+        "openingEquity": 1863.8594518405255,
+        "closingEquity": 3134.030362932326,
+        "netReturnPercent": 68.14735466440516,
+        "annualisedReturnPercent": 41.4818425887094,
+        "maxDrawdownPercent": 51.776999290354006,
+        "timeUnderHighPercent": 100,
+        "longestUnderHighDays": 547,
+        "feesPaid": 198.42567739273522,
+        "slippageCost": 99.18815595590014,
+        "tradedNotional": 198425.67739273515,
+        "turnover": 76.16987646385003,
+        "exposure": {
+          "median": 53.331964610367606,
+          "q1": 14.591228953477584,
+          "q3": 89.99145499194107,
+          "p90": 100,
+          "timeInZonePercent": {
+            "0-20": 32.32784887263864,
+            "20-50": 14.929920780012187,
+            "50-80": 18.494820231566116,
+            "80-100": 34.24741011578306
+          },
+          "mean": 51.18750053445447
+        },
+        "stopExits": 16,
+        "barsWithCapacityShortfall": 1421,
+        "barsWithOverExposure": 36,
+        "suppressedLegs": {
+          "dust": 3720,
+          "movement_floor": 4559,
+          "no_budget": 6
+        },
+        "pendingNotExecuted": 0,
+        "turnoverByCause": {
+          "line_state_change": 65.24820100894495,
+          "drift_or_other": 0.5021593960968797,
+          "policy_target_change": 1.633399523500727,
+          "stop_exit": 3.57171259276743,
+          "release_after_stop": 5.214403942539957
+        },
+        "bySubperiod": [
+          {
+            "period": "2023",
+            "bars": 2190,
+            "startEquity": 1863.8594518405255,
+            "endEquity": 2674.096634977162,
+            "returnPercent": 43.47093780792017,
+            "maxDrawdownPercent": 51.776999290354006,
+            "meanExposurePercent": 50.42617461735135,
+            "fees": 120.90461163318824,
+            "slippageCost": 60.437194195489646,
+            "stopExits": 6
+          },
+          {
+            "period": "2024",
+            "bars": 1092,
+            "startEquity": 2674.096634977162,
+            "endEquity": 3134.030362932326,
+            "returnPercent": 17.19959263772426,
+            "maxDrawdownPercent": 34.92812941409283,
+            "meanExposurePercent": 52.71433547809528,
+            "fees": 77.52106575954694,
+            "slippageCost": 38.75096176041051,
+            "stopExits": 10
+          }
+        ],
+        "frictionPercentOfOpening": 15.967611348309948
+      },
+      "calibration": {
+        "policy": "RPA",
+        "window": "calibration",
+        "bars": 7662,
+        "openingEquity": 1000,
+        "closingEquity": 3134.030362932326,
+        "netReturnPercent": 213.40303629323262,
+        "annualisedReturnPercent": 38.64250379419394,
+        "maxDrawdownPercent": 51.776999290354006,
+        "timeUnderHighPercent": 98.76011485251892,
+        "longestUnderHighDays": 963.3333333333334,
+        "feesPaid": 471.71234552145734,
+        "slippageCost": 235.79745029975408,
+        "tradedNotional": 471712.345521458,
+        "turnover": 188.08927538857077,
+        "exposure": {
+          "median": 52.895919137052665,
+          "q1": 0,
+          "q3": 90.0275727745952,
+          "p90": 100,
+          "timeInZonePercent": {
+            "0-20": 34.87340120073088,
+            "20-50": 13.351605324980422,
+            "50-80": 16.275123988514746,
+            "80-100": 35.49986948577395
+          },
+          "mean": 49.7976559700047
+        },
+        "stopExits": 88,
+        "barsWithCapacityShortfall": 3395,
+        "barsWithOverExposure": 83,
+        "suppressedLegs": {
+          "dust": 8265,
+          "movement_floor": 10154,
+          "no_budget": 23
+        },
+        "pendingNotExecuted": 0,
+        "turnoverByCause": {
+          "drift_or_other": 2.170444640909835,
+          "line_state_change": 133.31927042177128,
+          "stop_exit": 20.716156782850966,
+          "release_after_stop": 25.617186149119263,
+          "policy_target_change": 6.26621739391911
+        },
+        "bySubperiod": [
+          {
+            "period": "2021",
+            "bars": 2190,
+            "startEquity": 1000,
+            "endEquity": 2796.242924593373,
+            "returnPercent": 179.62429245933734,
+            "maxDrawdownPercent": 37.20337732329189,
+            "meanExposurePercent": 53.820696261942295,
+            "fees": 150.80157603036608,
+            "slippageCost": 75.38219526970256,
+            "stopExits": 56
+          },
+          {
+            "period": "2022",
+            "bars": 2190,
+            "startEquity": 2796.242924593373,
+            "endEquity": 1863.8594518405255,
+            "returnPercent": -33.34415134509223,
+            "maxDrawdownPercent": 51.440270350323324,
+            "meanExposurePercent": 43.69175272805586,
+            "fees": 122.48509209835629,
+            "slippageCost": 61.2270990741512,
+            "stopExits": 16
+          },
+          {
+            "period": "2023",
+            "bars": 2190,
+            "startEquity": 1863.8594518405255,
+            "endEquity": 2674.096634977162,
+            "returnPercent": 43.47093780792017,
+            "maxDrawdownPercent": 51.776999290354006,
+            "meanExposurePercent": 50.42617461735135,
+            "fees": 120.90461163318824,
+            "slippageCost": 60.437194195489646,
+            "stopExits": 6
+          },
+          {
+            "period": "2024",
+            "bars": 1092,
+            "startEquity": 2674.096634977162,
+            "endEquity": 3134.030362932326,
+            "returnPercent": 17.19959263772426,
+            "maxDrawdownPercent": 34.92812941409283,
+            "meanExposurePercent": 52.71433547809528,
+            "fees": 77.52106575954694,
+            "slippageCost": 38.75096176041051,
+            "stopExits": 10
+          }
+        ],
+        "frictionPercentOfOpening": 70.75097958212113
+      }
+    }
+  },
+  "candidate_top_decile": {
+    "calibration": {
+      "threshold": 0.9881972124261595,
+      "bars": 770,
+      "medianExposurePercent": 100
+    },
+    "verification": {
+      "threshold": 0.9509744833065747,
+      "bars": 332,
+      "medianExposurePercent": 100
+    }
+  },
+  "qualification": {
+    "f1": {
+      "pass": true,
+      "candidateMaxDrawdownOnCalibration": 43.88376119191224,
+      "limit": 50
+    },
+    "f2": {
+      "pass": true,
+      "calibration": {
+        "medianExposurePercent": 100,
+        "bars": 770,
+        "pass": true
+      },
+      "verification": {
+        "medianExposurePercent": 100,
+        "bars": 332,
+        "pass": true
+      },
+      "limit": 80
+    },
+    "f3": {
+      "tc44Admissible": true,
+      "tc44MaxDrawdownOnCalibration": 49.32899726694049,
+      "limit": 50
+    },
+    "f4": {
+      "applies": true,
+      "candidateAnnualisedOnVerification": 21.220544025496267,
+      "tc44AnnualisedOnVerification": 31.115034722936286,
+      "advantagePoints": -9.89449069744002,
+      "required": 5,
+      "pass": false
+    },
+    "candidateQualifies": false,
+    "maximumVerdictInValidation": "none: the candidate does not go to validation",
+    "reason": "fails F4 (advantage over TC44 on verification)"
+  },
+  "intervals": [
+    {
+      "comparison": "SCORE-C-linear - TC44",
+      "decisional_possible": true,
+      "role": "published, does not eliminate (F4)",
+      "block_length": 1.5391330547937845,
+      "days": 547,
+      "mean_daily_log_difference": -0.00021482135823936498,
+      "lower_bound_95": -0.0007844501731068461,
+      "mean_annualised_log_points": -7.840979575736822,
+      "lower_bound_annualised_log_points": -28.632431318399888
+    },
+    {
+      "comparison": "SCORE-C-linear - T100",
+      "decisional_possible": false,
+      "role": "descriptive",
+      "block_length": 2.6142684568775265,
+      "days": 547,
+      "mean_daily_log_difference": -0.0008982796354875071,
+      "lower_bound_95": -0.0016087801488281215,
+      "mean_annualised_log_points": -32.78720669529401,
+      "lower_bound_annualised_log_points": -58.720475432226436
+    },
+    {
+      "comparison": "SCORE-C-linear - R100/0",
+      "decisional_possible": false,
+      "role": "descriptive",
+      "block_length": 1,
+      "days": 547,
+      "mean_daily_log_difference": -0.0011290379383061238,
+      "lower_bound_95": -0.0019426553424312584,
+      "mean_annualised_log_points": -41.20988474817352,
+      "lower_bound_annualised_log_points": -70.90691999874093
+    },
+    {
+      "comparison": "SCORE-C-linear - RPA",
+      "decisional_possible": false,
+      "role": "descriptive",
+      "block_length": 1,
+      "days": 547,
+      "mean_daily_log_difference": -0.0004231617344008522,
+      "lower_bound_95": -0.0010069152155815708,
+      "mean_annualised_log_points": -15.445403305631105,
+      "lower_bound_annualised_log_points": -36.75240536872733
+    }
+  ]
+}

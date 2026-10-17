@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "kind": "sealed-bundle-fingerprint",
+  "bundle_id": "crypto-buddy-exposure-v2-validation",
+  "note": "Sealed validation part. Only these fingerprints are committed; the files live outside every repository until the window is opened once.",
+  "fetch_start": "2024-06-30T20:00:00.000Z",
+  "evaluation_start": "2024-07-01T00:00:00.000Z",
+  "as_of_exclusive": "2026-06-01T00:00:00.000Z",
+  "acquisition_config_sha256": "7e7c89b4429ec964f21a84ed9e0fe3c88ad66c1877063800f49ddc0ed00f3751",
+  "producer_source_sha256": "b517acc2aa4f088199cd04612e68b9a9d8b22e5313990d441fb85bda3eba7e84",
+  "bundle_sha256": "7f79f1db46b855170fe62ae29ef4068f4aa49efa0ea3d73b136387fcf91ac9a5",
+  "manifest_sha256": "75a0c26dd0944a56715787d326d78e0f053e197b7c8a7e5241cba8d3fc7a6d20",
+  "files": [
+    {
+      "file": "raw/BNBUSDT-1d.json",
+      "sha256": "15a06d43af2cd43f7c3990014f8e415ad7d6d8d8c09348b6eed513da84640df3"
+    },
+    {
+      "file": "raw/BNBUSDT-4h.json",
+      "sha256": "bf8ce10db4489409fdc06c2efceaf7643b111de99e98bb12f07bc14a9c119a19"
+    },
+    {
+      "file": "raw/BTCUSDT-1d.json",
+      "sha256": "b025150ed2eddaf02176abd220ffd1dc7805abf41ab5d9d2d4ae5f1cb831f7ef"
+    },
+    {
+      "file": "raw/BTCUSDT-4h.json",
+      "sha256": "7e25ae4a5b60ba0a39ccb4c211ac0203a099dfe65a2d2ba286a21775142aeffa"
+    },
+    {
+      "file": "raw/ETHUSDT-1d.json",
+      "sha256": "2c99988520917886deecee456a2986d2c11c091989c6ff08821e8794b93207bb"
+    },
+    {
+      "file": "raw/ETHUSDT-4h.json",
+      "sha256": "42838e41e09ff4c3cc16ae352b2a7e8a0f7aa98120895ea146a5f1f37a0dc2a9"
+    },
+    {
+      "file": "raw/SOLUSDT-1d.json",
+      "sha256": "eaa2b75c5998f11092c93840a1c64d9b0fa8a2cd9cba65ba135487cba31019a3"
+    },
+    {
+      "file": "raw/SOLUSDT-4h.json",
+      "sha256": "0f2375f1679da9903fd72bb023edfcdb08d525dfeefa64d6d6614e138dd707fd"
+    },
+    {
+      "file": "raw/XRPUSDT-1d.json",
+      "sha256": "a8e59bd3f22d16b87c827306144904abaeb2d5f7ae4e1c0e2fd8415ca97692ef"
+    },
+    {
+      "file": "raw/XRPUSDT-4h.json",
+      "sha256": "ff386251b719b02c6e717a2ba8c3345c5144ffff9811365ffb0f896a73d28bc1"
+    }
+  ]
+}
