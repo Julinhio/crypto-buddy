@@ -12,9 +12,9 @@
     }
   ],
   "tape_truncated_at": "2023-01-01T00:00:00.000Z",
-  "crypto_buddy_commit": "9521e94afa262c1e864632654189d0e642b25930",
+  "crypto_buddy_commit": "75f8235757c62b692d6558de50f1eea3a49f0c5a",
   "crypto_buddy_tree_clean_outside_artefacts": true,
-  "crypto_buddy_src_tree_sha": "81fb39b9fb2a048dc0ba45f3dafba3839e5728cf",
+  "crypto_buddy_src_tree_sha": "70f59b9ad9a2e9c1b4ff9fa27ab8f1182bf86c7e",
   "crypto_buddy_deps_lock_sha": "eb23e7e378e429f5db0d9689509d22c337c6389f",
   "regime_version": "r1",
   "bench_config_sha256": "66eade6d76492c7ab8732a39188005e606ced888ef5abd80ee3baab52d30c47a",
@@ -38,8 +38,13 @@
   "outputs": [
     {
       "file": "summary.json",
-      "sha256": "e248f716e55b8b9ae34aea82a6203dbd6171205cbaf9a15325a6ce20333f7b7c",
-      "bytes": 70049
+      "sha256": "5735ae1cd20effa4c13c84f1fc3b2b130b6af79ed42e52308b304ce02edead3c",
+      "bytes": 72089
+    },
+    {
+      "file": "freeze.json",
+      "sha256": "c40675b589cb19d84545ecf5be03041f9a3732d9107f7ba8e19f78665b92c216",
+      "bytes": 6669
     }
   ]
 }

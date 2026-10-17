@@ -224,6 +224,78 @@
       ],
       "frictionPercentOfOpening": 40.989596,
       "daily_observations": 730
+    },
+    {
+      "policy": "TC44",
+      "window": "development",
+      "bars": 4380,
+      "openingEquity": 1000,
+      "closingEquity": 1171.40247,
+      "netReturnPercent": 17.140247,
+      "annualisedReturnPercent": 8.237212,
+      "maxDrawdownPercent": 49.328997,
+      "timeUnderHighPercent": 97.283105,
+      "longestUnderHighDays": 416.333333,
+      "feesPaid": 100.773,
+      "slippageCost": 50.373882,
+      "tradedNotional": 100772.999571,
+      "turnover": 65.318878,
+      "exposure": {
+        "median": 43.643323,
+        "q1": 34.964487,
+        "q3": 44.50081,
+        "p90": 45.195024,
+        "timeInZonePercent": {
+          "0-20": 17.511416,
+          "20-50": 82.488584,
+          "50-80": 0,
+          "80-100": 0
+        },
+        "mean": 35.987114
+      },
+      "stopExits": 136,
+      "barsWithCapacityShortfall": 1383,
+      "barsWithOverExposure": 57,
+      "suppressedLegs": {
+        "movement_floor": 8006,
+        "dust": 5779,
+        "no_budget": 13
+      },
+      "pendingNotExecuted": 1,
+      "turnoverByCause": {
+        "drift_or_other": 1.537747,
+        "stop_exit": 27.849156,
+        "line_state_change": 6.81965,
+        "release_after_stop": 29.112326
+      },
+      "bySubperiod": [
+        {
+          "period": "2021",
+          "bars": 2190,
+          "startEquity": 1000,
+          "endEquity": 1750.119526,
+          "returnPercent": 75.011953,
+          "maxDrawdownPercent": 26.785197,
+          "meanExposurePercent": 34.708198,
+          "fees": 62.613097,
+          "slippageCost": 31.298736,
+          "stopExits": 79
+        },
+        {
+          "period": "2022",
+          "bars": 2190,
+          "startEquity": 1750.119526,
+          "endEquity": 1171.40247,
+          "returnPercent": -33.067288,
+          "maxDrawdownPercent": 49.328997,
+          "meanExposurePercent": 37.266029,
+          "fees": 38.159902,
+          "slippageCost": 19.075146,
+          "stopExits": 57
+        }
+      ],
+      "frictionPercentOfOpening": 15.114688,
+      "daily_observations": 730
     }
   ],
   "diagnostic_without_stop": {
