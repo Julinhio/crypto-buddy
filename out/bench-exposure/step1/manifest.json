@@ -12,9 +12,9 @@
     }
   ],
   "tape_truncated_at": "2023-01-01T00:00:00.000Z",
-  "crypto_buddy_commit": "68a55e982edd656ef42e3f331b5182d57c40610a",
-  "crypto_buddy_tree_dirty": true,
-  "crypto_buddy_src_tree_sha": "3dac07d558929e34778756c62153c00804bbc3db",
+  "crypto_buddy_commit": "433150abbc231ead34aa72eb72120356c5380897",
+  "crypto_buddy_tree_clean_outside_artefacts": true,
+  "crypto_buddy_src_tree_sha": "7b0ed4974d9966db4b30d04fb1c7bd27af633f6b",
   "crypto_buddy_deps_lock_sha": "eb23e7e378e429f5db0d9689509d22c337c6389f",
   "regime_version": "r1",
   "bench_config_sha256": "a6bff29ddb57818835da2c605cec2e8cae43b4027107df7275b9c779318a0123",
