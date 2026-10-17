@@ -50,6 +50,32 @@
         "release_after_stop": 44.565526,
         "line_state_change": 4.536498
       },
+      "bySubperiod": [
+        {
+          "period": "2021",
+          "bars": 2190,
+          "startEquity": 1000,
+          "endEquity": 3144.68954,
+          "returnPercent": 214.468954,
+          "maxDrawdownPercent": 52.803122,
+          "meanExposurePercent": 84.903331,
+          "fees": 180.067906,
+          "slippageCost": 90.01137,
+          "stopExits": 115
+        },
+        {
+          "period": "2022",
+          "bars": 2190,
+          "startEquity": 3144.68954,
+          "endEquity": 1754.447387,
+          "returnPercent": -44.209202,
+          "maxDrawdownPercent": 64.92248,
+          "meanExposurePercent": 84.13272,
+          "fees": 87.930426,
+          "slippageCost": 43.95423,
+          "stopExits": 72
+        }
+      ],
       "frictionPercentOfOpening": 40.196393,
       "daily_observations": 730
     },
@@ -97,6 +123,32 @@
         "line_state_change": 10.534952,
         "policy_target_change": 38.388739
       },
+      "bySubperiod": [
+        {
+          "period": "2021",
+          "bars": 2190,
+          "startEquity": 1000,
+          "endEquity": 3483.717546,
+          "returnPercent": 248.371755,
+          "maxDrawdownPercent": 46.557138,
+          "meanExposurePercent": 82.735839,
+          "fees": 205.719457,
+          "slippageCost": 102.834369,
+          "stopExits": 105
+        },
+        {
+          "period": "2022",
+          "bars": 2190,
+          "startEquity": 3483.717546,
+          "endEquity": 1559.144997,
+          "returnPercent": -55.244793,
+          "maxDrawdownPercent": 70.144494,
+          "meanExposurePercent": 79.046839,
+          "fees": 157.646468,
+          "slippageCost": 78.803127,
+          "stopExits": 40
+        }
+      ],
       "frictionPercentOfOpening": 54.500342,
       "daily_observations": 730
     },
@@ -144,6 +196,32 @@
         "release_after_stop": 29.514247,
         "policy_target_change": 11.387376
       },
+      "bySubperiod": [
+        {
+          "period": "2021",
+          "bars": 2190,
+          "startEquity": 1000,
+          "endEquity": 2320.945541,
+          "returnPercent": 132.094554,
+          "maxDrawdownPercent": 49.789407,
+          "meanExposurePercent": 70.591513,
+          "fees": 261.470118,
+          "slippageCost": 130.702598,
+          "stopExits": 71
+        },
+        {
+          "period": "2022",
+          "bars": 2190,
+          "startEquity": 2320.945541,
+          "endEquity": 1298.517865,
+          "returnPercent": -44.052204,
+          "maxDrawdownPercent": 70.763261,
+          "meanExposurePercent": 57.940739,
+          "fees": 141.398568,
+          "slippageCost": 70.68148,
+          "stopExits": 20
+        }
+      ],
       "frictionPercentOfOpening": 60.425276,
       "daily_observations": 730
     }
@@ -192,6 +270,32 @@
           "drift_or_other": 2.157155,
           "line_state_change": 3.77891
         },
+        "bySubperiod": [
+          {
+            "period": "2021",
+            "bars": 2190,
+            "startEquity": 1000,
+            "endEquity": 4801.055330985049,
+            "returnPercent": 380.1055330985049,
+            "maxDrawdownPercent": 56.21965339039874,
+            "meanExposurePercent": 99.56097594860564,
+            "fees": 16.140063104088256,
+            "slippageCost": 8.067907805820784,
+            "stopExits": 0
+          },
+          {
+            "period": "2022",
+            "bars": 2190,
+            "startEquity": 4801.055330985049,
+            "endEquity": 1891.4214550220188,
+            "returnPercent": -60.604047972220535,
+            "maxDrawdownPercent": 75.8385632366814,
+            "meanExposurePercent": 99.37386922093133,
+            "fees": 4.057834316781349,
+            "slippageCost": 2.0283956155337854,
+            "stopExits": 0
+          }
+        ],
         "frictionPercentOfOpening": 3.02942
       },
       {
@@ -236,6 +340,32 @@
           "line_state_change": 14.060599,
           "policy_target_change": 56.112625
         },
+        "bySubperiod": [
+          {
+            "period": "2021",
+            "bars": 2190,
+            "startEquity": 1000,
+            "endEquity": 4395.014901738329,
+            "returnPercent": 339.5014901738329,
+            "maxDrawdownPercent": 52.98786009446525,
+            "meanExposurePercent": 95.28007376591556,
+            "fees": 76.41250333864626,
+            "slippageCost": 38.19714108711961,
+            "stopExits": 0
+          },
+          {
+            "period": "2022",
+            "bars": 2190,
+            "startEquity": 4395.014901738329,
+            "endEquity": 1759.0941340770937,
+            "returnPercent": -59.9752407351035,
+            "maxDrawdownPercent": 72.30435846226216,
+            "meanExposurePercent": 84.3900335345949,
+            "fees": 170.27072460083633,
+            "slippageCost": 85.11356645497806,
+            "stopExits": 0
+          }
+        ],
         "frictionPercentOfOpening": 36.999394
       },
       {
@@ -280,6 +410,32 @@
           "line_state_change": 148.9888,
           "policy_target_change": 16.647533
         },
+        "bySubperiod": [
+          {
+            "period": "2021",
+            "bars": 2190,
+            "startEquity": 1000,
+            "endEquity": 2467.5826367892405,
+            "returnPercent": 146.75826367892407,
+            "maxDrawdownPercent": 46.81840472413734,
+            "meanExposurePercent": 72.62162549134361,
+            "fees": 237.4278907179015,
+            "slippageCost": 118.6845021952807,
+            "stopExits": 0
+          },
+          {
+            "period": "2022",
+            "bars": 2190,
+            "startEquity": 2467.5826367892405,
+            "endEquity": 1363.898396389679,
+            "returnPercent": -44.72734667300339,
+            "maxDrawdownPercent": 69.37606722932853,
+            "meanExposurePercent": 58.325562898045256,
+            "fees": 145.13139699174866,
+            "slippageCost": 72.54741677900718,
+            "stopExits": 0
+          }
+        ],
         "frictionPercentOfOpening": 57.379121
       }
     ]
