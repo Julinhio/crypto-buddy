@@ -212,3 +212,21 @@ soit.
 5. **Le pilote vivant** se termine le 1er novembre. Rien dans ce banc ne justifie aujourd'hui
    une nouvelle politique d'exposition en production. Faut-il prolonger le contrat actuel,
    arrêter le pilote, ou en définir un autre ?
+
+## Note de traçabilité : corrections postérieures au run
+
+Les deux findings de la review Codex sur `c8379e1` sont corrigés dans
+**`9167f8032167c96acdb386204d0435c7c586b692`**, après le run terminé :
+
+- **P1 : jeton d'ouverture falsifiable.** L'ouverture est désormais une capacité privée au
+  module `opening.ts`. Un jeton n'est accepté que s'il a été délivré par `openVerification`.
+  L'environnement git injectable n'existe plus que dans une vérification pure, qui ne délivre
+  aucun jeton.
+- **P2 : lock de dépendances non vérifié.** `openVerification` compare maintenant le lock
+  courant (`HEAD:package-lock.json`) au `deps_lock_sha` du gel, et refuse l'ouverture s'ils
+  diffèrent.
+
+Ces corrections n'ont entraîné aucun rejeu, aucune régénération du gel `77e3f70`, aucune mise à
+jour d'artefact ni de manifeste. Entre le gel et l'ouverture du run, ni `src` ni
+`package-lock.json` n'avaient changé : le lock valait `eb23e7e…` au gel comme à l'ouverture. Les
+chiffres de ce rapport ne dépendent donc pas de ces deux défauts.
