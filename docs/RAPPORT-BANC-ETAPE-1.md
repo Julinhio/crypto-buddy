@@ -167,6 +167,23 @@ candidats : ils mesurent ce que coûtent le stop et sa réentrée.
 | R100/0 | 75,9 % | 32,7 % | 72,3 % | 37,0 % | 72,1 |
 | RPA | 36,4 % | 16,8 % | 69,4 % | 57,4 % | 168,3 |
 
+**Par sous-période** (protocole, point 12). Les sous-périodes sont les années civiles, un
+découpage fixé avant tout résultat. Le rendement d'une année part de l'équité reportée ; son
+drawdown est le drawdown continu, lu sur les barres de l'année.
+
+| Politique | 2021 : rendement | 2021 : drawdown max | 2021 : exposition moyenne | 2022 : rendement | 2022 : drawdown max | 2022 : exposition moyenne |
+|---|---|---|---|---|---|---|
+| T100 | 214,5 % | 52,8 % | 84,9 % | -44,2 % | 64,9 % | 84,1 % |
+| R100/0 | 248,4 % | 46,6 % | 82,7 % | -55,2 % | 70,1 % | 79,0 % |
+| RPA | 132,1 % | 49,8 % | 70,6 % | -44,1 % | 70,8 % | 57,9 % |
+| T100 sans stop | 380,1 % | 56,2 % | 99,6 % | -60,6 % | 75,8 % | 99,4 % |
+| R100/0 sans stop | 339,5 % | 53,0 % | 95,3 % | -60,0 % | 72,3 % | 84,4 % |
+| RPA sans stop | 146,8 % | 46,8 % | 72,6 % | -44,7 % | 69,4 % | 58,3 % |
+
+Fait : T100 franchit déjà 50 % en 2021 (52,8 %), avant la baisse de 2022. R100/0 et RPA restent
+juste sous la limite en 2021 et la dépassent largement en 2022. En 2021, le stop coûte à T100
+plus de la moitié de son rendement (214,5 % contre 380,1 % sans stop).
+
 **Lecture (déductions).**
 
 - **Le stop protège un peu et coûte beaucoup.** Sur T100, il retire 10,9 points de drawdown
