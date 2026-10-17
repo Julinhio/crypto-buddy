@@ -15,7 +15,7 @@ import { computeRunMetrics, dailyLogReturns } from '../bench/exposure/metrics.js
 import { COMPONENT_NAMES, computeComponents } from '../bench/exposure/components.js';
 import { HORIZONS_DAYS, runPredictiveStudy } from '../bench/exposure/predictive.js';
 import { compositeScore, fitNormalisation, linearTarget, stepTarget, topDecileMedianExposure } from '../bench/exposure/score.js';
-import { mulberry32, neweyWest, politisWhite, stationaryBootstrap } from '../bench/exposure/stats.js';
+import { laggedProducts, mulberry32, neweyWest, politisWhite, stationaryBootstrap } from '../bench/exposure/stats.js';
 import { ClosedWindowError, DEVELOPMENT, SEAL_INSTANT_MS, VALIDATION, VERIFICATION, assertMeasurable, insideWithEmbargo, type Window } from '../bench/exposure/windows.js';
 
 /**
@@ -277,6 +277,13 @@ console.log('\nProof 7 — Newey-West, Politis-White and the stationary bootstra
   const expected = Math.pow((2 * phi) / (1 - phi * phi), 2 / 3) * Math.pow(20000, 1 / 3);
   const pw = politisWhite(ar);
   ok(`Politis-White on AR(1) φ=0.5: ${pw.blockLength.toFixed(1)} vs closed form ${expected.toFixed(1)} (±25 %)`, Math.abs(pw.blockLength / expected - 1) < 0.25);
+  // The autocorrelation is a correlation: 1 at lag 0, bounded by 1 at every lag, on its own
+  // observations — including a short, strongly trending series where an endpoint matters.
+  const trending = Array.from({ length: 12 }, (_, i) => i * i - 30);
+  const tm = trending.reduce((s, v) => s + v, 0) / trending.length;
+  const te = trending.map((v) => v - tm);
+  ok('lag-0 autocorrelation is exactly 1', near(laggedProducts(te, 0).acorr, 1, 1e-12));
+  ok('every lagged autocorrelation lies in [-1, 1]', Array.from({ length: 11 }, (_, i) => laggedProducts(te, i).acorr).every((r) => Math.abs(r) <= 1 + 1e-12));
   const iid = Array.from({ length: 20000 }, normal);
   ok('Politis-White on white noise: a short block', politisWhite(iid).blockLength < 5);
 

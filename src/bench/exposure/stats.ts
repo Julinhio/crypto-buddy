@@ -150,6 +150,28 @@ export function correlation(a: readonly number[], b: readonly number[]): number 
 
 // ── POLITIS-WHITE ────────────────────────────────────────────────────────────────────
 
+/**
+ * The lag-`i` cross product of a demeaned series, and its autocorrelation with denominators
+ * over EXACTLY the observations the cross product uses: `eps[i..n-1]` and `eps[0..n-1-i]`.
+ *
+ * Not the slicing of the `arch` reference implementation, whose variance terms each drop one
+ * endpoint (`eps[i]` and `eps[n-1-i]`) — a ratio that is then not a correlation and can exceed
+ * 1 at lag 0 (Codex, PR #50, round 1). Bounded by Cauchy-Schwarz, equal to 1 at lag 0.
+ */
+export function laggedProducts(eps: readonly number[], i: number): { cross: number; acorr: number } {
+  const n = eps.length;
+  let cross = 0;
+  let head = 0;
+  let tail = 0;
+  for (let t = i; t < n; t += 1) {
+    cross += eps[t]! * eps[t - i]!;
+    head += eps[t]! * eps[t]!;
+    tail += eps[t - i]! * eps[t - i]!;
+  }
+  const denom = Math.sqrt(head * tail);
+  return { cross, acorr: denom > 0 ? cross / denom : 0 };
+}
+
 export interface BlockLengthResult {
   /** The optimal mean block length for the stationary bootstrap, capped at `bMax`. */
   blockLength: number;
@@ -185,14 +207,9 @@ export function politisWhite(series: readonly number[]): BlockLengthResult {
   const absAcorr: number[] = [];
   let optM: number | null = null;
   for (let i = 0; i <= mMax; i += 1) {
-    let cross = 0;
-    let v1 = 0;
-    let v2 = 0;
-    for (let t = i; t < n; t += 1) cross += eps[t]! * eps[t - i]!;
-    for (let t = i + 1; t < n; t += 1) v1 += eps[t]! * eps[t]!;
-    for (let t = 0; t < n - (i + 1); t += 1) v2 += eps[t]! * eps[t]!;
+    const { cross, acorr } = laggedProducts(eps, i);
     acv.push(cross / n);
-    absAcorr.push(Math.abs(cross) / Math.sqrt(v1 * v2));
+    absAcorr.push(Math.abs(acorr));
     if (i >= kn && optM == null) {
       let allSmall = true;
       for (let j = i - kn; j < i; j += 1) if (!(absAcorr[j]! < cv)) allSmall = false;
