@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "kind": "bench-exposure-development",
+  "bundles": [
+    {
+      "bundle_id": "crypto-buddy-exposure-v2-core",
+      "bundle_sha256": "1ec86eba76046eca8fc27906d2f7e513a3b3cbce5fcde32facd9d1e258cb6ad2"
+    },
+    {
+      "bundle_id": "crypto-buddy-exposure-v2-sol",
+      "bundle_sha256": "a1eee621bf9941a8acd7f0a7bf5b171477747bc19fa6e01f96b25e3f600415e5"
+    }
+  ],
+  "tape_truncated_at": "2023-01-01T00:00:00.000Z",
+  "crypto_buddy_commit": "9521e94afa262c1e864632654189d0e642b25930",
+  "crypto_buddy_tree_clean_outside_artefacts": true,
+  "crypto_buddy_src_tree_sha": "81fb39b9fb2a048dc0ba45f3dafba3839e5728cf",
+  "crypto_buddy_deps_lock_sha": "eb23e7e378e429f5db0d9689509d22c337c6389f",
+  "regime_version": "r1",
+  "bench_config_sha256": "66eade6d76492c7ab8732a39188005e606ced888ef5abd80ee3baab52d30c47a",
+  "windows": {
+    "development": {
+      "from": "2021-01-01T00:00:00.000Z",
+      "to_exclusive": "2023-01-01T00:00:00.000Z",
+      "status": "measured"
+    },
+    "verification": {
+      "from": "2023-01-01T00:00:00.000Z",
+      "to_exclusive": "2024-07-01T00:00:00.000Z",
+      "status": "closed"
+    },
+    "validation": {
+      "from": "2024-07-01T00:00:00.000Z",
+      "to_exclusive": "2026-06-01T00:00:00.000Z",
+      "status": "closed"
+    }
+  },
+  "outputs": [
+    {
+      "file": "summary.json",
+      "sha256": "e248f716e55b8b9ae34aea82a6203dbd6171205cbaf9a15325a6ce20333f7b7c",
+      "bytes": 70049
+    }
+  ]
+}
