@@ -175,6 +175,8 @@ export function laggedProducts(eps: readonly number[], i: number): { cross: numb
 export interface BlockLengthResult {
   /** The optimal mean block length for the stationary bootstrap, capped at `bMax`. */
   blockLength: number;
+  /** m̂, the cutoff lag, or null when no window of K_n small autocorrelations was found. */
+  cutoffLag: number | null;
   /** The lag window bandwidth M = 2·m̂ actually used. */
   bandwidth: number;
   bMax: number;
@@ -210,9 +212,12 @@ export function politisWhite(series: readonly number[]): BlockLengthResult {
     const { cross, acorr } = laggedProducts(eps, i);
     acv.push(cross / n);
     absAcorr.push(Math.abs(acorr));
+    // m̂ is the smallest m whose NEXT K_n autocorrelations, lags m+1..m+K_n, are all small.
+    // Lag m itself is not in the window — lag 0 is always 1 and would forbid m̂ = 0 (Codex,
+    // PR #50, round 2: the `arch` slicing tests m..m+K_n−1, one lag back).
     if (i >= kn && optM == null) {
       let allSmall = true;
-      for (let j = i - kn; j < i; j += 1) if (!(absAcorr[j]! < cv)) allSmall = false;
+      for (let j = i - kn + 1; j <= i; j += 1) if (!(absAcorr[j]! < cv)) allSmall = false;
       if (allSmall) optM = i - kn;
     }
   }
@@ -227,7 +232,7 @@ export function politisWhite(series: readonly number[]): BlockLengthResult {
   }
   const D = 2 * g * g;
   const b = Math.pow((2 * G * G) / D, 1 / 3) * Math.pow(n, 1 / 3);
-  return { blockLength: Math.min(Number.isFinite(b) ? Math.max(b, 1) : 1, bMax), bandwidth: M, bMax };
+  return { blockLength: Math.min(Number.isFinite(b) ? Math.max(b, 1) : 1, bMax), cutoffLag: optM, bandwidth: M, bMax };
 }
 
 // ── STATIONARY BOOTSTRAP ─────────────────────────────────────────────────────────────

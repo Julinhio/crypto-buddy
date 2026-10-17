@@ -1,10 +1,10 @@
 import { pathToFileURL } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import {
   currentDepsLockSha,
   currentGitCommit,
   currentSourceTreeSha,
-  gitIsDirty,
   writeArtefact,
   type WrittenFile,
 } from '../../provenance/artefacts.js';
@@ -35,7 +35,26 @@ export const OUT_DIR = path.join('out', 'bench-exposure', 'step1');
 
 const round = (x: number, dp = 6): number => (Number.isFinite(x) ? Number(x.toFixed(dp)) : x);
 
+/**
+ * THE PROVENANCE GATE. The manifest names the commit and the source tree that produced the
+ * figures; that claim is only worth something if nothing else was on disk. So the run refuses
+ * to write unless the working tree is clean OUTSIDE its own artefact directory (Codex, PR #50,
+ * round 2: a committed manifest that said "dirty" proved nothing about the reviewed code).
+ * The flow is: commit the code, run, commit the artefacts — `HEAD:src` is the same at both.
+ */
+export function dirtyOutsideArtefacts(rootDir: string): string[] {
+  const out = execFileSync('git', ['status', '--porcelain', '--untracked-files=all', '--', '.', `:!${OUT_DIR.split(path.sep).join('/')}`], {
+    cwd: rootDir,
+    encoding: 'utf8',
+  });
+  return out.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+}
+
 export function runStep1(rootDir = process.cwd()): { files: WrittenFile[]; summary: unknown } {
+  const dirty = dirtyOutsideArtefacts(rootDir);
+  if (dirty.length > 0) {
+    throw new Error(`bench step 1 refused: the working tree is not clean outside ${OUT_DIR} (${dirty.slice(0, 5).join('; ')})`);
+  }
   const cfg = buildBenchConfig();
   const tape = prepareCalibrationTape(rootDir, DEVELOPMENT.toMs);
 
@@ -154,7 +173,7 @@ export function runStep1(rootDir = process.cwd()): { files: WrittenFile[]; summa
     ],
     tape_truncated_at: new Date(DEVELOPMENT.toMs).toISOString(),
     crypto_buddy_commit: currentGitCommit(),
-    crypto_buddy_tree_dirty: gitIsDirty(),
+    crypto_buddy_tree_clean_outside_artefacts: true,
     crypto_buddy_src_tree_sha: currentSourceTreeSha(),
     crypto_buddy_deps_lock_sha: currentDepsLockSha(),
     regime_version: REGIME_VERSION,

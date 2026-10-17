@@ -298,7 +298,7 @@ dimensionnement par le risque, qui est classé exploratoire).
 - Le cas « un actif sans prix, les autres oui » n'existe pas dans les données de calibration.
   La règle est écrite et testée unitairement, jamais exercée sur données réelles.
 - Les statistiques sont écrites dans le dépôt et testées contre des formes closes : AR(1) pour
-  Politis-White, 30,7 contre 32,9 attendus ; borne du bootstrap sur bruit blanc à 1,645
+  Politis-White, 30,4 contre 32,9 attendus ; MA(1) coupé au retard 1, bruit blanc au retard 0 ; borne du bootstrap sur bruit blanc à 1,645
   erreur-type. Elles n'ont pas été comparées à une bibliothèque de référence, et c'est voulu sur un point : les
   autocorrélations de Politis-White prennent leurs dénominateurs sur les mêmes observations
   que le produit croisé, là où l'implémentation `arch` décale d'une observation (round 1 de

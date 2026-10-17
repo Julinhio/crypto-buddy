@@ -286,6 +286,11 @@ console.log('\nProof 7 — Newey-West, Politis-White and the stationary bootstra
   ok('every lagged autocorrelation lies in [-1, 1]', Array.from({ length: 11 }, (_, i) => laggedProducts(te, i).acorr).every((r) => Math.abs(r) <= 1 + 1e-12));
   const iid = Array.from({ length: 20000 }, normal);
   ok('Politis-White on white noise: a short block', politisWhite(iid).blockLength < 5);
+  ok('Politis-White cutoff on white noise is lag 0', politisWhite(iid).cutoffLag === 0);
+  // MA(1) with θ = 0.8: ρ(1) ≈ 0.49, every later lag zero — the cutoff is exactly lag 1.
+  const shocks = Array.from({ length: 20001 }, normal);
+  const ma1 = Array.from({ length: 20000 }, (_, i) => shocks[i + 1]! + 0.8 * shocks[i]!);
+  ok('Politis-White cutoff on an MA(1) is lag 1', politisWhite(ma1).cutoffLag === 1);
 
   const series = Array.from({ length: 2000 }, () => 0.01 + normal() * 0.02);
   const a = stationaryBootstrap(series, { meanBlockLength: 5, draws: 2000, seed: 20261101 });
