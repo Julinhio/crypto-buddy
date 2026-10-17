@@ -4,7 +4,7 @@ import type { StickyPoint } from '../../market/transition.js';
 import type { BenchConfig } from './config.js';
 import type { Tape } from './tape.js';
 import { allocate, stateFromGate, type AllocLine, type Allocation } from './allocate.js';
-import { applyRebalanceThreshold, confirmedNotBearish, type Policy } from './policy.js';
+import { applyRebalanceThreshold, confirmedBullish, type Policy } from './policy.js';
 import { executeAllocation } from './execute.js';
 import { assertMeasurable, type Window } from './windows.js';
 
@@ -22,13 +22,15 @@ import { assertMeasurable, type Window } from './windows.js';
  * window is NOT executed on the first bar of the next window — that open belongs to the next
  * window. It is counted `pending_not_executed` and crosses the frontier in the state.
  *
- * ── THE RE-ENTRY RULE (arbitrated 17/10, every architecture) ──────────────────────────
+ * ── THE RE-ENTRY RULE (every architecture; amended 17/10 after step 1) ────────────────
  *
  * Production's stop contract ends with "no automatic re-entry, the model decides". There is
  * no model here, so the bench needs the rule the model used to be: after a stop exit the line
- * is BARRED — target 0, its share redistributed like any stopped line — until its regime is
- * CONFIRMED neutral or bullish (actionable, not `trend_down`, not `reversal_down`). Never
- * during a transition: a frozen line cannot be bought anyway.
+ * is BARRED — target 0, its share redistributed like any stopped line — through `range`,
+ * `trend_down` and `reversal_down`, and released ONLY on a confirmed `trend_up` or
+ * `reversal_up`. Never during a transition: a frozen line cannot be bought anyway.
+ *
+ * RPA's exits are remembered the same way, in `policyExcluded` (see `policy.ts`).
  *
  * ── THE DRAWDOWN ──────────────────────────────────────────────────────────────────────
  *
@@ -58,6 +60,8 @@ export interface EngineState {
   positions: Record<string, Position>;
   /** Lines barred from re-entry after a stop. Sorted, for a reproducible state. */
   barred: string[];
+  /** Assets the policy took out and remembers as out (RPA). Sorted. */
+  policyExcluded: string[];
   pending: PendingOrder | null;
   /** The last total target the policy applied, for the rebalancing threshold. */
   lastTotalTarget: number | null;
@@ -87,6 +91,8 @@ export interface BarRecord {
   suppressed: Record<string, number>;
   stopExitsDecided: string[];
   barred: string[];
+  /** The policy's remembered exclusions after this bar's decision (RPA). */
+  policyExcluded: string[];
   /** Why the order executed at THIS bar's open was decided (see `metrics.ts`). Null when none. */
   executedCause: TradeCause | null;
 }
@@ -109,6 +115,7 @@ export function freshState(cfg: BenchConfig): EngineState {
     cash: new Decimal(cfg.startingCashUsd),
     positions: {},
     barred: [],
+    policyExcluded: [],
     pending: null,
     lastTotalTarget: null,
     equityHigh: cfg.startingCashUsd,
@@ -120,6 +127,7 @@ function cloneState(s: EngineState): EngineState {
     cash: s.cash,
     positions: Object.fromEntries(Object.entries(s.positions).map(([a, p]) => [a, { ...p }])),
     barred: [...s.barred],
+    policyExcluded: [...s.policyExcluded],
     pending: s.pending ? { ...s.pending, intents: { ...s.pending.intents }, stopExits: [...s.pending.stopExits] } : null,
     lastTotalTarget: s.lastTotalTarget,
     equityHigh: s.equityHigh,
@@ -248,11 +256,11 @@ export function runWindow(params: {
     }
     const exposurePercent = equity.gt(0) ? deployed.div(equity).times(100).toNumber() : 0;
 
-    // ── THE RE-ENTRY RULE: a barred line is released by a confirmed non-bearish regime ──
+    // ── THE RE-ENTRY RULE: a barred line is released by a confirmed BULLISH regime only ──
     const sticky: Record<string, StickyPoint | null> = {};
     for (const asset of cfg.assets) sticky[asset] = tape.tapes[asset]!.stickyByTs.get(t) ?? null;
     const barredBefore = state.barred.length;
-    state.barred = state.barred.filter((asset) => !confirmedNotBearish(sticky[asset] ?? null));
+    state.barred = state.barred.filter((asset) => !confirmedBullish(sticky[asset] ?? null));
     const released = state.barred.length < barredBefore;
 
     // ── THE GATE: production's own evaluator ─────────────────────────────────────────
@@ -274,7 +282,8 @@ export function runWindow(params: {
     }
 
     // ── THE POLICY, then the allocation ──────────────────────────────────────────────
-    const decision = policy.decide({ point, sticky, score: params.scoreAt?.(t) ?? null });
+    const decision = policy.decide({ point, sticky, excludedBefore: new Set(state.policyExcluded), score: params.scoreAt?.(t) ?? null });
+    state.policyExcluded = [...decision.excluded].sort();
     const total = applyRebalanceThreshold(decision.totalTargetPercent, state.lastTotalTarget, policy.rebalanceThresholdPoints);
     state.lastTotalTarget = total;
 
@@ -333,6 +342,7 @@ export function runWindow(params: {
       suppressed,
       stopExitsDecided,
       barred: [...state.barred],
+      policyExcluded: [...state.policyExcluded],
       executedCause,
     });
   }

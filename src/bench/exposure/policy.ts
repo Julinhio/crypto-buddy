@@ -10,9 +10,11 @@ import type { StickyPoint } from '../../market/transition.js';
  *           exist for the witness (the only effect is that a frozen line under risk_off stays
  *           frozen instead of becoming sellable).
  *   R100/0  100 %, 0 % on a CONFIRMED global risk_off.
- *   RPA     100 %, each asset out while its regime is CONFIRMED bearish, back once neutral or
- *           bullish is confirmed, never during a transition; 0 % on a confirmed global risk_off.
- *           The share of an asset out stays in CASH (arbitrated 17/10).
+ *   RPA     100 %. An asset goes out when its regime is CONFIRMED bearish and the exit is
+ *           REMEMBERED: it stays out through `range` and through any further bearish label, and
+ *           comes back only on a confirmed `trend_up` or `reversal_up` (amendment of 17/10, after
+ *           step 1, before any SCORE run). Never during a transition. 0 % on a confirmed global
+ *           risk_off, back to 100 % when it ends. The share of an asset out stays in CASH.
  *   SCORE   a code-computed conviction turned into an exact target in [0, 100]. Its variants
  *           are pre-registered later; this module only carries the contract.
  */
@@ -25,13 +27,26 @@ export function confirmedBearish(sticky: StickyPoint | null): boolean {
   return sticky != null && sticky.actionable && BEARISH_REGIMES.has(sticky.active);
 }
 
-/** Confirmed neutral or bullish — the only state that lifts a post-stop bar. */
-export function confirmedNotBearish(sticky: StickyPoint | null): boolean {
-  return sticky != null && sticky.actionable && !BEARISH_REGIMES.has(sticky.active);
+/** Bullish, the only labels that end a post-stop bar or a remembered RPA exit (17/10). */
+export const BULLISH_REGIMES: ReadonlySet<AssetRegime> = new Set<AssetRegime>(['trend_up', 'reversal_up']);
+
+/**
+ * Confirmed and actionable `trend_up` or `reversal_up` — the ONLY state that releases a line
+ * barred after a stop and an asset RPA took out.
+ *
+ * Step 1 released on any confirmed non-bearish regime, `range` included, and that is what made
+ * the stop and its re-entry about 90 % of T100's turnover: a line stopped in a transition was
+ * bought back as soon as `range` confirmed, and stopped again at the next transition. Frozen
+ * after step 1, before any SCORE run and before the internal verification was opened.
+ */
+export function confirmedBullish(sticky: StickyPoint | null): boolean {
+  return sticky != null && sticky.actionable && BULLISH_REGIMES.has(sticky.active);
 }
 
 export interface PolicyInput {
   point: RegimePoint;
+  /** The assets this policy took out and still remembers as out (RPA). Engine state. */
+  excludedBefore: ReadonlySet<string>;
   /** Sticky state per TRADABLE asset at this bar. */
   sticky: Readonly<Record<string, StickyPoint | null>>;
   /** For SCORE: the components at this bar, already causal. Absent for the simple rules. */
@@ -41,7 +56,10 @@ export interface PolicyInput {
 export interface PolicyDecision {
   /** Total exposure target, in [0, 100]. */
   totalTargetPercent: number;
-  /** Lines the policy takes out (to 0, share to cash). Empty except for RPA. */
+  /**
+   * Lines the policy takes out (to 0, share to cash), and the memory the engine carries to the
+   * next bar. Empty except for RPA.
+   */
   excluded: ReadonlySet<string>;
 }
 
@@ -82,11 +100,15 @@ export const RPA: Policy = Object.freeze({
   name: 'RPA',
   gateSeesRiskOff: true,
   rebalanceThresholdPoints: 0,
-  decide: ({ point, sticky }: PolicyInput): PolicyDecision => {
-    if (point.global.riskOff) return { totalTargetPercent: 0, excluded: NONE };
+  decide: ({ point, sticky, excludedBefore }: PolicyInput): PolicyDecision => {
+    // The memory is updated on EVERY bar, risk_off included: a bearish confirmation seen while
+    // the book is flat for the global exit is still an exit the asset must earn its way back from.
     const excluded = new Set<string>();
-    for (const [asset, s] of Object.entries(sticky)) if (confirmedBearish(s)) excluded.add(asset);
-    return { totalTargetPercent: 100, excluded };
+    for (const [asset, s] of Object.entries(sticky)) {
+      const remembered = excludedBefore.has(asset) && !confirmedBullish(s);
+      if (remembered || confirmedBearish(s)) excluded.add(asset);
+    }
+    return { totalTargetPercent: point.global.riskOff ? 0 : 100, excluded };
   },
 });
 

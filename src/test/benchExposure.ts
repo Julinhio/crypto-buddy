@@ -9,7 +9,11 @@ import { buildTape, firstPrefixDivergence, prepareCalibrationTape } from '../ben
 import { allocate, type AllocLine } from '../bench/exposure/allocate.js';
 import { buildBenchConfig, BASKET } from '../bench/exposure/config.js';
 import { executeAllocation } from '../bench/exposure/execute.js';
-import { R100_0, RPA, T100, applyRebalanceThreshold, confirmedNotBearish, scorePolicy } from '../bench/exposure/policy.js';
+import { R100_0, RPA, T100, applyRebalanceThreshold, confirmedBullish, scorePolicy, type Policy } from '../bench/exposure/policy.js';
+import type { Tape } from '../bench/exposure/tape.js';
+import { SCORE_SETS, THRESHOLD_GRID_POINTS, TRANSFORMS, VARIANTS, topDecileOfRun } from '../bench/exposure/variants.js';
+import type { StickyPoint } from '../market/transition.js';
+import type { AssetRegime, RegimePoint } from '../market/regime.js';
 import { runWindow, type RunResult } from '../bench/exposure/engine.js';
 import { computeRunMetrics, dailyLogReturns } from '../bench/exposure/metrics.js';
 import { COMPONENT_NAMES, computeComponents } from '../bench/exposure/components.js';
@@ -240,11 +244,11 @@ console.log('\nProof 6 — policies and the total-exposure threshold:');
   ok('0 and 100 are always reachable', applyRebalanceThreshold(100, 95, 10) === 100 && applyRebalanceThreshold(0, 5, 10) === 0);
   ok('no reading keeps the last target, or 0 on the first bar', applyRebalanceThreshold(Number.NaN, 40, 10) === 40 && applyRebalanceThreshold(Number.NaN, null, 10) === 0);
   const sticky = (active: string, actionable: boolean) => ({ timestamp: 0, active, raw: active, runLength: 3, labelRun: 3, actionable, frozen: !actionable }) as never;
-  ok('re-entry: confirmed range / trend_up / reversal_up release a bar', ['range', 'trend_up', 'reversal_up'].every((r) => confirmedNotBearish(sticky(r, true))));
-  ok('re-entry: never during a transition, never on trend_down or reversal_down',
-    !confirmedNotBearish(sticky('range', false)) && !confirmedNotBearish(sticky('trend_down', true)) && !confirmedNotBearish(sticky('reversal_down', true)));
+  ok('re-entry: only a confirmed trend_up or reversal_up releases', ['trend_up', 'reversal_up'].every((r) => confirmedBullish(sticky(r, true))));
+  ok('re-entry: never on range, trend_down or reversal_down, never during a transition',
+    ['range', 'trend_down', 'reversal_down'].every((r) => !confirmedBullish(sticky(r, true))) && !confirmedBullish(sticky('trend_up', false)));
   const sp = scorePolicy({ name: 's', toTarget: linearTarget(-1, 1), rebalanceThresholdPoints: 5, riskOffForcesZero: true });
-  ok('a SCORE policy maps a score to an exact target', sp.decide({ point: { global: { riskOff: false } } as never, sticky: {}, score: 0 }).totalTargetPercent === 50);
+  ok('a SCORE policy maps a score to an exact target', sp.decide({ point: { global: { riskOff: false } } as never, sticky: {}, excludedBefore: new Set(), score: 0 }).totalTargetPercent === 50);
   ok('step targets are exact', stepTarget([{ atLeast: 0, targetPercent: 60 }, { atLeast: 1, targetPercent: 100 }], 0)(0.5) === 60);
 }
 
@@ -361,6 +365,25 @@ for (const policy of [T100, R100_0, RPA]) runs[policy.name] = runWindow({ tape, 
     }
   }
   ok(`RPA: ${excl} line-bars excluded after an excluded bar, every one of them at 0`, excl > 0 && exclFails === 0);
+  // THE MEMORY, read off production's sticky timeline: an exclusion ends only on a confirmed
+  // bullish bar, and it does not end on range.
+  let rpaReleases = 0;
+  let rpaBadReleases = 0;
+  let rpaHeldThroughRange = 0;
+  for (let i = 1; i < p.length; i += 1) {
+    for (const a of cfg.assets) {
+      const was = p[i - 1]!.policyExcluded.includes(a);
+      const is = p[i]!.policyExcluded.includes(a);
+      const st = tape.tapes[a]!.stickyByTs.get(p[i]!.t) ?? null;
+      if (was && !is) {
+        rpaReleases += 1;
+        if (!confirmedBullish(st)) rpaBadReleases += 1;
+      }
+      if (was && is && st?.actionable && st.active === 'range') rpaHeldThroughRange += 1;
+    }
+  }
+  ok(`RPA: ${rpaReleases} remembered exits released, each on a confirmed bullish regime; ${rpaHeldThroughRange} line-bars held out through a confirmed range`,
+    rpaReleases > 0 && rpaBadReleases === 0 && rpaHeldThroughRange > 0);
 
   // THE RE-ENTRY RULE, read off production's sticky timeline rather than off the engine.
   for (const [name, run] of Object.entries(runs)) {
@@ -374,12 +397,12 @@ for (const policy of [T100, R100_0, RPA]) runs[policy.name] = runWindow({ tape, 
         const st = tape.tapes[a]!.stickyByTs.get(run.bars[i]!.t) ?? null;
         if (was && !is) {
           releases += 1;
-          if (!confirmedNotBearish(st)) badReleases += 1;
+          if (!confirmedBullish(st)) badReleases += 1;
         }
         if (was && is && run.bars[i]!.weights[a]! > 0.01) barredHeld += 1;
       }
     }
-    ok(`${name}: ${releases} post-stop releases, each on a confirmed non-bearish regime; a barred line holds nothing`, badReleases === 0 && barredHeld === 0);
+    ok(`${name}: ${releases} post-stop releases, each on a confirmed trend_up or reversal_up; a barred line holds nothing`, badReleases === 0 && barredHeld === 0);
   }
 
   // THE FRONTIER: split the development run in two at 2022-01-01 — the pending order and the
@@ -442,6 +465,87 @@ console.log('\nProof 9 — components causal, prerequisite embargoed, normalisat
   ok('a composite score is a weighted z-score', near(compositeScore(b.get(samples[3000]!.t)!, [{ normalisation: norm, weight: 1 }])!, (samples[3000]!.v.mom_30d! - norm.mean) / norm.sd));
   const dec = topDecileMedianExposure(Array.from({ length: 100 }, (_, i) => ({ score: i, exposurePercent: i })));
   ok('top decile median exposure', dec != null && dec.bars === 10 && near(dec.medianExposurePercent, 94.5));
+}
+
+// ── PROOF 10 — the three frozen re-entry paths, on a scripted tape ───────────────────
+console.log('\nProof 10 — the three re-entry paths of the 17/10 amendment, on synthetic bars:');
+{
+  const cfgS = buildBenchConfig();
+  const ASSETS = ['BNB', 'BTC', 'ETH', 'XRP'];
+  const T0 = Date.parse('2030-01-01T00:00:00Z');
+  type Script = Array<{ regime: AssetRegime; frozen: boolean; price: number }>;
+  /** A tape whose sticky timeline and prices are WRITTEN, not computed. */
+  const scripted = (scripts: Record<string, Script>, riskOff: boolean[]): Tape => {
+    const n = riskOff.length;
+    const points = Array.from({ length: n }, (_, i) => ({
+      timestamp: T0 + i * H4,
+      at: new Date(T0 + i * H4).toISOString(),
+      global: { riskOff: riskOff[i]!, raw: riskOff[i]!, breadthPercent: 0, medianH4Rsi: 50, assetsPresent: 4, assetsExpected: 4, pendingBars: 0 },
+      assets: {},
+    })) as unknown as RegimePoint[];
+    const tapes: Tape['tapes'] = {};
+    for (const a of ASSETS) {
+      const s = scripts[a]!;
+      const h4: BenchCandle[] = s.map((b, i) => ({ timestamp: T0 + i * H4, open: b.price, high: b.price, low: b.price, close: b.price, volume: 1, quoteVolume: 1, trades: 1, takerBuyQuote: 0.5 }));
+      const sticky: StickyPoint[] = s.map((b, i) => ({ timestamp: T0 + i * H4, active: b.regime, raw: b.regime, runLength: b.frozen ? 1 : 3, labelRun: 3, actionable: !b.frozen, frozen: b.frozen }));
+      tapes[a] = { asset: a, h4, daily: [], sticky, stickyByTs: new Map(sticky.map((x) => [x.timestamp, x])), indexByTs: new Map(h4.map((c, i) => [c.timestamp, i])) };
+    }
+    return { regimeAssets: ASSETS, tradable: ASSETS, points, tapes, barMs: H4, nowMs: T0 + n * H4 };
+  };
+  const bars = (n: number, regime: AssetRegime, price: number, frozen = false): Script =>
+    Array.from({ length: n }, () => ({ regime, frozen, price }));
+  const steady = (n: number): Script => bars(n, 'trend_up', 100);
+  const run = (tapeS: Tape, policy: Policy) =>
+    runWindow({ tape: tapeS, cfg: cfgS, policy, window: { name: 'development', fromMs: T0, toMs: tapeS.nowMs }, unsafeSyntheticWindow: true });
+  const N = 24;
+
+  // (a) THE STOP: BTC bought in trend_up; a transition with a 15 % drop fires the stop; then a
+  // long CONFIRMED range — the line must stay barred and empty — then a confirmed trend_up.
+  const btc: Script = [...bars(4, 'trend_up', 100), ...bars(2, 'trend_up', 85, true), ...bars(10, 'range', 85), ...bars(N - 16, 'trend_up', 90)];
+  const s = run(scripted({ BTC: btc, ETH: steady(N), BNB: steady(N), XRP: steady(N) }, Array(N).fill(false)), T100).bars;
+  const stopBar = s.findIndex((b) => b.stopExitsDecided.includes('BTC'));
+  ok(`the stop fires on BTC in the transition (bar ${stopBar})`, stopBar === 4);
+  ok('BTC is sold to zero on the next open and barred', s[stopBar + 1]!.weights.BTC! < 1e-9 && s[stopBar + 1]!.barred.includes('BTC'));
+  ok('through ten bars of CONFIRMED range, BTC stays barred and holds nothing',
+    s.slice(6, 16).every((b) => b.barred.includes('BTC') && b.weights.BTC! < 1e-9 && b.states.BTC === 'stopped'));
+  // Bought back with ALL the cash there is: after the stop's loss the other lines weigh a little
+  // over nominal, each by less than the 2 % floor, so production's planner does not trim them.
+  ok('the first confirmed trend_up releases it, and it is bought back on the next open with all the cash',
+    !s[16]!.barred.includes('BTC') && s[17]!.weights.BTC! > 25 && s[17]!.cash < 1 && s[17]!.executedCause === 'release_after_stop');
+
+  // (b) RPA: BTC confirmed trend_down → out; then a confirmed range — still out, the exit is
+  // remembered; then a confirmed reversal_up — back in.
+  const btc2: Script = [...bars(3, 'trend_up', 100), ...bars(4, 'trend_down', 100), ...bars(8, 'range', 100), ...bars(N - 15, 'reversal_up', 100)];
+  const r = run(scripted({ BTC: btc2, ETH: steady(N), BNB: steady(N), XRP: steady(N) }, Array(N).fill(false)), RPA).bars;
+  ok('RPA holds BTC while trend_up, takes it out on the confirmed trend_down', r[2]!.weights.BTC! > 30 && r[3]!.states.BTC === 'excluded' && r[4]!.weights.BTC! < 1e-9);
+  ok('through eight bars of confirmed range the exit is remembered: BTC excluded, at zero, its share in cash',
+    r.slice(7, 15).every((b) => b.policyExcluded.includes('BTC') && b.states.BTC === 'excluded' && b.weights.BTC! < 1e-9) &&
+    r.slice(8, 15).every((b) => b.exposurePercent < 68.5));
+  ok('a confirmed reversal_up brings it back on the next open', !r[15]!.policyExcluded.includes('BTC') && r[16]!.weights.BTC! > 30);
+
+  // (c) R100/0: a confirmed global risk_off empties the book; its end brings it back to 100 %.
+  const ro = Array.from({ length: N }, (_, i) => i >= 5 && i < 11);
+  const r0 = run(scripted({ BTC: steady(N), ETH: steady(N), BNB: steady(N), XRP: steady(N) }, ro), R100_0).bars;
+  ok('R100/0 is invested before the risk_off', r0[4]!.exposurePercent > 99);
+  ok('the book is flat through the risk_off', r0.slice(6, 11).every((b) => b.exposurePercent < 1e-6));
+  ok('the bar the risk_off ends the target is 100 % again, and the book is back near 100 % on the next open',
+    r0[11]!.policyTargetPercent === 100 && r0[12]!.exposurePercent > 99);
+}
+
+// ── PROOF 11 — the pre-registered SCORE variants are the validated ones ───────────────
+console.log('\nProof 11 — the six SCORE variants, as validated on 17/10:');
+{
+  ok('six variants, A/B/C × linear/steps, in pre-registered order',
+    VARIANTS.map((v) => v.name).join(',') === 'SCORE-A-linear,SCORE-A-steps,SCORE-B-linear,SCORE-B-steps,SCORE-C-linear,SCORE-C-steps');
+  ok('the sets are the validated ones', SCORE_SETS.A.join(',') === 'trend_sma200' && SCORE_SETS.B.join(',') === 'trend_sma200,breadth_net' &&
+    SCORE_SETS.C.join(',') === 'trend_sma200,breadth_net,taker_buy_7d');
+  ok('the threshold grid is {5, 10, 20}', THRESHOLD_GRID_POINTS.join(',') === '5,10,20');
+  ok('linear: z = −1 → 0 %, 0 → 50 %, +1 → 100 %, clamped', TRANSFORMS.linear(-1) === 0 && TRANSFORMS.linear(0) === 50 && TRANSFORMS.linear(1) === 100 && TRANSFORMS.linear(3) === 100);
+  ok('steps: 0 / 50 / 100 % at z = −0.5 and +0.5', TRANSFORMS.steps(-0.51) === 0 && TRANSFORMS.steps(-0.5) === 50 && TRANSFORMS.steps(0.49) === 50 && TRANSFORMS.steps(0.5) === 100);
+  // The conviction decile pairs the score of bar t with the exposure realised at bar t+1.
+  const fake = { bars: Array.from({ length: 21 }, (_, i) => ({ t: i, exposurePercent: i === 0 ? 0 : (i - 1) * 5 })) } as unknown as RunResult;
+  const dec = topDecileOfRun(fake, (t) => t);
+  ok('the conviction decile reads the exposure of the NEXT bar', dec != null && dec.bars === 2 && near(dec.medianExposurePercent, ((18 + 19) / 2) * 5));
 }
 
 console.log(`\n${passed} bench-exposure checks passed.`);
