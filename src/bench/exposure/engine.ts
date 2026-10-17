@@ -6,7 +6,7 @@ import type { Tape } from './tape.js';
 import { allocate, stateFromGate, type AllocLine, type Allocation } from './allocate.js';
 import { applyRebalanceThreshold, confirmedBullish, type Policy } from './policy.js';
 import { executeAllocation } from './execute.js';
-import { assertMeasurable, type Window } from './windows.js';
+import { assertMeasurable, type VerificationOpening, type Window } from './windows.js';
 
 /**
  * THE v1.3 REPLAY ENGINE — one walk over the 4h grid, the same for every policy.
@@ -145,6 +145,8 @@ export function runWindow(params: {
   scoreAt?: (t: number) => number | null;
   /** Tests only: lifts the window gate for synthetic tapes. Never passed by the runner. */
   unsafeSyntheticWindow?: boolean;
+  /** Required for the internal verification. See `windows.ts`. */
+  opening?: VerificationOpening;
   /**
    * DIAGNOSTIC ONLY, outside the protocol: the peak stop never fires. A `stop_exit` verdict is
    * replaced by what production's ladder answers without it — `risk_off_reduction` under a
@@ -154,7 +156,7 @@ export function runWindow(params: {
   diagnosticWithoutStop?: boolean;
 }): RunResult {
   const { tape, cfg, policy, window } = params;
-  if (!params.unsafeSyntheticWindow) assertMeasurable(window);
+  if (!params.unsafeSyntheticWindow) assertMeasurable(window, params.opening);
   for (const asset of cfg.assets) {
     if (!tape.tapes[asset]) throw new Error(`bench engine: tape has no ${asset}`);
   }

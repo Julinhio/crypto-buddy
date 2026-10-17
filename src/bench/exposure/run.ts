@@ -12,13 +12,16 @@ import { REGIME_VERSION } from '../../market/regime.js';
 import { benchConfigSha256, buildBenchConfig } from './config.js';
 import { CORE_PIN, SOL_PIN } from './bundle.js';
 import { prepareCalibrationTape } from './tape.js';
-import { R100_0, RPA, T100 } from './policy.js';
+import { R100_0, RPA, T100, TC44, TC44_TARGET_PERCENT, scorePolicy } from './policy.js';
 import { runWindow } from './engine.js';
 import { computeRunMetrics, dailyLogReturns, type RunMetrics } from './metrics.js';
 import { COMPONENT_DEFINITIONS, COMPONENT_NAMES, computeComponents } from './components.js';
 import { runPredictiveStudy } from './predictive.js';
 import { fitNormalisation } from './score.js';
-import { SCORE_SETS, THRESHOLD_GRID_POINTS, TRANSFORMS, runScoreVariants } from './variants.js';
+import { SCORE_SETS, THRESHOLD_GRID_POINTS, TRANSFORMS, runScoreVariants, scoreSeries } from './variants.js';
+import { politisWhite, BOOTSTRAP_DRAWS, BOOTSTRAP_SEED } from './stats.js';
+import { sha256Of, canonicalJson } from '../../provenance/artefacts.js';
+import { FREEZE_FILE, freezeDigest, type BlockLengthEntry, type CandidateFreeze } from './freeze.js';
 import { DEVELOPMENT, VERIFICATION, VALIDATION } from './windows.js';
 
 /**
@@ -101,12 +104,12 @@ export function runDevelopment(rootDir = process.cwd()): { files: WrittenFile[];
   const cfg = buildBenchConfig();
   const tape = prepareCalibrationTape(rootDir, DEVELOPMENT.toMs);
 
-  const policies = [T100, R100_0, RPA];
+  const policies = [T100, R100_0, RPA, TC44];
   const runs = policies.map((policy) => runWindow({ tape, cfg, policy, window: DEVELOPMENT }));
   const metrics = runs.map((r) => computeRunMetrics(r, tape.barMs));
   const daily = Object.fromEntries(runs.map((r) => [r.policy, dailyLogReturns(r, tape.barMs)]));
   // DIAGNOSTIC, outside the protocol: the same three rules with the peak stop switched off.
-  const withoutStop = policies.map((policy) =>
+  const withoutStop = [T100, R100_0, RPA].map((policy) =>
     computeRunMetrics(runWindow({ tape, cfg, policy, window: DEVELOPMENT, diagnosticWithoutStop: true }), tape.barMs),
   );
 
@@ -122,6 +125,52 @@ export function runDevelopment(rootDir = process.cwd()): { files: WrittenFile[];
   });
 
   const score = runScoreVariants({ tape, cfg, components, window: DEVELOPMENT });
+
+  // ── THE CANDIDATE, re-run from its own spec, and the block length of each comparison ──
+  const CANDIDATE = 'SCORE-C-linear';
+  const chosen = score.variants.find((v) => v.spec.name === CANDIDATE);
+  if (score.selected !== CANDIDATE || chosen == null || chosen.chosenThresholdPoints !== 20) {
+    throw new Error(`freeze refused: the selection gives ${score.selected}, not the arbitrated SCORE-C-linear at 20`);
+  }
+  const candidateScore = scoreSeries(components, SCORE_SETS.C, DEVELOPMENT);
+  const candidateRun = runWindow({
+    tape,
+    cfg,
+    window: DEVELOPMENT,
+    scoreAt: candidateScore.scoreAt,
+    policy: scorePolicy({ name: CANDIDATE, toTarget: TRANSFORMS.linear, rebalanceThresholdPoints: 20, riskOffForcesZero: false }),
+  });
+  const candidateMetrics = computeRunMetrics(candidateRun, tape.barMs);
+  if (Math.abs(candidateMetrics.annualisedReturnPercent - chosen.metrics.annualisedReturnPercent) > 1e-9) {
+    throw new Error('freeze refused: the re-run candidate does not reproduce the selected variant');
+  }
+  if (Math.abs(Number(candidateMetrics.exposure.mean.toFixed(6)) - TC44_TARGET_PERCENT) > 1e-12) {
+    throw new Error(`freeze refused: TC44 is ${TC44_TARGET_PERCENT} but the candidate mean exposure is ${candidateMetrics.exposure.mean}`);
+  }
+  const candidateDaily = dailyLogReturns(candidateRun, tape.barMs).logReturns;
+  const decisional: Record<string, string> = {
+    TC44: 'possible: its admissibility is read on the whole calibration',
+    T100: 'not possible: its continuous drawdown already exceeds 50 % on development, and it enters a verdict only if it respects the limit itself',
+    'R100/0': 'not possible: non admissible (arbitrated on the development drawdown)',
+    RPA: 'not possible: non admissible (arbitrated on the development drawdown, no exception)',
+  };
+  const blockLengths: BlockLengthEntry[] = ['TC44', 'T100', 'R100/0', 'RPA'].map((name) => {
+    const comparator = daily[name]!.logReturns;
+    if (comparator.length !== candidateDaily.length) throw new Error('freeze refused: daily series of different lengths');
+    const diff = candidateDaily.map((x, i) => x - comparator[i]!);
+    const pw = politisWhite(diff);
+    return {
+      comparison: `${CANDIDATE} - ${name}`,
+      candidate: CANDIDATE,
+      comparator: name,
+      decisionalPossible: name === 'TC44',
+      why: decisional[name]!,
+      developmentDays: diff.length,
+      blockLength: pw.blockLength,
+      cutoffLag: pw.cutoffLag,
+      bandwidth: pw.bandwidth,
+    };
+  });
 
   const summary = {
     kind: 'bench-exposure-development',
@@ -189,6 +238,78 @@ export function runDevelopment(rootDir = process.cwd()): { files: WrittenFile[];
 
   const outDir = path.resolve(rootDir, OUT_DIR);
   const files: WrittenFile[] = [writeArtefact(outDir, 'summary.json', summary)];
+
+  // ── THE FREEZE: written here, committed before anything reads the internal verification ──
+  const freezeBody: Omit<CandidateFreeze, 'decisions_sha256'> = {
+    schema_version: 1,
+    kind: 'bench-exposure-candidate-freeze',
+    protocol: 'docs/PROTOCOLE-EXPOSITION-v1.3.md, with the amendments of 17/10 (re-entry; TC44 and qualification)',
+    source_tree_sha: currentSourceTreeSha(),
+    deps_lock_sha: currentDepsLockSha(),
+    bench_config_sha256: benchConfigSha256(cfg),
+    bundles: [
+      { bundle_id: CORE_PIN.bundleId, bundle_sha256: CORE_PIN.bundleSha256 },
+      { bundle_id: SOL_PIN.bundleId, bundle_sha256: SOL_PIN.bundleSha256 },
+    ],
+    development_summary_sha256: sha256Of(canonicalJson(summary)),
+    candidate: {
+      name: 'SCORE-C-linear',
+      components: [...SCORE_SETS.C],
+      weights: 'equal (simple mean of z-scores)',
+      transform: { kind: 'linear', zAtZeroPercent: -1, zAtHundredPercent: 1 },
+      rebalance_threshold_points: 20,
+      risk_off_forces_zero: false,
+      normalisations: candidateScore.normalisations.map((n) => ({ component: n.component, mean: n.mean, sd: n.sd, n: n.n })),
+      development_mean_exposure_percent: candidateMetrics.exposure.mean,
+    },
+    comparators: {
+      TC44: {
+        target_percent: TC44_TARGET_PERCENT,
+        definition:
+          'constant total target; same basket, caps, stops, re-entry rules, freezes, gate (risk_off seen) and execution as the candidate; a realised shortfall is never compensated',
+      },
+      descriptive: ['T100', 'R100/0', 'RPA'],
+    },
+    development_reference: Object.fromEntries([
+      ...runs.map((r, i) => [r.policy, { closing_equity: metrics[i]!.closingEquity, bars: r.bars.length }]),
+      [CANDIDATE, { closing_equity: candidateMetrics.closingEquity, bars: candidateRun.bars.length }],
+    ]),
+    block_lengths: blockLengths,
+    bootstrap: {
+      draws: BOOTSTRAP_DRAWS,
+      seed: BOOTSTRAP_SEED,
+      one_sided_level: 0.95,
+      statistic: 'mean of the daily log-return difference candidate - comparator, on the window evaluated',
+      method: 'stationary bootstrap (Politis and Romano), circular, geometric blocks of the frozen mean length of that comparison',
+      lower_bound: '5th percentile of the bootstrap means',
+    },
+    qualification_rules: {
+      candidate_max_drawdown_percent_on_calibration: 50,
+      candidate_top_decile_min_median_exposure_percent: 80,
+      candidate_top_decile_windows: ['calibration', 'verification'],
+      tc44_admissibility: 'continuous maximum drawdown <= 50 % on the whole calibration [2021-01-01, 2024-07-01)',
+      tc44_admissible_min_annualised_advantage_points_on_verification: 5,
+      tc44_confidence_interval: 'published, does not eliminate at this stage',
+      tc44_not_admissible:
+        'the comparison with TC44 is descriptive; the candidate qualifies on its own requirements, with a maximum verdict of "viable sans comparateur admissible" in validation',
+      on_failure: 'if the candidate fails any filter, the result is recorded and the bench stops',
+      sealed_window: 'not opened in this cycle, whatever the result',
+      text: [
+        'F1: the candidate continuous maximum drawdown on the whole calibration is <= 50 %',
+        'F2: the candidate median realised exposure in its top conviction decile is >= 80 %, on the whole calibration AND separately on the internal verification (score at the close of t, exposure at the close of t+1)',
+        'F3: TC44 is admissible if its continuous maximum drawdown on the whole calibration is <= 50 %',
+        'F4: if TC44 is admissible, the candidate qualifies only if its annualised net return on the internal verification exceeds TC44 by at least 5 points; the bootstrap interval is published and does not eliminate',
+        'F4bis: if TC44 is not admissible, the comparison is descriptive and the candidate qualifies on F1 and F2, with a maximum verdict in validation of "viable sans comparateur admissible"',
+      ],
+    },
+    verdict_rules: [
+      'protocol v1.3, point 10: admissibility first; decisional comparisons only between admissible policies; T100 enters a verdict only if it respects 50 % itself',
+      'verdicts: preuve forte, avantage pratique, viable sans comparateur admissible, non retenue, as written in the protocol',
+      'no adjustment of parameter, rule, variant or comparator after the internal verification is read, whatever the results',
+    ],
+  };
+  const freeze: CandidateFreeze = { ...freezeBody, decisions_sha256: freezeDigest(freezeBody) };
+  files.push(writeArtefact(path.resolve(rootDir, path.dirname(FREEZE_FILE)), path.basename(FREEZE_FILE), freeze));
   const manifest = {
     schema_version: 1,
     kind: 'bench-exposure-development',

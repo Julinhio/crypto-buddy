@@ -113,6 +113,26 @@ export const RPA: Policy = Object.freeze({
 });
 
 /**
+ * A CONSTANT-TARGET witness — TC44 (amendment of 17/10, after the SCORE variants): the target
+ * is fixed, the gate sees the risk_off exactly as the candidate's does, and every constraint
+ * (caps, stops, re-entry, freezes, execution) is the engine's. A realised exposure under the
+ * target is never compensated.
+ */
+export function constantPolicy(name: string, targetPercent: number): Policy {
+  if (!(targetPercent >= 0 && targetPercent <= 100)) throw new Error(`constant policy ${name}: target outside [0, 100]`);
+  return Object.freeze({
+    name,
+    gateSeesRiskOff: true,
+    rebalanceThresholdPoints: 0,
+    decide: (): PolicyDecision => ({ totalTargetPercent: targetPercent, excluded: NONE }),
+  });
+}
+
+/** TC44: SCORE-C-linear's mean realised exposure on the development window, fixed to 6 dp. */
+export const TC44_TARGET_PERCENT = 44.226403;
+export const TC44: Policy = constantPolicy('TC44', TC44_TARGET_PERCENT);
+
+/**
  * A SCORE policy from a score→target transform. The transform and the threshold are the
  * variant; their values are learned on the development window and frozen (see `score.ts`).
  */

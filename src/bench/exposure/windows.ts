@@ -21,7 +21,7 @@
  */
 
 export interface Window {
-  readonly name: 'development' | 'verification' | 'validation';
+  readonly name: 'development' | 'verification' | 'validation' | 'calibration';
   readonly fromMs: number;
   /** EXCLUSIVE. */
   readonly toMs: number;
@@ -48,6 +48,28 @@ export const VALIDATION: Window = Object.freeze({
   toMs: Date.parse('2026-06-01T00:00:00.000Z'),
 });
 
+/** The whole calibration, for continuous-trajectory metrics only — never a run's own window. */
+export const CALIBRATION: Window = Object.freeze({
+  name: 'calibration',
+  fromMs: Date.parse('2021-01-01T00:00:00.000Z'),
+  toMs: SEAL_INSTANT_MS,
+});
+
+/**
+ * THE PROOF THAT THE INTERNAL VERIFICATION MAY BE READ.
+ *
+ * Constructed in exactly one place, `openVerification` in `freeze.ts`, after it has checked
+ * that the freeze file exists, verifies its own digest, is committed at HEAD, that the working
+ * tree is clean and that the source tree is the one that froze. A test asserts that no other
+ * file constructs it. Nothing else opens the window: `assertMeasurable` and the tape both
+ * demand this object.
+ */
+export class VerificationOpening {
+  constructor(
+    readonly evidence: { freezeSha256: string; freezeCommit: string; sourceTreeSha: string },
+  ) {}
+}
+
 export class ClosedWindowError extends Error {
   constructor(window: Window, why: string) {
     super(`window "${window.name}" is closed: ${why}`);
@@ -62,7 +84,7 @@ export class ClosedWindowError extends Error {
  * study — so a measurement on a closed window fails at its first line rather than relying on
  * the caller having picked the right constant.
  */
-export function assertMeasurable(window: Window): void {
+export function assertMeasurable(window: Window, opening?: VerificationOpening): void {
   if (window.name === 'development') {
     if (window.fromMs !== DEVELOPMENT.fromMs || window.toMs !== DEVELOPMENT.toMs) {
       throw new ClosedWindowError(window, 'a window named "development" must have the development bounds');
@@ -70,7 +92,13 @@ export function assertMeasurable(window: Window): void {
     return;
   }
   if (window.name === 'verification') {
-    throw new ClosedWindowError(window, 'it opens only after the SCORE variants are frozen (protocol v1.3, point 5)');
+    if (!(opening instanceof VerificationOpening)) {
+      throw new ClosedWindowError(window, 'it opens only on a committed freeze of the candidate (protocol v1.3, point 10)');
+    }
+    if (window.fromMs !== VERIFICATION.fromMs || window.toMs !== VERIFICATION.toMs) {
+      throw new ClosedWindowError(window, 'a window named "verification" must have the verification bounds');
+    }
+    return;
   }
   throw new ClosedWindowError(window, 'the validation window is sealed and opens once, after the candidate is committed');
 }

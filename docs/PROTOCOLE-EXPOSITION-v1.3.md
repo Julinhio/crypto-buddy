@@ -41,6 +41,7 @@ Aucun cash permanent ni réserve structurelle. Toute l'enveloppe est mobilisable
 - **R100/0**, règle simple : cible 100 %, ramenée à 0 % en risk_off global confirmé, revenue à 100 % lorsque le risk_off global confirmé prend fin.
 - **RPA**, règle simple : chaque actif sort quand son régime baissier (`trend_down` ou `reversal_down`) est confirmé. La sortie est mémorisée : l'actif reste exclu à travers `range` et tout régime baissier, et ne revient qu'une fois `trend_up` ou `reversal_up` confirmé, jamais pendant une transition. Sortie totale en risk_off global confirmé, retour à 100 % lorsqu'il prend fin. *(Amendé, voir la note en fin de document.)*
 - **SCORE** : score de conviction calculé par le code, transformé en cible exacte entre 0 et 100 %. Ensemble fini de variantes (composantes, pondérations, seuils), préenregistré avant exécution.
+- **TC44**, comparateur : cible constante de 44,226403 %, l'exposition moyenne réalisée de SCORE-C-linear sur le développement. Mêmes poids, plafonds, stops, règles de réentrée, gels, porte et exécution que la candidate. Une exposition réelle inférieure à la cible n'est jamais compensée. *(Ajouté, voir l'amendement 2.)*
 - **Exploratoire**, hors sélection : dimensionnement par le risque, seulement une fois un stop initial déterministe et son contrat complet figés.
 - Une cible de 100 % n'est pas une promesse d'exposition réalisée permanente.
 
@@ -73,6 +74,8 @@ Continu depuis le plus-haut de toute la trajectoire, sur l'équité de clôture 
 5. Une politique non admissible reste dans le rapport, à titre descriptif.
 
 Sélection en calibration : une seule candidate, figée et commitée avec cette règle de décision et les paramètres du bootstrap avant l'ouverture. En validation, T100, R100/0 et RPA sont rejoués comme comparateurs ; seule la candidate figée reçoit un verdict.
+
+Qualification sur la vérification interne *(amendement 2)* : voir les filtres F1 à F4 en fin de document.
 
 Verdicts :
 
@@ -112,3 +115,25 @@ Décidé par Julien, Alex et Claude **après l'étape 1** du banc (`docs/RAPPORT
 3. **Sortie globale R100/0**, inchangée : 0 % pendant le risk_off global confirmé, retour à 100 % lorsqu'il prend fin.
 
 Aucune autre règle, aucun paramètre ni aucune variante n'a été modifié par cet amendement. Les six variantes SCORE s'exécutent uniquement sous ces règles.
+
+## Amendement 2 du 17/10/2026 : TC44 et qualification sur la vérification interne
+
+Décidé par Julien, Alex et Claude **après l'exécution des variantes SCORE** sur le développement et **avant toute ouverture de la vérification interne**. La candidate est SCORE-C-linear (seuil de rééquilibrage de 20 points). R100/0 et RPA sont non admissibles, RPA sans exception pour ses 1,4 point. Elles restent publiées à titre descriptif avec T100.
+
+**TC44** : témoin à cible constante de 44,226403 %, l'exposition moyenne réalisée de SCORE-C-linear sur le développement. Il partage avec la candidate les poids, plafonds, stops, règles de réentrée, gels, porte et exécution. Les contraintes peuvent faire tomber son exposition réelle sous la cible ; l'écart n'est jamais compensé. La question mesurée : SCORE-C-linear fait-il mieux qu'une politique qui vise en permanence environ 44 % d'exposition ?
+
+**Longueurs de bloc** : chaque comparaison décisionnelle possible reçoit sa propre longueur moyenne, Politis-White sur la série des différences quotidiennes de rendements logarithmiques du développement seul, puis figée.
+
+**Gel** : la candidate (seuil 20, normalisations apprises sur le développement), TC44, les longueurs de bloc, les paramètres du bootstrap (10 000 tirages, graine 20261101, borne unilatérale à 95 %) et toutes les règles de qualification et de verdict sont commités avant toute lecture de la vérification interne.
+
+**Vérification interne** : trajectoire continue sur toute la calibration `[2021-01-01, 2024-07-01)` pour SCORE-C-linear, TC44, T100, R100/0 et RPA. Filtres appliqués sans aucun ajustement :
+
+- **F1** : le drawdown continu de SCORE-C-linear sur toute la calibration est inférieur ou égal à 50 %.
+- **F2** : son exposition médiane dans le décile de conviction le plus élevé est d'au moins 80 %, sur l'ensemble de la calibration et séparément sur la vérification interne.
+- **F3** : l'admissibilité de TC44 se constate sur toute la calibration (drawdown continu ≤ 50 %).
+- **F4** : si TC44 est admissible, SCORE-C-linear ne se qualifie que s'il le dépasse d'au moins 5 points de rendement annualisé net sur la vérification interne. L'intervalle de confiance est publié mais n'élimine pas à ce stade.
+- **F4 bis** : si TC44 n'est pas admissible, sa comparaison reste descriptive. SCORE-C-linear se qualifie alors sur ses propres exigences, avec un verdict maximal « viable sans comparateur admissible » en validation.
+- Si la candidate échoue l'un de ces filtres, le résultat est constaté et le banc s'arrête.
+- La fenêtre scellée n'est pas ouverte dans ce cycle, même si la candidate se qualifie.
+
+Aucun ajustement de paramètre, de règle, de variante ou de comparateur après lecture de la vérification interne, quels que soient les résultats.

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Decimal } from '../money.js';
@@ -21,6 +21,9 @@ import { HORIZONS_DAYS, runPredictiveStudy } from '../bench/exposure/predictive.
 import { compositeScore, fitNormalisation, linearTarget, stepTarget, topDecileMedianExposure } from '../bench/exposure/score.js';
 import { laggedProducts, mulberry32, neweyWest, politisWhite, stationaryBootstrap } from '../bench/exposure/stats.js';
 import { ClosedWindowError, DEVELOPMENT, SEAL_INSTANT_MS, VALIDATION, VERIFICATION, assertMeasurable, insideWithEmbargo, type Window } from '../bench/exposure/windows.js';
+import { FreezeRefusedError, freezeDigest, loadFreeze, openVerification, type CandidateFreeze, type OpeningEnv } from '../bench/exposure/freeze.js';
+import { applyQualification } from '../bench/exposure/verify.js';
+import { TC44, TC44_TARGET_PERCENT } from '../bench/exposure/policy.js';
 
 /**
  * THE PROOFS OF BENCH v1.3 (protocol v1.3). Synthetic data wherever the brief asks for it —
@@ -546,6 +549,89 @@ console.log('\nProof 11 — the six SCORE variants, as validated on 17/10:');
   const fake = { bars: Array.from({ length: 21 }, (_, i) => ({ t: i, exposurePercent: i === 0 ? 0 : (i - 1) * 5 })) } as unknown as RunResult;
   const dec = topDecileOfRun(fake, (t) => t);
   ok('the conviction decile reads the exposure of the NEXT bar', dec != null && dec.bars === 2 && near(dec.medianExposurePercent, ((18 + 19) / 2) * 5));
+}
+
+// ── PROOF 12 — the internal verification opens only on a committed freeze ─────────────
+console.log('\nProof 12 — the opening of the internal verification, refusal by refusal (synthetic):');
+{
+  ok('TC44 is a constant 44.226403 % whose gate sees the risk_off, like the candidate', TC44_TARGET_PERCENT === 44.226403 && TC44.gateSeesRiskOff &&
+    TC44.decide({ point: { global: { riskOff: true } } as never, sticky: {}, excludedBefore: new Set() }).totalTargetPercent === 44.226403);
+
+  assert.throws(() => assertMeasurable(VERIFICATION), ClosedWindowError);
+  ok('the verification is refused without an opening', true);
+  assert.throws(() => prepareCalibrationTape(ROOT, SEAL_INSTANT_MS));
+  ok('the tape refuses candles past 2023-01-01 without an opening, before reading them', true);
+
+  // A synthetic freeze, signed, and the git facts it would need.
+  const body = { schema_version: 1, kind: 'bench-exposure-candidate-freeze', source_tree_sha: 'abc', qualification_rules: {} } as unknown as Omit<CandidateFreeze, 'decisions_sha256'>;
+  const fake = { ...body, decisions_sha256: freezeDigest(body) } as CandidateFreeze;
+  const good: OpeningEnv = { committed: true, dirtyPaths: [], sourceTreeSha: 'abc', freezeCommit: 'f00' };
+  const opening = openVerification(fake, good);
+  assertMeasurable(VERIFICATION, opening);
+  ok('a committed, intact freeze on a clean tree of the same source opens it', opening.evidence.freezeCommit === 'f00');
+  for (const [label, env] of [
+    ['an uncommitted freeze', { ...good, committed: false }],
+    ['git unable to say whether it is committed', { ...good, committed: null }],
+    ['a dirty working tree', { ...good, dirtyPaths: [' M src/bench/exposure/policy.ts'] }],
+    ['another source tree than the one that froze', { ...good, sourceTreeSha: 'def' }],
+    ['no commit carrying the freeze', { ...good, freezeCommit: null }],
+  ] as Array<[string, OpeningEnv]>) {
+    assert.throws(() => openVerification(fake, env), FreezeRefusedError, label);
+    ok(`refused: ${label}`, true);
+  }
+  assert.throws(() => assertMeasurable({ ...VERIFICATION, toMs: SEAL_INSTANT_MS + H4 }, opening), ClosedWindowError);
+  ok('even opened, a "verification" window cannot reach past the seal', true);
+
+  // A freeze edited after signing is refused on load.
+  const sandbox = mkdtempSync(path.join(tmpdir(), 'bench-freeze-'));
+  mkdirSync(path.join(sandbox, 'out', 'bench-exposure', 'development'), { recursive: true });
+  const fpath = path.join(sandbox, 'out', 'bench-exposure', 'development', 'freeze.json');
+  writeFileSync(fpath, JSON.stringify(fake));
+  ok('an intact freeze loads', loadFreeze(sandbox).decisions_sha256 === fake.decisions_sha256);
+  writeFileSync(fpath, JSON.stringify({ ...fake, source_tree_sha: 'tampered' }));
+  assert.throws(() => loadFreeze(sandbox), FreezeRefusedError);
+  ok('a freeze edited after signing is refused', true);
+  rmSync(sandbox, { recursive: true, force: true });
+
+  // Only freeze.ts constructs the opening.
+  const files: string[] = [];
+  const walk = (dir: string): void => {
+    for (const e of readdirSync(dir)) {
+      const p = path.join(dir, e);
+      if (statSync(p).isDirectory()) walk(p);
+      else if (p.endsWith('.ts')) files.push(p);
+    }
+  };
+  walk(path.join(ROOT, 'src'));
+  const minters = files.filter((f) => /new VerificationOpening\(/.test(readFileSync(f, 'utf8')));
+  ok('only freeze.ts constructs a VerificationOpening', minters.length === 1 && minters[0]!.endsWith(path.join('bench', 'exposure', 'freeze.ts')));
+}
+
+// ── PROOF 13 — the qualification filters, branch by branch (synthetic numbers) ────────
+console.log('\nProof 13 — the frozen qualification filters:');
+{
+  const rules = {
+    candidate_max_drawdown_percent_on_calibration: 50,
+    candidate_top_decile_min_median_exposure_percent: 80,
+    tc44_admissible_min_annualised_advantage_points_on_verification: 5,
+  } as unknown as CandidateFreeze['qualification_rules'];
+  const base: Parameters<typeof applyQualification>[1] = {
+    candidateMaxDrawdownOnCalibration: 45,
+    decileCalibration: { medianExposurePercent: 95, bars: 100 },
+    decileVerification: { medianExposurePercent: 90, bars: 30 },
+    tc44MaxDrawdownOnCalibration: 40,
+    candidateAnnualisedOnVerification: 30,
+    tc44AnnualisedOnVerification: 25,
+  };
+  const q = (over: Partial<typeof base>) => applyQualification(rules, { ...base, ...over });
+  ok('TC44 admissible, advantage exactly 5 points: qualifies, any verdict', q({}).candidateQualifies && q({}).f4.pass === true && q({}).maximumVerdictInValidation.startsWith('any'));
+  ok('TC44 admissible, advantage 4.99 points: does not qualify', !q({ candidateAnnualisedOnVerification: 29.99 }).candidateQualifies);
+  const na = q({ tc44MaxDrawdownOnCalibration: 50.01, candidateAnnualisedOnVerification: 10 });
+  ok('TC44 not admissible: comparison descriptive, qualifies on its own, verdict capped', na.candidateQualifies && na.f4.pass === null && na.maximumVerdictInValidation === 'viable sans comparateur admissible');
+  ok('drawdown 50 % exactly passes, 50.01 % fails', q({ candidateMaxDrawdownOnCalibration: 50 }).f1.pass && !q({ candidateMaxDrawdownOnCalibration: 50.01 }).candidateQualifies);
+  ok('the decile must hold on the verification separately', !q({ decileVerification: { medianExposurePercent: 79.99, bars: 30 } }).candidateQualifies);
+  ok('the decile must hold on the whole calibration', !q({ decileCalibration: { medianExposurePercent: 79.99, bars: 100 } }).candidateQualifies);
+  ok('no decile at all fails', !q({ decileVerification: null }).candidateQualifies);
 }
 
 console.log(`\n${passed} bench-exposure checks passed.`);

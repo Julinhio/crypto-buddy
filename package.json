@@ -32,7 +32,8 @@
     "replay:band-witnesses": "tsx src/replay/exposureBandWitnesses.ts",
     "replay:guard-band-incident": "tsx src/replay/guardBandIncident.ts",
     "replay:activity-attribution": "tsx src/replay/activityAttribution.ts",
-    "bench:exposure:dev": "tsx src/bench/exposure/run.ts"
+    "bench:exposure:dev": "tsx src/bench/exposure/run.ts",
+    "bench:exposure:verify": "tsx src/bench/exposure/verify.ts"
   },
   "engines": {
     "node": ">=22"
