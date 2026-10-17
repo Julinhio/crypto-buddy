@@ -3,6 +3,7 @@
 Ben, 17/10/2026. Protocole : [`PROTOCOLE-EXPOSITION-v1.3.md`](PROTOCOLE-EXPOSITION-v1.3.md),
 amendé le 17/10 (trois chemins de réentrée gelés, note en fin de protocole).
 Audit d'origine : [`AUDIT-PROTOCOLE-EXPOSITION.md`](AUDIT-PROTOCOLE-EXPOSITION.md).
+Suite : [`RAPPORT-BANC-ETAPE-2.md`](RAPPORT-BANC-ETAPE-2.md), où la candidate est vérifiée, et échoue F4 contre TC44.
 
 Artefacts : `out/bench-exposure/development/summary.json` et `manifest.json`, régénérables par
 `npm run bench:exposure:dev`. Ils sont déterministes, et le lanceur refuse d'écrire si l'arbre
