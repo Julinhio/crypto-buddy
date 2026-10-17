@@ -400,6 +400,10 @@ for (const policy of [T100, R100_0, RPA]) runs[policy.name] = runWindow({ tape, 
     viaScore.bars.length === runs['R100/0']!.bars.length && viaScore.bars.every((b, i) => b.equity === runs['R100/0']!.bars[i]!.equity));
 
   const m = computeRunMetrics(runs.T100!, tape.barMs);
+  ok('the sub-periods are the two calendar years and chain back to the whole-window return',
+    m.bySubperiod.map((p) => p.period).join(',') === '2021,2022' &&
+    near((m.bySubperiod.reduce((g, p) => g * (1 + p.returnPercent / 100), 1) - 1) * 100, m.netReturnPercent, 1e-9) &&
+    near(Math.max(...m.bySubperiod.map((p) => p.maxDrawdownPercent)), m.maxDrawdownPercent, 1e-12));
   ok('the turnover attribution adds up to the turnover', near(Object.values(m.turnoverByCause).reduce((s, v) => s + v, 0), m.turnover, 1e-9));
   const noStop = runWindow({ tape, cfg, policy: T100, window: DEVELOPMENT, diagnosticWithoutStop: true });
   ok('the diagnostic without stop never exits by stop and never bars a line',

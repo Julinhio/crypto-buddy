@@ -98,6 +98,16 @@ export function runStep1(rootDir = process.cwd()): { files: WrittenFile[]; summa
       turnover: round(m.turnover),
       frictionPercentOfOpening: round(m.frictionPercentOfOpening),
       turnoverByCause: Object.fromEntries(Object.entries(m.turnoverByCause).map(([k, v]) => [k, round(v)])),
+      bySubperiod: m.bySubperiod.map((p) => ({
+        ...p,
+        startEquity: round(p.startEquity),
+        endEquity: round(p.endEquity),
+        returnPercent: round(p.returnPercent),
+        maxDrawdownPercent: round(p.maxDrawdownPercent),
+        meanExposurePercent: round(p.meanExposurePercent),
+        fees: round(p.fees),
+        slippageCost: round(p.slippageCost),
+      })),
       timeUnderHighPercent: round(m.timeUnderHighPercent),
       longestUnderHighDays: round(m.longestUnderHighDays),
       exposure: {

@@ -45,6 +45,7 @@ export interface RunMetrics {
   turnoverByCause: Record<string, number>;
   /** Fees plus slippage, in percent of the opening equity. */
   frictionPercentOfOpening: number;
+  bySubperiod: SubperiodMetrics[];
 }
 
 /** Linear-interpolated quantile on a sorted copy. Deterministic, no library. */
@@ -89,6 +90,50 @@ export function dailyLogReturns(run: RunResult, barMs: number): { dayEndMs: numb
     previous = bar.equity;
   }
   return { dayEndMs: dayEnds.map((b) => b.t + barMs), logReturns };
+}
+
+/**
+ * PROTOCOL v1.3, point 12: results by sub-period. The sub-periods are CALENDAR YEARS — a split
+ * fixed before any result, independent of the data, so no one picks "the bull" and "the bear"
+ * after looking. Each year's return runs from the equity carried into it (the window's opening
+ * equity, or the last close of the previous year) to its last close; its drawdown is the
+ * CONTINUOUS one, from the trajectory high, read over the year's bars.
+ */
+export interface SubperiodMetrics {
+  period: string;
+  bars: number;
+  startEquity: number;
+  endEquity: number;
+  returnPercent: number;
+  maxDrawdownPercent: number;
+  meanExposurePercent: number;
+  fees: number;
+  slippageCost: number;
+  stopExits: number;
+}
+
+export function bySubperiod(run: RunResult): SubperiodMetrics[] {
+  const years = [...new Set(run.bars.map((b) => new Date(b.t).getUTCFullYear()))].sort();
+  const out: SubperiodMetrics[] = [];
+  let carried = run.openingEquity;
+  for (const year of years) {
+    const bars = run.bars.filter((b) => new Date(b.t).getUTCFullYear() === year);
+    const end = bars[bars.length - 1]!.equity;
+    out.push({
+      period: String(year),
+      bars: bars.length,
+      startEquity: carried,
+      endEquity: end,
+      returnPercent: (end / carried - 1) * 100,
+      maxDrawdownPercent: bars.reduce((mx, b) => Math.max(mx, b.drawdownPercent), 0),
+      meanExposurePercent: bars.reduce((s, b) => s + b.exposurePercent, 0) / bars.length,
+      fees: bars.reduce((s, b) => s + b.fees, 0),
+      slippageCost: bars.reduce((s, b) => s + b.slippageCost, 0),
+      stopExits: bars.reduce((s, b) => s + b.stopExitsDecided.length, 0),
+    });
+    carried = end;
+  }
+  return out;
 }
 
 export function computeRunMetrics(run: RunResult, barMs: number): RunMetrics {
@@ -138,6 +183,7 @@ export function computeRunMetrics(run: RunResult, barMs: number): RunMetrics {
       for (const b of bars) if (b.tradedNotional > 0) by[b.executedCause ?? 'none'] = (by[b.executedCause ?? 'none'] ?? 0) + b.tradedNotional / meanEquity;
       return by;
     })(),
+    bySubperiod: bySubperiod(run),
     frictionPercentOfOpening:
       ((bars.reduce((s, b) => s + b.fees, 0) + bars.reduce((s, b) => s + b.slippageCost, 0)) / run.openingEquity) * 100,
   };
