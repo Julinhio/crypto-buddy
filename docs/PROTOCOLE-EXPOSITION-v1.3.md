@@ -38,8 +38,8 @@ Aucun cash permanent ni réserve structurelle. Toute l'enveloppe est mobilisable
 ## 6. Architectures
 
 - **T100**, témoin : cible 100 % constante, même fonction de porte avec `riskOffConfirmed` forcé à faux.
-- **R100/0**, règle simple : cible 100 %, ramenée à 0 % en risk_off global confirmé.
-- **RPA**, règle simple : chaque actif sort quand son régime baissier est confirmé, ne revient qu'une fois son régime neutre ou haussier confirmé, jamais pendant une transition. Sortie totale en risk_off global confirmé.
+- **R100/0**, règle simple : cible 100 %, ramenée à 0 % en risk_off global confirmé, revenue à 100 % lorsque le risk_off global confirmé prend fin.
+- **RPA**, règle simple : chaque actif sort quand son régime baissier (`trend_down` ou `reversal_down`) est confirmé. La sortie est mémorisée : l'actif reste exclu à travers `range` et tout régime baissier, et ne revient qu'une fois `trend_up` ou `reversal_up` confirmé, jamais pendant une transition. Sortie totale en risk_off global confirmé, retour à 100 % lorsqu'il prend fin. *(Amendé, voir la note en fin de document.)*
 - **SCORE** : score de conviction calculé par le code, transformé en cible exacte entre 0 et 100 %. Ensemble fini de variantes (composantes, pondérations, seuils), préenregistré avant exécution.
 - **Exploratoire**, hors sélection : dimensionnement par le risque, seulement une fois un stop initial déterministe et son contrat complet figés.
 - Une cible de 100 % n'est pas une promesse d'exposition réalisée permanente.
@@ -51,7 +51,7 @@ Aucun cash permanent ni réserve structurelle. Toute l'enveloppe est mobilisable
 - Un surpoids gelé consomme le budget et comprime les lignes libres. Si le budget devient négatif, les lignes libres vont à 0 et la sur-exposition résiduelle est publiée.
 - Budget restant réparti par `waterfill` au prorata des poids entre lignes éligibles, dans la limite de leurs plafonds (ou de leur poids courant si elles ne peuvent que baisser).
 - Ce qui ne trouve pas de place reste en cash, journalisé `capacite_insuffisante`. Jambe sous le plancher de 2 % abandonnée, journalisée `reliquat_inexecutable`, jamais redistribuée une seconde fois.
-- Réentrée après un stop, toutes architectures : jamais pendant une transition ni en régime baissier confirmé ; automatique dès qu'un régime neutre ou haussier est confirmé.
+- Réentrée après un stop, toutes architectures : la ligne reste barrée pendant `range`, `trend_down` et `reversal_down`, et n'est libérée que sur `trend_up` ou `reversal_up` confirmé, jamais pendant une transition. *(Amendé, voir la note en fin de document.)*
 - Exécution : même fonction de porte, `planMovements` de production (achats au prorata), mêmes prix, frais et glissement.
 - Seuil de rééquilibrage : porte sur la variation de l'exposition totale, distinct du plancher de 2 % par ligne, méthode de sélection gelée avec la politique.
 
@@ -102,3 +102,13 @@ Hors du chemin des ordres. Classement journalisé en parallèle, jugé de façon
 - Rien sur `main` de crypto-buddy avant la clôture du pilote (1er novembre 2026, 11h46 UTC, puis cycle suivant).
 - Avant toute hausse réelle d'exposition, chantier séparé : exécution autonome sans le modèle, cadence fixe sur les clôtures 4h, stops indépendants du modèle, révision de la borne de `minCashPercent`.
 - Plafonds et répartition : expérience ultérieure distincte.
+
+## Amendement du 17/10/2026 : les trois chemins de réentrée gelés
+
+Décidé par Julien, Alex et Claude **après l'étape 1** du banc (`docs/RAPPORT-BANC-ETAPE-1.md`), **avant toute exécution de SCORE** et **avant toute ouverture de la vérification interne**. Motif : la première règle libérait dès qu'un régime neutre était confirmé, `range` compris, et le stop et sa réentrée produisaient ainsi environ 90 % de la rotation de T100.
+
+1. **Stop individuel**, commun à toutes les architectures : la ligne stoppée reste barrée pendant `range`, `trend_down` et `reversal_down`. Elle n'est libérée que sur `trend_up` ou `reversal_up` confirmé.
+2. **Sortie RPA**, mémorisée : l'actif sorti sur `trend_down` ou `reversal_down` confirmé reste exclu jusqu'à `trend_up` ou `reversal_up` confirmé. Cesser d'être baissier ne suffit plus, `range` compris. Sa part reste en cash.
+3. **Sortie globale R100/0**, inchangée : 0 % pendant le risk_off global confirmé, retour à 100 % lorsqu'il prend fin.
+
+Aucune autre règle, aucun paramètre ni aucune variante n'a été modifié par cet amendement. Les six variantes SCORE s'exécutent uniquement sous ces règles.
