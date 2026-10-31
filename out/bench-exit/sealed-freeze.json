@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "kind": "bench-exit-sealed-freeze",
+  "protocol": {
+    "file": "docs/PROTOCOLE-SORTIE-v0.4.md",
+    "git_blob_sha": "7db53ef222df0b7becb299e7ef68102c624304d5"
+  },
+  "source_tree_sha": "34fb0338ab1ab848d1067787b7b81f6cd3fdf202",
+  "deps_lock_sha": "eb23e7e378e429f5db0d9689509d22c337c6389f",
+  "bench_config_sha256": "66eade6d76492c7ab8732a39188005e606ced888ef5abd80ee3baab52d30c47a",
+  "bundles": [
+    {
+      "bundle_id": "crypto-buddy-exposure-v2-core",
+      "bundle_sha256": "1ec86eba76046eca8fc27906d2f7e513a3b3cbce5fcde32facd9d1e258cb6ad2"
+    },
+    {
+      "bundle_id": "crypto-buddy-exposure-v2-sol",
+      "bundle_sha256": "a1eee621bf9941a8acd7f0a7bf5b171477747bc19fa6e01f96b25e3f600415e5"
+    }
+  ],
+  "sealed_fingerprint": {
+    "file": "data/calibration/crypto-buddy-exposure-v2-validation.fingerprint.json",
+    "git_blob_sha": "4266b420c21f2fe940668dd3c582a9a9e4d08947",
+    "bundle_id": "crypto-buddy-exposure-v2-validation",
+    "bundle_sha256": "7f79f1db46b855170fe62ae29ef4068f4aa49efa0ea3d73b136387fcf91ac9a5",
+    "manifest_sha256": "75a0c26dd0944a56715787d326d78e0f053e197b7c8a7e5241cba8d3fc7a6d20"
+  },
+  "previous_freeze": {
+    "file": "out/bench-exit/freeze.json",
+    "commit": "8602ba7f2a0eafa9daf73b4eb6fe3bd9b14b7a19",
+    "decisions_sha256": "ebc1259fb2218e1f3e06bb8e13136dbcfc0cb9fa2a6564caa848d6de1fab6692"
+  },
+  "mandate": [
+    "decision of Julien, 31/10/2026: the main criterion is the net return",
+    "the continuous drawdown is published and eliminates nothing; ruin alone is unacceptable",
+    "a new experiment in the sense of protocol v1.3 and of v0.3 A2 — not a readjustment of v0.3 after reading"
+  ],
+  "candidate": {
+    "name": "S4",
+    "chosen_by": "Julien, 31/10/2026",
+    "definition": "candidate: S3, with at least 10 days out of the market before any rebuy",
+    "parameters": {
+      "longMeanDays": 200,
+      "shortMeanDays": 50,
+      "hysteresisExitRatio": 0.97,
+      "hysteresisEntryRatio": 1.03,
+      "trailingStopPercent": 20,
+      "minDaysOut": 10
+    }
+  },
+  "comparators": {
+    "E1": "reference: the current mechanism, exactly T100 of v1.3 — 10 % peak stop armed in transition, line barred until a confirmed trend_up or reversal_up; gate blind to the global risk_off",
+    "E0": "reference: constant 100 % target, no stop at all (T100 of v1.3 with the peak stop disabled); gate blind to the global risk_off",
+    "TC44": "reference: constant 44.226403 % target, the rules of protocol v1.3 (stop, re-entry, gate seeing the global risk_off)"
+  },
+  "continuous_trajectory": {
+    "from": "2020-10-01T00:00:00.000Z",
+    "to_exclusive": "2026-06-01T00:00:00.000Z"
+  },
+  "sealed_window": {
+    "from": "2024-07-01T00:00:00.000Z",
+    "to_exclusive": "2026-06-01T00:00:00.000Z",
+    "days": 700
+  },
+  "verdict": {
+    "comparator": "E1",
+    "rule": [
+      "\"Go pilote testnet\" if S4 ends the sealed window with a net return strictly positive AND strictly above E1's",
+      "otherwise \"Non retenue\"",
+      "E0 and TC44 are published for information and do not enter the verdict; nor does the bootstrap",
+      "nothing changes after the results are read: no parameter, comparator or verdict; no second replay"
+    ]
+  },
+  "measures": [
+    "one continuous replay per policy from 2020-10-01 to 2026-06-01: state, trailing highs, equity high and pending order cross 2024-07-01 as lived",
+    "the window [2024-07-01, 2026-06-01) is the slice of bars opened in it, every dollar rebased so that the 4h close equity at 2024-07-01T00:00 is 1 000 $",
+    "net return = closing equity / 1 000 - 1; annualised over 700 days of 365.25-day years",
+    "continuous drawdown: the worst, over the window's 4h closes, measured from the high of the WHOLE trajectory (v1.3 point 9), with the close of that high, of the trough and of the recovery; the drawdown from the window's own high is published beside it for information",
+    "fees and slippage in dollars of the rebased trajectory; turnover = traded notional / mean equity of the window; exits, time in cash, exposure: as in v0.3 §10 and §15, on the window's bars",
+    "calendar years 2024 (from 07-01), 2025, 2026 (to 06-01): return from the equity carried in, continuous drawdown",
+    "crash episodes: the §9 rule on the synthetic index over the closes of [2020-10-01, 2026-06-01]; the episodes still open after 2024-07-01 are published with each policy's readings and rebuy delay (§15.8), read on the continuous trajectory; the trough is flagged in or before the window"
+  ],
+  "bootstrap": {
+    "series": "daily log-return difference, S4 minus comparator, on the sealed window (day ends at 00:00 UTC, the first from the rebased opening)",
+    "method": "stationary bootstrap (Politis and Romano), circular, geometric blocks",
+    "draws": 10000,
+    "seed": 20261101,
+    "one_sided_level": 0.95,
+    "lower_bound": "5th percentile of the bootstrap means",
+    "published": "for information only: S4 against E1 first, then E0 and TC44",
+    "block_lengths": [
+      {
+        "comparison": "S4 - E1",
+        "comparator": "E1",
+        "development_days": 1369,
+        "block_length": 1.909708,
+        "cutoff_lag": 0,
+        "bandwidth": 2
+      },
+      {
+        "comparison": "S4 - E0",
+        "comparator": "E0",
+        "development_days": 1369,
+        "block_length": 8.673432,
+        "cutoff_lag": 5,
+        "bandwidth": 10
+      },
+      {
+        "comparison": "S4 - TC44",
+        "comparator": "TC44",
+        "development_days": 1369,
+        "block_length": 1,
+        "cutoff_lag": 0,
+        "bandwidth": 2
+      }
+    ]
+  },
+  "development_reference": {
+    "window": {
+      "from": "2020-10-01T00:00:00.000Z",
+      "to_exclusive": "2024-07-01T00:00:00.000Z"
+    },
+    "crash_episodes": [
+      {
+        "episode": 1,
+        "start": "2021-05-12T00:00:00.000Z",
+        "peak_index": 2280.588869,
+        "crossed": "2021-05-20T00:00:00.000Z",
+        "trough": "2021-07-21T00:00:00.000Z",
+        "trough_index": 1025.174064,
+        "depth_percent": 55.047835,
+        "end": "2021-10-30T00:00:00.000Z",
+        "recovered": true
+      },
+      {
+        "episode": 2,
+        "start": "2021-11-09T00:00:00.000Z",
+        "peak_index": 2582.889828,
+        "crossed": "2022-01-06T00:00:00.000Z",
+        "trough": "2022-06-19T00:00:00.000Z",
+        "trough_index": 665.927145,
+        "depth_percent": 74.217749,
+        "end": "2024-07-01T00:00:00.000Z",
+        "recovered": false
+      }
+    ],
+    "closing_equity": {
+      "S4": 12366.908,
+      "E0": 10619.933722,
+      "E1": 5900.690494,
+      "TC44": 2569.819702
+    }
+  },
+  "opening_procedure": [
+    "refused unless the v0.4 freeze is committed at HEAD, intact, signing this src, lockfile, protocol and fingerprint, the tree clean, and HEAD contained in the remote branch",
+    "refused if out/bench-exit/sealed/opening.json exists on disk or in any commit: one opening, ever",
+    "the opening record is written (exclusive create) BEFORE any sealed byte is read; the token it issues is the only key to the sealed tape and to the continuous window",
+    "the sealed manifest is checked byte for byte against the committed manifest_sha256, its bundle_sha256 recomputed, each file hashed, each row re-judged to 2026-06-01",
+    "the one overlapping 4h bar (2024-06-30T20:00) must be identical in both parts",
+    "prefix tests before any measure: regime and sticky timelines, the daily table, and each policy's continuous trajectory against its development replay, bar for bar; the development closing equities must be the frozen ones",
+    "any refusal after the record is written is published as a failure: the window stays burnt"
+  ],
+  "decisions_sha256": "5b5b89b26e91d1e4e3f57e79860995e421f8836ba01dc68bf0278e2bebe27cc6"
+}
