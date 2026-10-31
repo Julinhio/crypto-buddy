@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "kind": "bench-exit-sealed",
+  "crypto_buddy_commit": "f2cc04830d556d1fea34dba5ff7911b1323167dc",
+  "crypto_buddy_src_tree_sha": "34fb0338ab1ab848d1067787b7b81f6cd3fdf202",
+  "crypto_buddy_deps_lock_sha": "eb23e7e378e429f5db0d9689509d22c337c6389f",
+  "freeze_file": "out/bench-exit/sealed-freeze.json",
+  "freeze_decisions_sha256": "5b5b89b26e91d1e4e3f57e79860995e421f8836ba01dc68bf0278e2bebe27cc6",
+  "opening_record": "out/bench-exit/sealed/opening.json",
+  "regime_version": "r1",
+  "bench_config_sha256": "66eade6d76492c7ab8732a39188005e606ced888ef5abd80ee3baab52d30c47a",
+  "bundles": [
+    {
+      "bundle_id": "crypto-buddy-exposure-v2-core",
+      "bundle_sha256": "1ec86eba76046eca8fc27906d2f7e513a3b3cbce5fcde32facd9d1e258cb6ad2"
+    },
+    {
+      "bundle_id": "crypto-buddy-exposure-v2-sol",
+      "bundle_sha256": "a1eee621bf9941a8acd7f0a7bf5b171477747bc19fa6e01f96b25e3f600415e5"
+    },
+    {
+      "file": "data/calibration/crypto-buddy-exposure-v2-validation.fingerprint.json",
+      "git_blob_sha": "4266b420c21f2fe940668dd3c582a9a9e4d08947",
+      "bundle_id": "crypto-buddy-exposure-v2-validation",
+      "bundle_sha256": "7f79f1db46b855170fe62ae29ef4068f4aa49efa0ea3d73b136387fcf91ac9a5",
+      "manifest_sha256": "75a0c26dd0944a56715787d326d78e0f053e197b7c8a7e5241cba8d3fc7a6d20"
+    }
+  ],
+  "tape_ends_at": "2026-06-01T00:00:00.000Z",
+  "outputs": [
+    {
+      "file": "summary.json",
+      "sha256": "293609754028e37eee53f1b86912f6d18013a6d25cfc27debc4d431b45b88169",
+      "bytes": 21014
+    }
+  ]
+}
