@@ -114,6 +114,26 @@ export function prepareCalibrationTape(rootDir: string, untilMs: number, opening
   if (untilMs > DEVELOPMENT.toMs && !isGenuineOpening(opening)) {
     throw new Error('bench tape: candles past 2023-01-01 belong to the internal verification — refused without a committed freeze');
   }
+  return calibrationTapeUntil(rootDir, untilMs);
+}
+
+/**
+ * THE EXIT EXPERIMENT'S TAPE — protocol `docs/PROTOCOLE-SORTIE-v0.3.md`, §6: the whole calibration
+ * `[.., 2024-07-01)`, which that protocol declares CONSUMED (the v1.3 internal verification was
+ * opened once, on the freeze `77e3f70`, in `1715f0f`). It is a development window for this
+ * experiment and nothing more: learning and sub-period reading, never independent proof.
+ *
+ * The v1.3 gate above is left exactly as it was — it still guards the v1.3 sequence. The seal is
+ * untouched: the certified parts physically end before 2024-07-01, `loadCertifiedPart` refuses
+ * any candle at or past it, and there is no argument here to move the horizon.
+ */
+export function prepareExitDevelopmentTape(rootDir: string): Tape {
+  return calibrationTapeUntil(rootDir, SEAL_INSTANT_MS);
+}
+
+/** Both certified parts, truncated at `untilMs`, production's universe asserted by name. */
+function calibrationTapeUntil(rootDir: string, untilMs: number): Tape {
+  if (!(untilMs <= SEAL_INSTANT_MS)) throw new Error('bench tape: untilMs is past the seal');
   const core = loadCertifiedPart(CORE_PIN, rootDir);
   const sol = loadCertifiedPart(SOL_PIN, rootDir);
 

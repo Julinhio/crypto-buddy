@@ -9,6 +9,8 @@ import { executeAllocation } from './execute.js';
 import { assertMeasurable, type Window } from './windows.js';
 import type { VerificationOpening } from './opening.js';
 
+const DAY_MS = 86_400_000;
+
 /**
  * THE v1.3 REPLAY ENGINE — one walk over the 4h grid, the same for every policy.
  *
@@ -44,6 +46,39 @@ export interface Position {
   qty: Decimal;
   /** Highest UNIT price since entry — the stop's memory. Never a valuation. */
   peakPrice: Decimal | null;
+  /**
+   * The open at which the line last went from flat to held — the entry an exit rule's trailing
+   * high is measured from (protocol de sortie v0.3, §8, S3). Null while flat. Absent on a state
+   * written before the field existed, which only the v1.3 runs ever carry.
+   */
+  entryAtMs?: number | null;
+}
+
+/** What an exit rule may know of one line at a daily close: held or not, and since when. */
+export interface HoldingView {
+  held: boolean;
+  entryAtMs: number | null;
+}
+
+/**
+ * A DAILY EXIT-AND-REBUY RULE that REPLACES the peak stop — protocol `docs/PROTOCOLE-SORTIE-v0.3.md`.
+ *
+ * The engine calls `onDailyClose` once per daily close, in order, on the first bar whose close is
+ * at or after it — so the rule decides on the daily close and its decision executes at the next
+ * open (§4). Between two daily closes `out` does not move.
+ *
+ * With a rule present (§3, §5, A1):
+ *   - the peak stop never fires: a `stop_exit` verdict reads as what the ladder answers without it;
+ *   - a line the rule holds out is EXCLUDED whatever its gate says — frozen or unreadable lines
+ *     included: the rule's exit has a stop's priority. Excluded means target 0 (a full exit, which
+ *     production's plumbing floor never blocks) and its share left in cash, never redistributed;
+ *   - a line the rule holds in obeys the gate: a frozen line is not bought while it is frozen.
+ */
+export interface ExitRule {
+  readonly name: string;
+  onDailyClose(input: { closeMs: number; holdings: Readonly<Record<string, HoldingView>> }): void;
+  /** The assets the rule holds out after the last daily close it saw. */
+  readonly out: ReadonlySet<string>;
 }
 
 export type LineIntent = { hold: true } | { hold: false; percent: number };
@@ -96,10 +131,23 @@ export interface BarRecord {
   policyExcluded: string[];
   /** Why the order executed at THIS bar's open was decided (see `metrics.ts`). Null when none. */
   executedCause: TradeCause | null;
+  /** Exit rule only: the assets it holds out after this bar's decision. Empty without a rule. */
+  ruleOut: string[];
+  /** Exit rule only: the HELD lines it took out at the daily close read on this bar (its first read excepted). */
+  ruleExitsDecided: string[];
+  /** Exit rule only: the assets it let back in at the daily close read on this bar. */
+  ruleEntriesDecided: string[];
 }
 
 /** The cause of an order, read on the bar that decided it, in priority order. */
-export type TradeCause = 'stop_exit' | 'release_after_stop' | 'policy_target_change' | 'line_state_change' | 'drift_or_other';
+export type TradeCause =
+  | 'stop_exit'
+  | 'rule_exit'
+  | 'release_after_stop'
+  | 'rule_entry'
+  | 'policy_target_change'
+  | 'line_state_change'
+  | 'drift_or_other';
 
 export interface RunResult {
   policy: string;
@@ -155,9 +203,18 @@ export function runWindow(params: {
    * measure what the stop and its re-entry cost; never a candidate.
    */
   diagnosticWithoutStop?: boolean;
+  /**
+   * Protocol de sortie v0.3: the daily exit rule that replaces the peak stop (see `ExitRule`).
+   * Never combined with `resume`: the rule's memory is not part of the carried state.
+   */
+  exitRule?: ExitRule;
 }): RunResult {
   const { tape, cfg, policy, window } = params;
   if (!params.unsafeSyntheticWindow) assertMeasurable(window, params.opening);
+  const rule = params.exitRule ?? null;
+  if (rule && params.resume) throw new Error('bench engine: an exit rule cannot resume a carried state');
+  const stopDisabled = params.diagnosticWithoutStop === true || rule != null;
+  let lastDailyCloseMs: number | null = null;
   for (const asset of cfg.assets) {
     if (!tape.tapes[asset]) throw new Error(`bench engine: tape has no ${asset}`);
   }
@@ -227,9 +284,13 @@ export function runWindow(params: {
         pos.qty = line.qty;
         state.positions[asset] = pos;
       }
-      for (const asset of report.opened) state.positions[asset]!.peakPrice = opens[asset]!;
+      for (const asset of report.opened) {
+        state.positions[asset]!.peakPrice = opens[asset]!;
+        state.positions[asset]!.entryAtMs = t;
+      }
       for (const asset of report.closedOut) {
         state.positions[asset]!.peakPrice = null;
+        state.positions[asset]!.entryAtMs = null;
         if (order.stopExits.includes(asset) && !state.barred.includes(asset)) state.barred.push(asset);
       }
       state.barred.sort();
@@ -259,6 +320,32 @@ export function runWindow(params: {
     }
     const exposurePercent = equity.gt(0) ? deployed.div(equity).times(100).toNumber() : 0;
 
+    // ── THE EXIT RULE reads the daily close this bar's close makes known, once ────────
+    let ruleExitsDecided: string[] = [];
+    let ruleEntriesDecided: string[] = [];
+    if (rule) {
+      const dailyCloseMs = Math.floor((t + tape.barMs) / DAY_MS) * DAY_MS;
+      if (dailyCloseMs !== lastDailyCloseMs) {
+        // The first read only sets where the rule starts: an asset already out then was never
+        // held, and is neither an exit nor, later, a "return".
+        const firstRead = lastDailyCloseMs === null;
+        lastDailyCloseMs = dailyCloseMs;
+        const outBefore = new Set(rule.out);
+        const holdings: Record<string, HoldingView> = {};
+        for (const asset of cfg.assets) {
+          const pos = state.positions[asset];
+          const held = pos != null && pos.qty.gt(0);
+          holdings[asset] = { held, entryAtMs: held ? pos!.entryAtMs ?? null : null };
+        }
+        rule.onDailyClose({ closeMs: dailyCloseMs, holdings });
+        if (!firstRead) {
+          // An exit is a line the rule takes out WHILE IT IS HELD; a re-admission is counted as decided.
+          ruleExitsDecided = cfg.assets.filter((a) => rule.out.has(a) && !outBefore.has(a) && holdings[a]!.held);
+          ruleEntriesDecided = cfg.assets.filter((a) => !rule.out.has(a) && outBefore.has(a));
+        }
+      }
+    }
+
     // ── THE RE-ENTRY RULE: a barred line is released by a confirmed BULLISH regime only ──
     const sticky: Record<string, StickyPoint | null> = {};
     for (const asset of cfg.assets) sticky[asset] = tape.tapes[asset]!.stickyByTs.get(t) ?? null;
@@ -281,7 +368,7 @@ export function runWindow(params: {
         peakPriceSinceEntry: pos?.peakPrice ?? null,
         stopThresholdPercent: cfg.peakStopPercent,
       }).gate;
-      gates[asset] = params.diagnosticWithoutStop && verdict === 'stop_exit' ? (riskOffSeen ? 'risk_off_reduction' : 'frozen') : verdict;
+      gates[asset] = stopDisabled && verdict === 'stop_exit' ? (riskOffSeen ? 'risk_off_reduction' : 'frozen') : verdict;
     }
 
     // ── THE POLICY, then the allocation ──────────────────────────────────────────────
@@ -294,7 +381,9 @@ export function runWindow(params: {
       const fromGate = stateFromGate(gates[asset]!);
       let lineState = fromGate.state;
       const movable = lineState === 'free' || lineState === 'reduce_only';
-      if (movable && decision.excluded.has(asset)) lineState = 'excluded';
+      // The exit rule's exit has a stop's priority: no gate state keeps the line (§5, A1).
+      if (rule?.out.has(asset)) lineState = 'excluded';
+      else if (movable && decision.excluded.has(asset)) lineState = 'excluded';
       else if (movable && state.barred.includes(asset)) lineState = 'stopped';
       return { asset, currentPercent: weights[asset]!, state: lineState, fixedCause: fromGate.fixedCause };
     });
@@ -312,8 +401,12 @@ export function runWindow(params: {
     const previous = bars[bars.length - 1];
     const cause: TradeCause = stopExitsDecided.length > 0
       ? 'stop_exit'
+      : ruleExitsDecided.length > 0
+        ? 'rule_exit'
       : released
         ? 'release_after_stop'
+      : ruleEntriesDecided.length > 0
+        ? 'rule_entry'
         : previous && previous.policyTargetPercent !== allocation.policyTargetPercent
           ? 'policy_target_change'
           : previous && cfg.assets.some((a) => previous.states[a] !== lines.find((l) => l.asset === a)!.state)
@@ -347,6 +440,9 @@ export function runWindow(params: {
       barred: [...state.barred],
       policyExcluded: [...state.policyExcluded],
       executedCause,
+      ruleOut: rule ? cfg.assets.filter((a) => rule.out.has(a)) : [],
+      ruleExitsDecided,
+      ruleEntriesDecided,
     });
   }
 
