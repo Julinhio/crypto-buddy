@@ -1,4 +1,5 @@
 import { isGenuineOpening, type VerificationOpening } from './opening.js';
+import { isGenuineSealedOpening, type SealedOpening } from '../exit/opening.js';
 
 /**
  * THE WINDOWS OF PROTOCOL v1.3, AND THE ONE RULE THAT DECIDES WHICH OF THEM MAY BE READ.
@@ -23,7 +24,7 @@ import { isGenuineOpening, type VerificationOpening } from './opening.js';
  */
 
 export interface Window {
-  readonly name: 'development' | 'verification' | 'validation' | 'calibration' | 'exit-development';
+  readonly name: 'development' | 'verification' | 'validation' | 'calibration' | 'exit-development' | 'exit-continuous' | 'exit-sealed';
   readonly fromMs: number;
   /** EXCLUSIVE. */
   readonly toMs: number;
@@ -75,6 +76,26 @@ export const EXIT_DEVELOPMENT: Window = Object.freeze({
   toMs: SEAL_INSTANT_MS,
 });
 
+/**
+ * THE CONTINUOUS TRAJECTORY OF THE EXIT EXPERIMENT'S SEALED VALIDATION — protocol
+ * `docs/PROTOCOLE-SORTIE-v0.4.md`, §16: one replay from the exit development's start to the end of
+ * the sealed window, so that the state, the trailing highs and the equity high cross 2024-07-01 as
+ * they would have lived. It reads the sealed window, so it is measurable ONLY with a genuine sealed
+ * opening (`src/bench/exit/opening.ts`), issued once, after the v0.4 freeze is committed and public.
+ */
+export const EXIT_CONTINUOUS: Window = Object.freeze({
+  name: 'exit-continuous',
+  fromMs: EXIT_DEVELOPMENT.fromMs,
+  toMs: VALIDATION.toMs,
+});
+
+/** The sealed window as the exit experiment reads it: a SLICE of `EXIT_CONTINUOUS`, never a run's own window. */
+export const EXIT_SEALED: Window = Object.freeze({
+  name: 'exit-sealed',
+  fromMs: SEAL_INSTANT_MS,
+  toMs: VALIDATION.toMs,
+});
+
 export class ClosedWindowError extends Error {
   constructor(window: Window, why: string) {
     super(`window "${window.name}" is closed: ${why}`);
@@ -89,7 +110,7 @@ export class ClosedWindowError extends Error {
  * study — so a measurement on a closed window fails at its first line rather than relying on
  * the caller having picked the right constant.
  */
-export function assertMeasurable(window: Window, opening?: VerificationOpening): void {
+export function assertMeasurable(window: Window, opening?: VerificationOpening, sealedOpening?: SealedOpening): void {
   if (window.name === 'development') {
     if (window.fromMs !== DEVELOPMENT.fromMs || window.toMs !== DEVELOPMENT.toMs) {
       throw new ClosedWindowError(window, 'a window named "development" must have the development bounds');
@@ -109,6 +130,15 @@ export function assertMeasurable(window: Window, opening?: VerificationOpening):
   if (window.name === 'exit-development') {
     if (window.fromMs !== EXIT_DEVELOPMENT.fromMs || window.toMs !== EXIT_DEVELOPMENT.toMs) {
       throw new ClosedWindowError(window, 'a window named "exit-development" must have the bounds the exit audit computed');
+    }
+    return;
+  }
+  if (window.name === 'exit-continuous') {
+    if (!isGenuineSealedOpening(sealedOpening)) {
+      throw new ClosedWindowError(window, 'it reads the sealed window, which opens once, on the committed and pushed v0.4 freeze');
+    }
+    if (window.fromMs !== EXIT_CONTINUOUS.fromMs || window.toMs !== EXIT_CONTINUOUS.toMs) {
+      throw new ClosedWindowError(window, 'a window named "exit-continuous" must have the continuous bounds');
     }
     return;
   }

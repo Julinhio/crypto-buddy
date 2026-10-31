@@ -94,6 +94,35 @@ const STEP_MS: Record<string, number> = { '4h': 4 * 3_600_000, '1d': 86_400_000 
  * bundles — a sealed candle, a resealed manifest — without touching the real data.
  */
 export function loadCertifiedPart(pin: BundlePin, rootDir = process.cwd()): CertifiedPart {
+  return certifyPart(pin, rootDir, SEAL_INSTANT_MS, {
+    claim: (m) => new SealViolationError(
+      `${pin.bundleId} declares as_of_exclusive ${m.as_of_exclusive}, past the seal ` +
+        `${new Date(SEAL_INSTANT_MS).toISOString()} — not read`,
+    ),
+    row: (file, openTime) => new SealViolationError(`${file} carries a candle opened ${new Date(openTime).toISOString()} — inside the sealed window`),
+  });
+}
+
+/**
+ * THE SAME CERTIFICATION, UP TO ANOTHER HORIZON — for the sealed part only, read by the single
+ * opening of `src/bench/exit/sealed.ts` (protocol `docs/PROTOCOLE-SORTIE-v0.4.md`). Every check of
+ * `loadCertifiedPart` applies unchanged; only the horizon past which a claim or a row is refused
+ * moves, and a refusal there is a verification failure, not a seal violation.
+ */
+export function loadCertifiedPartUpTo(pin: BundlePin, rootDir: string, horizonMs: number): CertifiedPart {
+  const at = new Date(horizonMs).toISOString();
+  return certifyPart(pin, rootDir, horizonMs, {
+    claim: (m) => new BundleVerificationError(`${pin.bundleId} declares as_of_exclusive ${m.as_of_exclusive}, past its horizon ${at}`),
+    row: (file, openTime) => new BundleVerificationError(`${file} carries a candle opened ${new Date(openTime).toISOString()}, past its horizon ${at}`),
+  });
+}
+
+function certifyPart(
+  pin: BundlePin,
+  rootDir: string,
+  horizonMs: number,
+  refuse: { claim: (m: BundleManifest) => Error; row: (file: string, openTime: number) => Error },
+): CertifiedPart {
   const dir = path.resolve(rootDir, pin.dir);
   let manifest: BundleManifest;
   try {
@@ -106,12 +135,7 @@ export function loadCertifiedPart(pin: BundlePin, rootDir = process.cwd()): Cert
 
   // ── THE SEAL, ON THE CLAIM — before any candle file is opened ─────────────────────
   const asOfExclusiveMs = Date.parse(manifest.as_of_exclusive);
-  if (!Number.isFinite(asOfExclusiveMs) || asOfExclusiveMs > SEAL_INSTANT_MS) {
-    throw new SealViolationError(
-      `${pin.bundleId} declares as_of_exclusive ${manifest.as_of_exclusive}, past the seal ` +
-        `${new Date(SEAL_INSTANT_MS).toISOString()} — not read`,
-    );
-  }
+  if (!Number.isFinite(asOfExclusiveMs) || asOfExclusiveMs > horizonMs) throw refuse.claim(manifest);
 
   if (manifest.schema_version !== 1) {
     throw new BundleVerificationError(`${pin.bundleId}: schema_version ${manifest.schema_version}, expected 1`);
@@ -160,11 +184,7 @@ export function loadCertifiedPart(pin: BundlePin, rootDir = process.cwd()): Cert
       const openTime = Number(row.t);
       const closeTime = Number(row.closeTime);
       // ── THE SEAL, ON THE ROW ────────────────────────────────────────────────────
-      if (openTime >= SEAL_INSTANT_MS || closeTime >= SEAL_INSTANT_MS) {
-        throw new SealViolationError(
-          `${entry.file} carries a candle opened ${new Date(openTime).toISOString()} — inside the sealed window`,
-        );
-      }
+      if (openTime >= horizonMs || closeTime >= horizonMs) throw refuse.row(entry.file, openTime);
       // A close INSIDE its slot, never past it. Not "equal to the slot end": the 4h bar opened
       // 2020-02-19T08:00Z closes at 11:35:33Z on Binance — the outage cut it short — and that
       // is a fact the producer recorded, not a defect to refuse.
