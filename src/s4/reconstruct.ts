@@ -242,7 +242,9 @@ async function main(): Promise<void> {
   const seedSource = JSON.stringify({ kind: recon.kind, asOf: new Date(asOfMs).toISOString(), lastClose: new Date(recon.lastCloseMs).toISOString(), sources: recon.sources, checks: { sealedCapital, convergenceStarts: CONVERGENCE_STARTS } }).replace(/'/g, "''");
   const sql = [
     'begin;',
-    `insert into public.s4_pilot (id, seed_source, last_close_at) values (1, '${seedSource}'::jsonb, ${iso(recon.lastCloseMs)});`,
+    // The breaker CLOSED: the first S4 cycle decides and journals but sends nothing, until the
+    // operator has compared its planned legs with the frozen initial plan and opens it.
+    `insert into public.s4_pilot (id, seed_source, last_close_at, orders_enabled) values (1, '${seedSource}'::jsonb, ${iso(recon.lastCloseMs)}, false);`,
     ...seed.map((l) => `insert into public.s4_line_state (asset, status, entry_at, entry_price, high, exit_at, days_out, armed, last_move_reason, last_move_at) values ('${l.asset}', '${l.status}', ${iso(l.entryAtMs)}, ${n(l.entryPrice)}, ${n(l.high)}, ${iso(l.exitAtMs)}, ${l.exitAtMs != null ? Math.floor((recon.lastCloseMs - l.exitAtMs) / DAY) : 'null'}, ${l.armed}, 'reprise_etat_banc', ${iso(recon.asOfMs)});`),
     'commit;',
   ].join('\n');

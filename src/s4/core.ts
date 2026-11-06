@@ -250,14 +250,18 @@ export function reconcileEntries(params: {
   const lines = params.lines.map((l) => ({ ...l }));
   for (const line of lines) {
     const held = params.held[line.asset] === true;
+    // A new or cleared entry is a new trailing window: the bench resets the high whenever the
+    // entry changes (`stepTrailingLine`), so the high goes with the entry, never past it.
     if (!held) {
       if (line.entryAtMs != null) {
         line.entryAtMs = null;
         line.entryPrice = null;
+        line.high = null;
       }
       continue;
     }
     if (line.status !== 'in' || line.entryAtMs != null) continue;
+    line.high = null;
     const openedPrice = params.opened?.[line.asset];
     if (openedPrice != null) {
       line.entryAtMs = params.atMs;

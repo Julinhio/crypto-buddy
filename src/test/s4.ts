@@ -248,12 +248,21 @@ console.log('Proof 6 — restart: the state picks up exactly, no close is decide
   const pending = { decisionId: 9, atMs: Date.parse('2026-11-07T04:03:00Z'), openCandidates: ['XRP'], legs: [] };
   const rep = reconcileEntries({ lines: [{ ...fresh[3]!, asset: 'XRP', entryAtMs: null }], held: { XRP: true }, atMs: Date.parse('2026-11-07T08:03:00Z'), pending });
   ok('an interrupted fill gets the instant of the cycle that placed it', rep.lines[0]!.entryAtMs === pending.atMs && rep.anomalies.length === 1);
+  // Codex, PR #53, P2: the high belongs to its entry. Sold to zero then bought back, a line
+  // starts a fresh trailing window — as the bench does when the entry changes.
+  const withHigh: S4Line = { ...fresh[0]!, high: 99_999 };
+  const cleared = reconcileEntries({ lines: [withHigh], held: { [withHigh.asset]: false }, atMs: 1 }).lines[0]!;
+  ok('a line sold to zero loses its entry AND its high', cleared.entryAtMs == null && cleared.high == null);
+  const reopened = reconcileEntries({ lines: [{ ...withHigh, entryAtMs: null }], held: { [withHigh.asset]: true }, opened: { [withHigh.asset]: 10 }, atMs: 2 }).lines[0]!;
+  ok('a line opened again starts from no high, never a stale one', reopened.entryAtMs === 2 && reopened.high == null);
 }
 
 // ── PROOF 7 — THE RECONSTRUCTED START ───────────────────────────────────────────────────────
 console.log('Proof 7 — the reconstructed start:');
 {
   const recon: Reconstruction = JSON.parse(readFileSync(path.join(process.cwd(), 'out/s4/reconstruction.json'), 'utf8'));
+  const seedSql = readFileSync(path.join(process.cwd(), 'out/s4/seed.sql'), 'utf8');
+  ok('the seed opens the pilot with the breaker CLOSED (orders_enabled = false) — Codex, PR #53, P1', /insert into public\.s4_pilot \([^)]*orders_enabled\) values \([^;]*, false\);/.test(seedSql));
   ok('the reconstruction reproduced the sealed result before being trusted (1 101,50 $)', recon.checks.sealedCapital === 1101.5 && recon.checks.regimePrefixDivergence == null && recon.checks.trajectoryPrefixDivergence == null);
   ok('and the state does not depend on its start point', recon.checks.convergence.every((c) => JSON.stringify(c.lines) === JSON.stringify(recon.checks.convergence[0]!.lines)));
   const seeded = seedLinesOf(recon);
