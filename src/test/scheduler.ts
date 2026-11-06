@@ -274,6 +274,31 @@ const settledThrow = async () => ({
   ok('settled → finish_run IS called (release + reschedule + close)', calls.includes('finish_run'));
 }
 
+// ── S4 (06/11/2026): the delay is the 4h grid, never the model-era clamp, and never the
+//    overheating streak. A delay of 7 min (a cycle a few minutes before a boundary) is below
+//    the old 15-min floor and must still be honoured as is. ──
+console.log('\nS4 cycle — the fixed 4h grid drives the next check:');
+{
+  const s4Decided = async () => ({
+    outcome: { status: 'decided' as const, appliedDelayMinutes: 7, s4DelayMinutes: 7, decisionId: 5, detail: 'status=decided', equitySnapshot: null, marketData: 'sighted' as const, llmFailure: null },
+    settled: true, result: null,
+  });
+  const res = await runHeartbeat({ supabase: dispatchClient([]), runCycle: s4Decided });
+  ok('an S4 decided cycle reschedules on its own delay (7 min, under the old 15-min floor)', res.action === 'ran' && res.delayMinutes === 7);
+  const s4Blocked = async () => ({
+    outcome: { status: 'skipped' as const, appliedDelayMinutes: 5, s4DelayMinutes: 5, decisionId: 6, detail: 'status=skipped', equitySnapshot: null, marketData: 'sighted' as const, llmFailure: null },
+    settled: true, result: null,
+  });
+  const blocked = await runHeartbeat({ supabase: dispatchClient([]), runCycle: s4Blocked });
+  ok('a blocked daily close retries at the next beat (5 min), not after the 30-min soft skip', blocked.delayMinutes === 5);
+  const s4Error = async () => ({
+    outcome: { status: 'error' as const, appliedDelayMinutes: null, s4DelayMinutes: null, decisionId: 7, detail: 'state unreadable', equitySnapshot: null, marketData: 'sighted' as const, llmFailure: null },
+    settled: true, result: null,
+  });
+  const errored = await runHeartbeat({ supabase: dispatchClient([]), runCycle: s4Error });
+  ok('an S4 error keeps the generic backoff', errored.delayMinutes === 15);
+}
+
 // ── Config invariant: the lease must outlive the watchdog deadline, not just the
 //    budget — else (with the env overrides) the lease can expire and be reclaimed in
 //    the grace-wide window while the timed-out orphan is still alive. ──

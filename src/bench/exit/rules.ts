@@ -77,7 +77,7 @@ class PureRule implements ExitRule {
   }
 }
 
-interface TrailingLine {
+export interface TrailingLine {
   status: 'in' | 'out';
   /** The entry the trailing high belongs to; a new entry resets it. */
   entryAtMs: number | null;
@@ -110,44 +110,61 @@ class TrailingRule implements ExitRule {
 
   onDailyClose({ closeMs, holdings }: { closeMs: number; holdings: Readonly<Record<string, HoldingView>> }): void {
     const row = rowAt(this.table, closeMs);
-    const stop = 1 - EXIT_PARAMETERS.trailingStopPercent / 100;
     for (const asset of this.table.assets) {
-      const line = this.lines[asset]!;
       const close = row.close[asset]!;
       const mean = row.sma50[asset];
       if (mean == null) throw new Error(`exit rule ${this.name}: ${asset} has no 50-day mean at ${new Date(closeMs).toISOString()}`);
-      if (line.status === 'in') {
-        const h = holdings[asset];
-        if (!h?.held) continue;
-        if (h.entryAtMs == null) throw new Error(`exit rule ${this.name}: ${asset} is held with no entry on record`);
-        if (line.entryAtMs !== h.entryAtMs) {
-          line.entryAtMs = h.entryAtMs;
-          line.high = null;
-        }
-        // Closes observed AFTER the fill. A close at the very instant of the fill is the decision
-        // close that caused it, not an observation of the position.
-        if (closeMs <= h.entryAtMs) continue;
-        line.high = line.high == null ? close : Math.max(line.high, close);
-        if (close <= line.high * stop) {
-          line.status = 'out';
-          line.exitAtMs = closeMs;
-          line.armed = close <= mean;
-          line.entryAtMs = null;
-          line.high = null;
-        }
-        continue;
-      }
-      if (closeMs <= line.exitAtMs!) continue;
-      const waited = closeMs - line.exitAtMs! >= this.minDaysOut * DAY_MS;
-      if (line.armed && close > mean && waited) {
-        line.status = 'in';
-        line.exitAtMs = null;
-        line.armed = false;
-      } else if (close <= mean) {
-        line.armed = true;
-      }
+      stepTrailingLine(this.lines[asset]!, { asset, closeMs, close, mean, holding: holdings[asset] }, this.minDaysOut, this.name);
     }
     this.out = new Set(this.table.assets.filter((a) => this.lines[a]!.status === 'out'));
+  }
+}
+
+/**
+ * ONE daily close of S3 or S4 for ONE line, in place — the body `TrailingRule` has always run,
+ * extracted unchanged (06/11/2026) so production's S4 executes this very function rather than a
+ * restatement of it. The bench's outputs are byte-identical before and after the extraction
+ * (development summary regenerated and compared; sealed capital 1 101,50 $ replayed).
+ *
+ * `holding` is the line as the engine sees it at that close: held or not, and since which fill.
+ */
+export function stepTrailingLine(
+  line: TrailingLine,
+  input: { asset: string; closeMs: number; close: number; mean: number; holding: HoldingView | undefined },
+  minDaysOut: number,
+  name = 'S4',
+): void {
+  const stop = 1 - EXIT_PARAMETERS.trailingStopPercent / 100;
+  const { asset, closeMs, close, mean } = input;
+  if (line.status === 'in') {
+    const h = input.holding;
+    if (!h?.held) return;
+    if (h.entryAtMs == null) throw new Error(`exit rule ${name}: ${asset} is held with no entry on record`);
+    if (line.entryAtMs !== h.entryAtMs) {
+      line.entryAtMs = h.entryAtMs;
+      line.high = null;
+    }
+    // Closes observed AFTER the fill. A close at the very instant of the fill is the decision
+    // close that caused it, not an observation of the position.
+    if (closeMs <= h.entryAtMs) return;
+    line.high = line.high == null ? close : Math.max(line.high, close);
+    if (close <= line.high * stop) {
+      line.status = 'out';
+      line.exitAtMs = closeMs;
+      line.armed = close <= mean;
+      line.entryAtMs = null;
+      line.high = null;
+    }
+    return;
+  }
+  if (closeMs <= line.exitAtMs!) return;
+  const waited = closeMs - line.exitAtMs! >= minDaysOut * DAY_MS;
+  if (line.armed && close > mean && waited) {
+    line.status = 'in';
+    line.exitAtMs = null;
+    line.armed = false;
+  } else if (close <= mean) {
+    line.armed = true;
   }
 }
 

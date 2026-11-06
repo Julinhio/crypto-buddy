@@ -1,0 +1,344 @@
+{
+  "kind": "s4-reconstruction",
+  "asOfMs": 1793952000000,
+  "lastCloseMs": 1793923200000,
+  "sources": {
+    "calibration": "data/calibration (certified core + SOL bundles)",
+    "sealed": {
+      "bundle_id": "crypto-buddy-exposure-v2-validation",
+      "bundle_sha256": "7f79f1db46b855170fe62ae29ef4068f4aa49efa0ea3d73b136387fcf91ac9a5",
+      "manifest_sha256": "75a0c26dd0944a56715787d326d78e0f053e197b7c8a7e5241cba8d3fc7a6d20"
+    },
+    "live": {
+      "source": "https://data-api.binance.vision",
+      "from": "2026-05-20T00:00:00.000Z",
+      "closed_by": "2026-11-06T08:00:00.000Z",
+      "files_sha256": {
+        "BNBUSDT-1d": "3202e20d2812b49ce15106463ad7334366bd308fc4383c202052ce0527c1b887",
+        "BNBUSDT-4h": "26eb6ffaaf5f6ba5bd7fc3d4badb81cce35544cd08e3a1d08b4ae0fa10987aab",
+        "BTCUSDT-1d": "f5d07f621a437d0c1cc1668415812968c97da21e0f8cbd5d38ceb795b5fd4f6a",
+        "BTCUSDT-4h": "918fe28549732d9ff099e6575f4420aadccc9fd2a5d52294b2727e266960cb5c",
+        "ETHUSDT-1d": "db87786ba9f0c1c0b9e6544c72fdf7f460e5fed8890cf47403401fa7e5daf74d",
+        "ETHUSDT-4h": "d053545408e6ddb7b1a3a726e8dd0cf3bb7f2fff144fba3fdb9ceffec54f81cb",
+        "SOLUSDT-1d": "dfce7e7ac300998fd9bfe77841ffaaee62b4726f243a25a064c7b9b7255bfbc0",
+        "SOLUSDT-4h": "5685e986dd4868d94f6b6919cfd0f81a063f2234f7f177975b79eba4cc05a60e",
+        "XRPUSDT-1d": "d0f4c821e588985a024ff3526bf5b2329a48ef64b2eac064d9c2b8d0bdfa4521",
+        "XRPUSDT-4h": "99d5cdf2bf50b83354c5264e231f14ab7e956a8172cccfbd00dbfe9fd9411918"
+      }
+    },
+    "engine": "src/bench/exposure/engine.ts runWindow, policy T100, exit rule S4 (src/bench/exit/rules.ts)",
+    "trajectory_from": "2020-10-01T00:00:00.000Z"
+  },
+  "checks": {
+    "regimePrefixDivergence": null,
+    "trajectoryPrefixDivergence": null,
+    "sealedCapital": 1101.5,
+    "convergence": [
+      {
+        "start": "2020-10-01",
+        "lines": [
+          {
+            "asset": "BNB",
+            "status": "in",
+            "high": 799.41,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "BTC",
+            "status": "in",
+            "high": 86620,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "ETH",
+            "status": "in",
+            "high": 2776.19,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "XRP",
+            "status": "out",
+            "high": null,
+            "exitAtMs": 1793318400000,
+            "armed": true
+          }
+        ]
+      },
+      {
+        "start": "2022-01-01",
+        "lines": [
+          {
+            "asset": "BNB",
+            "status": "in",
+            "high": 799.41,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "BTC",
+            "status": "in",
+            "high": 86620,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "ETH",
+            "status": "in",
+            "high": 2776.19,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "XRP",
+            "status": "out",
+            "high": null,
+            "exitAtMs": 1793318400000,
+            "armed": true
+          }
+        ]
+      },
+      {
+        "start": "2024-07-01",
+        "lines": [
+          {
+            "asset": "BNB",
+            "status": "in",
+            "high": 799.41,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "BTC",
+            "status": "in",
+            "high": 86620,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "ETH",
+            "status": "in",
+            "high": 2776.19,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "XRP",
+            "status": "out",
+            "high": null,
+            "exitAtMs": 1793318400000,
+            "armed": true
+          }
+        ]
+      },
+      {
+        "start": "2025-06-01",
+        "lines": [
+          {
+            "asset": "BNB",
+            "status": "in",
+            "high": 799.41,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "BTC",
+            "status": "in",
+            "high": 86620,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "ETH",
+            "status": "in",
+            "high": 2776.19,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "XRP",
+            "status": "out",
+            "high": null,
+            "exitAtMs": 1793318400000,
+            "armed": true
+          }
+        ]
+      },
+      {
+        "start": "2026-01-01",
+        "lines": [
+          {
+            "asset": "BNB",
+            "status": "in",
+            "high": 799.41,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "BTC",
+            "status": "in",
+            "high": 86620,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "ETH",
+            "status": "in",
+            "high": 2776.19,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "XRP",
+            "status": "out",
+            "high": null,
+            "exitAtMs": 1793318400000,
+            "armed": true
+          }
+        ]
+      },
+      {
+        "start": "2026-03-01",
+        "lines": [
+          {
+            "asset": "BNB",
+            "status": "in",
+            "high": 799.41,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "BTC",
+            "status": "in",
+            "high": 86620,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "ETH",
+            "status": "in",
+            "high": 2776.19,
+            "exitAtMs": null,
+            "armed": false
+          },
+          {
+            "asset": "XRP",
+            "status": "out",
+            "high": null,
+            "exitAtMs": 1793318400000,
+            "armed": true
+          }
+        ]
+      }
+    ]
+  },
+  "lines": [
+    {
+      "asset": "BNB",
+      "status": "in",
+      "entryAtMs": 1785456000000,
+      "high": 799.41,
+      "exitAtMs": null,
+      "armed": false,
+      "entryPrice": 591.99,
+      "close": 689.72,
+      "sma50": 747.4578000000001
+    },
+    {
+      "asset": "BTC",
+      "status": "in",
+      "entryAtMs": 1784073600000,
+      "high": 86620,
+      "exitAtMs": null,
+      "armed": false,
+      "entryPrice": 65043.99,
+      "close": 76088.01,
+      "sma50": 82061.3818
+    },
+    {
+      "asset": "ETH",
+      "status": "in",
+      "entryAtMs": 1783728000000,
+      "high": 2776.19,
+      "exitAtMs": null,
+      "armed": false,
+      "entryPrice": 1796.85,
+      "close": 2238.01,
+      "sma50": 2504.8543999999997
+    },
+    {
+      "asset": "XRP",
+      "status": "out",
+      "entryAtMs": null,
+      "high": null,
+      "exitAtMs": 1793318400000,
+      "armed": true,
+      "entryPrice": null,
+      "close": 1.2072,
+      "sma50": 1.3849019999999999
+    }
+  ],
+  "bench": {
+    "equity": 14181.852643981341,
+    "exposurePercent": 84.14382219135891,
+    "weights": {
+      "BNB": 19.997855552178006,
+      "BTC": 31.890904484197712,
+      "ETH": 32.25506215498319,
+      "XRP": 0
+    },
+    "gates": {
+      "BNB": "actionable",
+      "BTC": "actionable",
+      "ETH": "actionable",
+      "XRP": "actionable"
+    }
+  },
+  "initialPlan": {
+    "book": {
+      "equity": 1032.8341133703,
+      "cash": 826.6055888703,
+      "weights": {
+        "BNB": 5.013607638406364,
+        "BTC": 5.051607884033348,
+        "ETH": 4.941806659875543,
+        "XRP": 4.960223460554143
+      }
+    },
+    "targets": {
+      "BNB": 20,
+      "BTC": 32.5,
+      "ETH": 32.5,
+      "XRP": 0,
+      "USDT": 15
+    },
+    "legs": [
+      {
+        "asset": "XRP",
+        "side": "sell",
+        "usd": 51.23,
+        "fullExit": true
+      },
+      {
+        "asset": "BNB",
+        "side": "buy",
+        "usd": 154.62,
+        "fullExit": false
+      },
+      {
+        "asset": "BTC",
+        "side": "buy",
+        "usd": 283.19,
+        "fullExit": false
+      },
+      {
+        "asset": "ETH",
+        "side": "buy",
+        "usd": 284.33,
+        "fullExit": false
+      }
+    ]
+  }
+}
