@@ -27,6 +27,7 @@ import {
 } from './policy.js';
 import type { AlertPayload } from '../alerting/messages.js';
 import { prepareActivityNotification, type ActivityNotification } from '../alerting/activity.js';
+import { prepareS4Notification, type S4Notification } from '../alerting/s4Activity.js';
 
 export interface HeartbeatResult {
   /**
@@ -61,6 +62,11 @@ export interface HeartbeatResult {
    * (a hold/skip/error → null → nothing sent, no spam).
    */
   activityNotification?: ActivityNotification | null;
+  /**
+   * S4's movement facts, for the explanation + Telegram send in `beat.ts` (after the cycle,
+   * outside its timeout). Null when nothing was booked — no movement, no message, no model call.
+   */
+  s4Notification?: S4Notification | null;
 }
 
 /**
@@ -196,13 +202,18 @@ export async function runHeartbeat(
     // cycle actually booked movements at the ledger — a hold/skip/error/throw yields
     // null → nothing sent (no spam). Built from the LEDGER fact, never action_type;
     // the claim time dates it, like the alerts.
-    const activityNotification = result ? prepareActivityNotification(result, claim.dbNow) : null;
+    // An S4 cycle has its own notification (facts per movement, explained after the cycle); the
+    // model-era attribution would only say "origine non établie" on every line.
+    const s4Notification = result?.s4 ? prepareS4Notification(result.s4, result.portfolioAfter, claim.dbNow) : null;
+    const activityNotification = result && !result.s4 ? prepareActivityNotification(result, claim.dbNow) : null;
 
     // 5a. Pure policy → the next state. Reschedule ALWAYS, whatever the outcome.
     const runOutcome = classifyOutcome(status);
     const succeeded = runOutcome === 'decided';
     const failuresAfter = nextConsecutiveFailures(claim.consecutiveFailures, runOutcome);
-    const delayMinutes = nextDelayMinutes(runOutcome, {
+    // S4 runs on the fixed 4h grid: its delay is the next boundary (or the next beat after a
+    // blocked close), never the model-era clamp. An error keeps the generic backoff.
+    const delayMinutes = outcome.s4DelayMinutes != null && runOutcome !== 'error' ? outcome.s4DelayMinutes : nextDelayMinutes(runOutcome, {
       appliedDelayMinutes: appliedDelay,
       failuresAfter,
       softSkipDelayMinutes: config.scheduler.softSkipDelayMinutes,
@@ -215,7 +226,9 @@ export async function runHeartbeat(
       failureClass: llmFailure?.failureClass ?? null,
       retryableLlmTransportMaxDelayMinutes: config.decision.retryableLlmTransportMaxDelayMinutes,
     });
-    const floorStreak = nextFloorStreak(claim.floorDelayStreak, runOutcome, appliedDelay, config.decision.minDelayMinutes);
+    // The overheating streak measured a MODEL asking to be woken at the floor. S4's delay is the
+    // grid, so it never feeds it.
+    const floorStreak = outcome.s4DelayMinutes != null ? 0 : nextFloorStreak(claim.floorDelayStreak, runOutcome, appliedDelay, config.decision.minDelayMinutes);
 
     // Per-trigger alert debounce (pure). The PREVIOUS flags come from `state` — the
     // record_heartbeat snapshot at the very top of this beat — and only finishRun
@@ -303,7 +316,7 @@ export async function runHeartbeat(
       // Do NOT alert on the fencing path: the flags were not persisted (the fenced
       // UPDATE affected 0 rows), so the reclaiming run owns the alert evaluation. The
       // activity notification still reflects what THIS cycle actually booked.
-      return { action: 'ran', reason: runOutcome, outcome: runOutcome, delayMinutes, missedBeats: missed, lockLost: true, equitySnapshot, activityNotification };
+      return { action: 'ran', reason: runOutcome, outcome: runOutcome, delayMinutes, missedBeats: missed, lockLost: true, equitySnapshot, activityNotification, s4Notification };
     }
 
     // Build the alerts that crossed UP on this beat (at most one per trigger). The DB
@@ -387,7 +400,7 @@ export async function runHeartbeat(
         `(consecutive_failures=${failuresAfter}, floor_streak=${floorStreak}, ` +
         `market_data=${marketData}, blind_cycles=${blindAfter}).`,
     );
-    return { action: 'ran', reason: runOutcome, outcome: runOutcome, delayMinutes, missedBeats: missed, lockLost: false, alerts, equitySnapshot, activityNotification };
+    return { action: 'ran', reason: runOutcome, outcome: runOutcome, delayMinutes, missedBeats: missed, lockLost: false, alerts, equitySnapshot, activityNotification, s4Notification };
   } finally {
     // Disarm on every path: a settled finalize is done, a timeout hands off to
     // beat.ts's immediate non-zero exit (synchronous — no await to stall), and a

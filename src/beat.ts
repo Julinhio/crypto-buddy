@@ -2,6 +2,8 @@ import 'dotenv/config';
 import { runHeartbeat } from './scheduler/heartbeat.js';
 import { formatAlert } from './alerting/messages.js';
 import { formatActivity } from './alerting/activity.js';
+import { formatS4Activity } from './alerting/s4Activity.js';
+import { explainS4 } from './s4/explain.js';
 import { maybeSendDailySummary } from './alerting/dailySummary.js';
 import { sendTelegram } from './alerting/telegram.js';
 import { pingHealthchecks } from './alerting/healthchecks.js';
@@ -44,6 +46,21 @@ async function main(): Promise<number> {
   // OUTSIDE the fenced cycle, so it can never weigh on the trading verdict.
   if (result.activityNotification) {
     await sendTelegram(formatActivity(result.activityNotification));
+  }
+
+  // S4's movement notification. The movements are already booked and sent: the explanation is
+  // written NOW, after the cycle and outside its timeout, by the model when it answers within
+  // its own bound and by the code otherwise — the message leaves either way. No movement, no
+  // notification, no model call (`prepareS4Notification` returned null).
+  if (result.s4Notification) {
+    const explained = await explainS4(result.s4Notification);
+    console.log(
+      `[s4] explanation: ${explained.source}` +
+        (explained.source === 'model'
+          ? ` (${explained.model}, ${explained.inputTokens ?? '?'} in / ${explained.outputTokens ?? '?'} out tokens)`
+          : ` — ${explained.error}`),
+    );
+    await sendTelegram(formatS4Activity(result.s4Notification, explained.text));
   }
 
   // Equity photo — observability, fully decoupled from the cycle's verdict. The

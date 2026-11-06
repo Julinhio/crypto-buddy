@@ -1,8 +1,6 @@
 import 'dotenv/config';
 import { randomUUID } from 'node:crypto';
 import { config } from './config/index.js';
-import { printDecision } from './decision/print.js';
-import { printEconomics } from './execution/print.js';
 import { armCycleWatchdog, runGuardedCycle } from './scheduler/cycleGuard.js';
 import { getSupabaseClient } from './persistence/supabase.js';
 import { claimManualRun, releaseManualRun } from './persistence/schedulerState.js';
@@ -31,8 +29,10 @@ async function runCycle(): Promise<CycleRun> {
     console.error(`[decide] cycle did not complete cleanly — ${outcome.detail}`);
     return { exitCode: 1, settled };
   }
-  printDecision(result);
-  printEconomics(result);
+  // S4 is the only cycle since 06/11/2026: print what it decided and moved.
+  console.log(`[decide] S4 cycle — status=${result.status} decision=${result.decisionId ?? '—'}`);
+  console.log(`[decide] ${result.row.reasoning ?? result.row.skip_reason ?? ''}`);
+  for (const m of result.s4?.movements ?? []) console.log(`[decide]   ${m.side} ${m.asset} ${m.usd.toFixed(2)} $ (${m.reason})`);
   await writeEquitySnapshot(
     getSupabaseClient(),
     prepareEquitySnapshot(result.status, result.decisionId, result.portfolio),

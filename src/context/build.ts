@@ -180,6 +180,13 @@ export interface MarketContext {
    * window proves it did (see the PR's proof).
    */
   dataHealth: MarketDataHealth;
+  /**
+   * THE DAILY CANDLES of each TRADABLE pair, as fetched (`primaryTimeframe`, the still-forming
+   * candle included), keyed by base asset. In memory only — never journaled, never in
+   * `DecisionContext`. S4 reads its daily closes here and keeps only the candles that have
+   * CLOSED; a pair whose read failed is simply absent, which S4 treats as a missing close.
+   */
+  dailySeries: Record<string, Candle[]>;
 }
 
 /**
@@ -303,6 +310,8 @@ interface BuiltPair {
   context: PairContext;
   /** Null when the 4h series came back empty — the pair then sits out of the regime. */
   series: AssetSeries | null;
+  /** The primary (daily) candles as fetched, whatever the 4h read did. */
+  daily: Candle[];
 }
 
 /**
@@ -394,6 +403,7 @@ async function buildPairContext(
       },
     },
     series: h4Result.length > 0 ? { daily: primaryCandles, h4: h4Result } : null,
+    daily: primaryCandles,
   };
 }
 
@@ -588,5 +598,8 @@ export async function buildMarketContext(): Promise<MarketContext> {
     },
     account: { balances },
     dataHealth,
+    dailySeries: Object.fromEntries(
+      tradable.map((p) => [p.context.symbol.split('/')[0]!, p.daily] as const),
+    ),
   };
 }

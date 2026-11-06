@@ -1,5 +1,6 @@
 import { config, WATCHDOG_GRACE_SECONDS } from '../config/index.js';
-import { decide, type DecideResult } from '../decision/decide.js';
+import type { DecideResult } from '../decision/decide.js';
+import { s4Cycle, type S4Report } from '../s4/cycle.js';
 import type { LlmFailureClassification } from '../decision/llmFailure.js';
 import { prepareEquitySnapshot, type EquitySnapshotInsert } from '../persistence/equitySnapshots.js';
 import type { CycleStatus } from './policy.js';
@@ -42,9 +43,21 @@ import type { CycleStatus } from './policy.js';
 export type MarketDataState = 'blind' | 'sighted' | 'unknown';
 
 /** The cycle's result, normalized — a timeout or a throw both become a technical error. */
+/**
+ * What a cycle returns. Since 06/11/2026 the only production cycle is S4 (`s4Cycle`), whose
+ * result is a `DecideResult` carrying its own report; the model-driven `decide()` is no longer
+ * reachable from the scheduler or the manual run.
+ */
+export type CycleResult = DecideResult & { s4?: S4Report | null };
+
 export interface CycleOutcome {
   status: CycleStatus;
   appliedDelayMinutes: number | null;
+  /**
+   * S4's own next delay (the next 4h boundary plus its offset, or the retry after a blocked
+   * close). Null when the cycle produced none — an error or a timeout, which keep the backoff.
+   */
+  s4DelayMinutes?: number | null;
   decisionId: number | null;
   detail: string;
   /** Did this cycle see the market? See MarketDataState — 'unknown' is meaningful. */
@@ -87,7 +100,7 @@ export interface CycleOutcome {
  * safety + the per-movement idempotency key (PR #13).
  */
 export async function runCycleWithTimeout(
-  decideFn: () => Promise<DecideResult>,
+  decideFn: () => Promise<CycleResult>,
   timeoutMs: number,
 ): Promise<CycleOutcome> {
   const cyclePromise = decideFn();
@@ -122,6 +135,7 @@ export async function runCycleWithTimeout(
     return {
       status: raced.status,
       appliedDelayMinutes: raced.row.applied_delay_minutes ?? null,
+      s4DelayMinutes: raced.s4 != null && (raced.status === 'decided' || raced.status === 'skipped') ? raced.s4.nextDelayMinutes : null,
       decisionId: raced.decisionId,
       detail: `status=${raced.status}`,
       // decide() returned, so the market read either worked or it didn't — never unknown.
@@ -162,7 +176,7 @@ export interface GuardedCycle {
   /** decide() RETURNED or THREW (no background orphan) → safe to finalize the lock. */
   settled: boolean;
   /** The full DecideResult on the success path (for the manual run's printing); null on timeout/throw. */
-  result: DecideResult | null;
+  result: CycleResult | null;
 }
 
 /**
@@ -173,10 +187,10 @@ export interface GuardedCycle {
  * The cycleFn / timeoutMs seams exist for the offline tests; production passes neither.
  */
 export async function runGuardedCycle(
-  cycleFn: () => Promise<DecideResult> = decide,
+  cycleFn: () => Promise<CycleResult> = () => s4Cycle(),
   timeoutMs: number = config.scheduler.maxCycleSeconds * 1000,
 ): Promise<GuardedCycle> {
-  const cycle: { result: DecideResult | null; settled: boolean } = { result: null, settled: false };
+  const cycle: { result: CycleResult | null; settled: boolean } = { result: null, settled: false };
   const outcome = await runCycleWithTimeout(async () => {
     try {
       const result = await cycleFn();

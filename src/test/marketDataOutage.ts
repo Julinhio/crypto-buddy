@@ -60,7 +60,12 @@ console.log('\n§3a — THE PROBE CANNOT REACH A DECISION: the import graph');
 // If the probe is importable from only ONE module, and that module hands its result to
 // nothing, then no decision path can read it — today or after any future edit.
 {
-  const files = walk(SRC).filter((f) => !f.includes(`${'test'}`) && !f.includes('replay'));
+  // Filtered on the path RELATIVE to src/: an absolute path can contain "test" anywhere (a
+  // worktree named `…-testnet-…` filtered every file out and made the graph look empty).
+  const files = walk(SRC).filter((f) => {
+    const rel = relative(SRC, f).replace(/\\/g, '/');
+    return !rel.startsWith('test/') && !rel.startsWith('replay/');
+  });
   const importers = files
     .filter((f) => /from\s+'[^']*\/probe\.js'/.test(readFileSync(f, 'utf8')))
     .map((f) => relative(SRC, f).replace(/\\/g, '/'));
@@ -80,10 +85,19 @@ console.log('\n§3a — THE PROBE CANNOT REACH A DECISION: the import graph');
   const outageImporters = files
     .filter((f) => /from\s+'[^']*\/outage\.js'/.test(readFileSync(f, 'utf8')))
     .map((f) => relative(SRC, f).replace(/\\/g, '/'));
+  // Two cycles exist since 06/11/2026: the model-era `decide()` (no longer reachable from the
+  // scheduler) and S4's. Each may journal an outage; neither may read anything back.
   ok(
-    'market/outage.js is imported by exactly one production module (decision/decide.ts)',
-    outageImporters.length === 1 && outageImporters[0] === 'decision/decide.ts',
+    'market/outage.js is imported by the two cycle modules only (decision/decide.ts, s4/cycle.ts)',
+    JSON.stringify([...outageImporters].sort()) === JSON.stringify(['decision/decide.ts', 's4/cycle.ts']),
     `importers: ${JSON.stringify(outageImporters)}`,
+  );
+  const s4Src = readFileSync(join(SRC, 's4', 'cycle.ts'), 'utf8');
+  ok(
+    'and S4 discards every recordMarketDataOutage result too (bare `await`, never assigned)',
+    /await recordMarketDataOutage\(/.test(s4Src) &&
+      !/=\s*await\s+recordMarketDataOutage/.test(s4Src) &&
+      !/return\s+recordMarketDataOutage/.test(s4Src),
   );
 
   // And its single call site must DISCARD the call — no assignment, no destructuring.
