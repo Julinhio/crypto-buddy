@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "kind": "bench-exit-freeze",
+  "protocol": {
+    "file": "docs/PROTOCOLE-SORTIE-v0.3.md",
+    "git_blob_sha": "f550a755f540e48399599e7abeac873e89220a2b"
+  },
+  "source_tree_sha": "72b771c1ece6301aa72612aa09a5097f48a2bb60",
+  "deps_lock_sha": "eb23e7e378e429f5db0d9689509d22c337c6389f",
+  "bench_config_sha256": "66eade6d76492c7ab8732a39188005e606ced888ef5abd80ee3baab52d30c47a",
+  "bundles": [
+    {
+      "bundle_id": "crypto-buddy-exposure-v2-core",
+      "bundle_sha256": "1ec86eba76046eca8fc27906d2f7e513a3b3cbce5fcde32facd9d1e258cb6ad2"
+    },
+    {
+      "bundle_id": "crypto-buddy-exposure-v2-sol",
+      "bundle_sha256": "a1eee621bf9941a8acd7f0a7bf5b171477747bc19fa6e01f96b25e3f600415e5"
+    }
+  ],
+  "development_window": {
+    "from": "2020-10-01T00:00:00.000Z",
+    "to_exclusive": "2024-07-01T00:00:00.000Z",
+    "days": 1369,
+    "requirements": [
+      {
+        "name": "regime",
+        "first": "2020-10-01T00:00:00.000Z"
+      },
+      {
+        "name": "sma200",
+        "first": "2020-07-19T00:00:00.000Z"
+      },
+      {
+        "name": "sma50",
+        "first": "2020-02-20T00:00:00.000Z"
+      },
+      {
+        "name": "index_sma200",
+        "first": "2020-07-19T00:00:00.000Z"
+      }
+    ]
+  },
+  "crash_episodes": [
+    {
+      "episode": 1,
+      "start": "2021-05-12T00:00:00.000Z",
+      "peak_index": 2280.588869,
+      "crossed": "2021-05-20T00:00:00.000Z",
+      "trough": "2021-07-21T00:00:00.000Z",
+      "trough_index": 1025.174064,
+      "depth_percent": 55.047835,
+      "end": "2021-10-30T00:00:00.000Z",
+      "recovered": true
+    },
+    {
+      "episode": 2,
+      "start": "2021-11-09T00:00:00.000Z",
+      "peak_index": 2582.889828,
+      "crossed": "2022-01-06T00:00:00.000Z",
+      "trough": "2022-06-19T00:00:00.000Z",
+      "trough_index": 665.927145,
+      "depth_percent": 74.217749,
+      "end": "2024-07-01T00:00:00.000Z",
+      "recovered": false
+    }
+  ],
+  "crash_threshold_percent": 30,
+  "rebuy_exposure_percent": 80,
+  "parameters": {
+    "longMeanDays": 200,
+    "shortMeanDays": 50,
+    "hysteresisExitRatio": 0.97,
+    "hysteresisEntryRatio": 1.03,
+    "trailingStopPercent": 20,
+    "minDaysOut": 10
+  },
+  "policies": {
+    "E0": "reference: constant 100 % target, no stop at all (T100 of v1.3 with the peak stop disabled); gate blind to the global risk_off",
+    "E1": "reference: the current mechanism, exactly T100 of v1.3 — 10 % peak stop armed in transition, line barred until a confirmed trend_up or reversal_up; gate blind to the global risk_off",
+    "TC44": "reference: constant 44.226403 % target, the rules of protocol v1.3 (stop, re-entry, gate seeing the global risk_off)",
+    "S1": "candidate: an asset is held while its daily close is strictly above its 200-day mean, out otherwise",
+    "S2": "candidate: S1 with hysteresis — out under 97 % of the 200-day mean, back in only above 103 %",
+    "S3": "candidate: out at a daily close <= 80 % of the highest daily close since the entry was filled; back in when the daily close re-crosses above its 50-day mean",
+    "S4": "candidate: S3, with at least 10 days out of the market before any rebuy",
+    "S5": "candidate: the synthetic basket index (32.5/32.5/20/15, rebalanced daily, close-to-close) with S2 hysteresis on its 200-day mean — all four assets out or in together"
+  },
+  "selection": {
+    "maxDrawdownPercent": 50,
+    "maxFrictionShareOfE1": 0.5,
+    "simplicityMarginPoints": 3,
+    "simplicityOrder": [
+      "S1",
+      "S5",
+      "S2",
+      "S3",
+      "S4"
+    ],
+    "text": [
+      "eliminated: continuous drawdown above 50 % (on 4h close equity, from the trajectory high)",
+      "eliminated: fees plus slippage, cumulated in dollars over the window, above half of E1's",
+      "among the rest, the best annualised net return; a candidate strictly less than 3 annualised points behind the best is preferred if simpler, in the order S1, S5, S2, S3, S4",
+      "none left: nothing goes to validation, no sealed opening, no production change; neither the thresholds nor the 50 % limit change after the results; any new attempt is a new pre-registered experiment (A2)"
+    ]
+  },
+  "bootstrap_method": {
+    "series": "daily log-return difference, candidate minus comparator, on the development window",
+    "comparators": [
+      "E0",
+      "E1",
+      "TC44"
+    ],
+    "block_length": "Politis-White mean block length per comparison, computed on the development window by the development run and published there; frozen with the candidate before any opening of the sealed window",
+    "method": "stationary bootstrap (Politis and Romano), circular, geometric blocks",
+    "draws": 10000,
+    "seed": 20261101,
+    "one_sided_level": 0.95,
+    "lower_bound": "5th percentile of the bootstrap means",
+    "computed_only_if": "a candidate is selected by §11"
+  },
+  "verdict_rules_for_a_later_sealed_validation": [
+    "admissibility first: continuous drawdown <= 50 % for the candidate and each comparator; a non-admissible comparator is published but does not enter the verdict",
+    "preuve forte: candidate admissible, at least 5 annualised net points ahead of the best admissible comparator, bootstrap lower bound positive against it",
+    "avantage pratique: candidate admissible, at least 5 points ahead of the best admissible comparator, interval including zero",
+    "viable sans comparateur admissible: candidate admissible, no admissible comparator",
+    "non retenue: candidate not admissible, or less than 5 points ahead of the best admissible comparator"
+  ],
+  "decisions_sha256": "ebc1259fb2218e1f3e06bb8e13136dbcfc0cb9fa2a6564caa848d6de1fab6692"
+}

@@ -1,0 +1,1197 @@
+{
+  "kind": "bench-exit-development",
+  "protocol": {
+    "file": "docs/PROTOCOLE-SORTIE-v0.3.md",
+    "git_blob_sha": "f550a755f540e48399599e7abeac873e89220a2b"
+  },
+  "freeze_decisions_sha256": "ebc1259fb2218e1f3e06bb8e13136dbcfc0cb9fa2a6564caa848d6de1fab6692",
+  "window": {
+    "from": "2020-10-01T00:00:00.000Z",
+    "to_exclusive": "2024-07-01T00:00:00.000Z",
+    "days": 1369
+  },
+  "note": "development only, already consumed (§6): learning and sub-period reading, never independent proof. The sealed window was not read.",
+  "crash_episodes": [
+    {
+      "episode": 1,
+      "start": "2021-05-12T00:00:00.000Z",
+      "peak_index": 2280.588869,
+      "crossed": "2021-05-20T00:00:00.000Z",
+      "trough": "2021-07-21T00:00:00.000Z",
+      "trough_index": 1025.174064,
+      "depth_percent": 55.047835,
+      "end": "2021-10-30T00:00:00.000Z",
+      "recovered": true
+    },
+    {
+      "episode": 2,
+      "start": "2021-11-09T00:00:00.000Z",
+      "peak_index": 2582.889828,
+      "crossed": "2022-01-06T00:00:00.000Z",
+      "trough": "2022-06-19T00:00:00.000Z",
+      "trough_index": 665.927145,
+      "depth_percent": 74.217749,
+      "end": "2024-07-01T00:00:00.000Z",
+      "recovered": false
+    }
+  ],
+  "policies": [
+    {
+      "policy": "E0",
+      "definition": "reference: constant 100 % target, no stop at all (T100 of v1.3 with the peak stop disabled); gate blind to the global risk_off",
+      "bars": 8214,
+      "opening_equity": 1000,
+      "closing_equity": 10619.933722,
+      "net_return_percent": 961.993372,
+      "annualised_return_percent": 87.832136,
+      "max_drawdown_percent": 75.515871,
+      "time_under_high_percent": 97.467738,
+      "longest_under_high_days": 963.333333,
+      "fees_usd": 52.833928,
+      "slippage_usd": 26.410246,
+      "friction_usd": 79.244175,
+      "friction_percent_of_opening": 7.924417,
+      "traded_notional_usd": 52833.92825,
+      "turnover": 8.363185,
+      "turnover_by_cause": {
+        "drift_or_other": 3.198709,
+        "line_state_change": 5.164476
+      },
+      "exits": 0,
+      "exit_events": 0,
+      "rule_entries": 0,
+      "mean_cash_percent": 0.426005,
+      "fully_out_time_percent": 0.012174,
+      "rule_out_time_percent": {
+        "BNB": 0,
+        "BTC": 0,
+        "ETH": 0,
+        "XRP": 0
+      },
+      "a1_residual_bars_after_exit": 0,
+      "a1_max_residual_weight_percent": 0,
+      "exposure": {
+        "mean": 99.573995,
+        "median": 100,
+        "q1": 99.998454,
+        "q3": 100,
+        "p90": 100,
+        "time_in_zone_percent": {
+          "0-20": 0.012174,
+          "20-50": 0,
+          "50-80": 0.012174,
+          "80-100": 99.975651
+        }
+      },
+      "capacity_shortfall_bars": 536,
+      "over_exposure_bars": 0,
+      "suppressed_legs": {
+        "dust": 6849,
+        "movement_floor": 23117,
+        "no_budget": 79
+      },
+      "pending_not_executed": 1,
+      "by_calendar_year": [
+        {
+          "year": "2020",
+          "bars": 552,
+          "return_percent": 87.733161,
+          "max_continuous_drawdown_percent": 19.227697,
+          "mean_exposure_percent": 99.068347,
+          "fees_usd": 2.210624,
+          "slippage_usd": 1.104911,
+          "stop_exits": 0
+        },
+        {
+          "year": "2021",
+          "bars": 2190,
+          "return_percent": 386.562212,
+          "max_continuous_drawdown_percent": 57.055539,
+          "mean_exposure_percent": 99.619858,
+          "fees_usd": 26.938666,
+          "slippage_usd": 13.465995,
+          "stop_exits": 0
+        },
+        {
+          "year": "2022",
+          "bars": 2190,
+          "return_percent": -60.1242,
+          "max_continuous_drawdown_percent": 75.515871,
+          "mean_exposure_percent": 99.463007,
+          "fees_usd": 6.913187,
+          "slippage_usd": 3.455707,
+          "stop_exits": 0
+        },
+        {
+          "year": "2023",
+          "bars": 2190,
+          "return_percent": 100.494052,
+          "max_continuous_drawdown_percent": 71.276284,
+          "mean_exposure_percent": 99.906498,
+          "fees_usd": 5.362209,
+          "slippage_usd": 2.680435,
+          "stop_exits": 0
+        },
+        {
+          "year": "2024",
+          "bars": 1092,
+          "return_percent": 45.422477,
+          "max_continuous_drawdown_percent": 46.159846,
+          "mean_exposure_percent": 99.293372,
+          "fees_usd": 11.409242,
+          "slippage_usd": 5.703197,
+          "stop_exits": 0
+        }
+      ],
+      "by_episode": [
+        {
+          "episode": 1,
+          "start": "2021-05-12T00:00:00.000Z",
+          "end": "2021-10-30T00:00:00.000Z",
+          "trough": "2021-07-21T00:00:00.000Z",
+          "return_percent": 0.1732,
+          "drawdown_within_percent": 57.055539,
+          "worst_continuous_drawdown_percent": 57.055539,
+          "rebuy_delay_days": 0,
+          "rebuy_at": "2021-07-21T00:00:00.000Z"
+        },
+        {
+          "episode": 2,
+          "start": "2021-11-09T00:00:00.000Z",
+          "end": "2024-07-01T00:00:00.000Z",
+          "trough": "2022-06-19T00:00:00.000Z",
+          "return_percent": -15.069139,
+          "drawdown_within_percent": 75.515871,
+          "worst_continuous_drawdown_percent": 75.515871,
+          "rebuy_delay_days": 0,
+          "rebuy_at": "2022-06-19T00:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "policy": "E1",
+      "definition": "reference: the current mechanism, exactly T100 of v1.3 — 10 % peak stop armed in transition, line barred until a confirmed trend_up or reversal_up; gate blind to the global risk_off",
+      "bars": 8214,
+      "opening_equity": 1000,
+      "closing_equity": 5900.690494,
+      "net_return_percent": 490.069049,
+      "annualised_return_percent": 60.574777,
+      "max_drawdown_percent": 71.830776,
+      "time_under_high_percent": 97.772096,
+      "longest_under_high_days": 963.333333,
+      "fees_usd": 471.8148,
+      "slippage_usd": 235.848771,
+      "friction_usd": 707.663571,
+      "friction_percent_of_opening": 70.766357,
+      "traded_notional_usd": 471814.799953,
+      "turnover": 108.52323,
+      "turnover_by_cause": {
+        "drift_or_other": 3.425256,
+        "line_state_change": 3.854889,
+        "stop_exit": 50.496641,
+        "release_after_stop": 50.746444
+      },
+      "exits": 199,
+      "exit_events": 174,
+      "rule_entries": 0,
+      "mean_cash_percent": 24.404295,
+      "fully_out_time_percent": 7.109813,
+      "rule_out_time_percent": {
+        "BNB": 0,
+        "BTC": 0,
+        "ETH": 0,
+        "XRP": 0
+      },
+      "a1_residual_bars_after_exit": 0,
+      "a1_max_residual_weight_percent": 0,
+      "exposure": {
+        "mean": 75.595705,
+        "median": 89.925116,
+        "q1": 54.989676,
+        "q3": 100,
+        "p90": 100,
+        "time_in_zone_percent": {
+          "0-20": 10.810811,
+          "20-50": 9.6299,
+          "50-80": 14.633552,
+          "80-100": 64.925737
+        }
+      },
+      "capacity_shortfall_bars": 4845,
+      "over_exposure_bars": 0,
+      "suppressed_legs": {
+        "dust": 10352,
+        "movement_floor": 17029,
+        "no_budget": 35
+      },
+      "pending_not_executed": 1,
+      "by_calendar_year": [
+        {
+          "year": "2020",
+          "bars": 552,
+          "return_percent": 88.353044,
+          "max_continuous_drawdown_percent": 15.540566,
+          "mean_exposure_percent": 86.156446,
+          "fees_usd": 8.173704,
+          "slippage_usd": 4.085735,
+          "stop_exits": 11
+        },
+        {
+          "year": "2021",
+          "bars": 2190,
+          "return_percent": 229.784979,
+          "max_continuous_drawdown_percent": 42.080139,
+          "mean_exposure_percent": 64.095856,
+          "fees_usd": 215.320432,
+          "slippage_usd": 107.633412,
+          "stop_exits": 79
+        },
+        {
+          "year": "2022",
+          "bars": 2190,
+          "return_percent": -56.434137,
+          "max_continuous_drawdown_percent": 71.830776,
+          "mean_exposure_percent": 70.346353,
+          "fees_usd": 125.627978,
+          "slippage_usd": 62.798221,
+          "stop_exits": 57
+        },
+        {
+          "year": "2023",
+          "bars": 2190,
+          "return_percent": 73.334171,
+          "max_continuous_drawdown_percent": 70.505362,
+          "mean_exposure_percent": 86.881995,
+          "fees_usd": 52.344667,
+          "slippage_usd": 26.165802,
+          "stop_exits": 28
+        },
+        {
+          "year": "2024",
+          "bars": 1092,
+          "return_percent": 25.796573,
+          "max_continuous_drawdown_percent": 51.844938,
+          "mean_exposure_percent": 81.213143,
+          "fees_usd": 70.34802,
+          "slippage_usd": 35.165601,
+          "stop_exits": 24
+        }
+      ],
+      "by_episode": [
+        {
+          "episode": 1,
+          "start": "2021-05-12T00:00:00.000Z",
+          "end": "2021-10-30T00:00:00.000Z",
+          "trough": "2021-07-21T00:00:00.000Z",
+          "return_percent": 20.272697,
+          "drawdown_within_percent": 42.080139,
+          "worst_continuous_drawdown_percent": 42.080139,
+          "rebuy_delay_days": 2.1667,
+          "rebuy_at": "2021-07-23T04:00:00.000Z"
+        },
+        {
+          "episode": 2,
+          "start": "2021-11-09T00:00:00.000Z",
+          "end": "2024-07-01T00:00:00.000Z",
+          "trough": "2022-06-19T00:00:00.000Z",
+          "return_percent": -34.824558,
+          "drawdown_within_percent": 71.830776,
+          "worst_continuous_drawdown_percent": 71.830776,
+          "rebuy_delay_days": 6.3333,
+          "rebuy_at": "2022-06-25T08:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "policy": "TC44",
+      "definition": "reference: constant 44.226403 % target, the rules of protocol v1.3 (stop, re-entry, gate seeing the global risk_off)",
+      "bars": 8214,
+      "opening_equity": 1000,
+      "closing_equity": 2569.819702,
+      "net_return_percent": 156.98197,
+      "annualised_return_percent": 28.635923,
+      "max_drawdown_percent": 49.328997,
+      "time_under_high_percent": 97.69905,
+      "longest_under_high_days": 963.333333,
+      "fees_usd": 208.047552,
+      "slippage_usd": 103.99787,
+      "friction_usd": 312.045422,
+      "friction_percent_of_opening": 31.204542,
+      "traded_notional_usd": 208047.552015,
+      "turnover": 96.690743,
+      "turnover_by_cause": {
+        "drift_or_other": 2.027951,
+        "line_state_change": 11.452327,
+        "stop_exit": 40.820516,
+        "release_after_stop": 42.389949
+      },
+      "exits": 199,
+      "exit_events": 174,
+      "rule_entries": 0,
+      "mean_cash_percent": 60.883709,
+      "fully_out_time_percent": 7.109813,
+      "rule_out_time_percent": {
+        "BNB": 0,
+        "BTC": 0,
+        "ETH": 0,
+        "XRP": 0
+      },
+      "a1_residual_bars_after_exit": 0,
+      "a1_max_residual_weight_percent": 0,
+      "exposure": {
+        "mean": 39.116291,
+        "median": 43.946034,
+        "q1": 42.625119,
+        "q3": 44.615516,
+        "p90": 45.506817,
+        "time_in_zone_percent": {
+          "0-20": 10.92038,
+          "20-50": 89.07962,
+          "50-80": 0,
+          "80-100": 0
+        }
+      },
+      "capacity_shortfall_bars": 1768,
+      "over_exposure_bars": 105,
+      "suppressed_legs": {
+        "dust": 10745,
+        "movement_floor": 16933,
+        "no_budget": 22
+      },
+      "pending_not_executed": 1,
+      "by_calendar_year": [
+        {
+          "year": "2020",
+          "bars": 552,
+          "return_percent": 44.349568,
+          "max_continuous_drawdown_percent": 6.697714,
+          "mean_exposure_percent": 43.065177,
+          "fees_usd": 6.161105,
+          "slippage_usd": 3.079756,
+          "stop_exits": 11
+        },
+        {
+          "year": "2021",
+          "bars": 2190,
+          "return_percent": 77.277747,
+          "max_continuous_drawdown_percent": 26.785197,
+          "mean_exposure_percent": 34.749603,
+          "fees_usd": 90.997311,
+          "slippage_usd": 45.487387,
+          "stop_exits": 79
+        },
+        {
+          "year": "2022",
+          "bars": 2190,
+          "return_percent": -33.067288,
+          "max_continuous_drawdown_percent": 49.328997,
+          "mean_exposure_percent": 37.266029,
+          "fees_usd": 55.796795,
+          "slippage_usd": 27.891371,
+          "stop_exits": 57
+        },
+        {
+          "year": "2023",
+          "bars": 2190,
+          "return_percent": 34.836139,
+          "max_continuous_drawdown_percent": 45.728879,
+          "mean_exposure_percent": 43.1729,
+          "fees_usd": 27.942137,
+          "slippage_usd": 13.967628,
+          "stop_exits": 28
+        },
+        {
+          "year": "2024",
+          "bars": 1092,
+          "return_percent": 11.272593,
+          "max_continuous_drawdown_percent": 29.389893,
+          "mean_exposure_percent": 41.452705,
+          "fees_usd": 27.150204,
+          "slippage_usd": 13.571728,
+          "stop_exits": 24
+        }
+      ],
+      "by_episode": [
+        {
+          "episode": 1,
+          "start": "2021-05-12T00:00:00.000Z",
+          "end": "2021-10-30T00:00:00.000Z",
+          "trough": "2021-07-21T00:00:00.000Z",
+          "return_percent": 3.938726,
+          "drawdown_within_percent": 26.785197,
+          "worst_continuous_drawdown_percent": 26.785197,
+          "rebuy_delay_days": "non revenu",
+          "rebuy_at": null
+        },
+        {
+          "episode": 2,
+          "start": "2021-11-09T00:00:00.000Z",
+          "end": "2024-07-01T00:00:00.000Z",
+          "trough": "2022-06-19T00:00:00.000Z",
+          "return_percent": -18.113732,
+          "drawdown_within_percent": 49.328997,
+          "worst_continuous_drawdown_percent": 49.328997,
+          "rebuy_delay_days": "non revenu",
+          "rebuy_at": null
+        }
+      ]
+    },
+    {
+      "policy": "S1",
+      "definition": "candidate: an asset is held while its daily close is strictly above its 200-day mean, out otherwise",
+      "bars": 8214,
+      "opening_equity": 1000,
+      "closing_equity": 8453.472119,
+      "net_return_percent": 745.347212,
+      "annualised_return_percent": 76.739456,
+      "max_drawdown_percent": 59.634097,
+      "time_under_high_percent": 97.845142,
+      "longest_under_high_days": 1036.666667,
+      "fees_usd": 167.000576,
+      "slippage_usd": 83.479488,
+      "friction_usd": 250.480064,
+      "friction_percent_of_opening": 25.048006,
+      "traded_notional_usd": 167000.576005,
+      "turnover": 33.135135,
+      "turnover_by_cause": {
+        "drift_or_other": 2.800572,
+        "line_state_change": 6.819912,
+        "rule_exit": 13.109207,
+        "rule_entry": 10.405443
+      },
+      "exits": 68,
+      "exit_events": 64,
+      "rule_entries": 67,
+      "mean_cash_percent": 38.834612,
+      "fully_out_time_percent": 24.653031,
+      "rule_out_time_percent": {
+        "BNB": 38.422206,
+        "BTC": 39.663988,
+        "ETH": 32.870709,
+        "XRP": 48.149501
+      },
+      "a1_residual_bars_after_exit": 0,
+      "a1_max_residual_weight_percent": 0,
+      "exposure": {
+        "mean": 61.165388,
+        "median": 83.391963,
+        "q1": 14.414017,
+        "q3": 99.998876,
+        "p90": 100,
+        "time_in_zone_percent": {
+          "0-20": 29.218408,
+          "20-50": 5.101047,
+          "50-80": 11.139518,
+          "80-100": 54.541028
+        }
+      },
+      "capacity_shortfall_bars": 579,
+      "over_exposure_bars": 146,
+      "suppressed_legs": {
+        "dust": 8271,
+        "movement_floor": 13988,
+        "no_budget": 30
+      },
+      "pending_not_executed": 0,
+      "by_calendar_year": [
+        {
+          "year": "2020",
+          "bars": 552,
+          "return_percent": 84.992617,
+          "max_continuous_drawdown_percent": 19.227697,
+          "mean_exposure_percent": 98.228188,
+          "fees_usd": 2.836524,
+          "slippage_usd": 1.417821,
+          "stop_exits": 0
+        },
+        {
+          "year": "2021",
+          "bars": 2190,
+          "return_percent": 168.170911,
+          "max_continuous_drawdown_percent": 54.330863,
+          "mean_exposure_percent": 83.375878,
+          "fees_usd": 80.804332,
+          "slippage_usd": 40.392336,
+          "stop_exits": 0
+        },
+        {
+          "year": "2022",
+          "bars": 2190,
+          "return_percent": -17.907774,
+          "max_continuous_drawdown_percent": 58.418228,
+          "mean_exposure_percent": 5.667889,
+          "fees_usd": 22.818604,
+          "slippage_usd": 11.406672,
+          "stop_exits": 0
+        },
+        {
+          "year": "2023",
+          "bars": 2190,
+          "return_percent": 43.648939,
+          "max_continuous_drawdown_percent": 59.634097,
+          "mean_exposure_percent": 71.425454,
+          "fees_usd": 48.177674,
+          "slippage_usd": 24.082316,
+          "stop_exits": 0
+        },
+        {
+          "year": "2024",
+          "bars": 1092,
+          "return_percent": 44.498922,
+          "max_continuous_drawdown_percent": 44.133694,
+          "mean_exposure_percent": 88.610753,
+          "fees_usd": 12.363442,
+          "slippage_usd": 6.180342,
+          "stop_exits": 0
+        }
+      ],
+      "by_episode": [
+        {
+          "episode": 1,
+          "start": "2021-05-12T00:00:00.000Z",
+          "end": "2021-10-30T00:00:00.000Z",
+          "trough": "2021-07-21T00:00:00.000Z",
+          "return_percent": -35.314139,
+          "drawdown_within_percent": 54.330863,
+          "worst_continuous_drawdown_percent": 54.330863,
+          "rebuy_delay_days": 20.1667,
+          "rebuy_at": "2021-08-10T04:00:00.000Z"
+        },
+        {
+          "episode": 2,
+          "start": "2021-11-09T00:00:00.000Z",
+          "end": "2024-07-01T00:00:00.000Z",
+          "trough": "2022-06-19T00:00:00.000Z",
+          "return_percent": 21.567602,
+          "drawdown_within_percent": 43.783324,
+          "worst_continuous_drawdown_percent": 59.634097,
+          "rebuy_delay_days": 209.1667,
+          "rebuy_at": "2023-01-14T04:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "policy": "S2",
+      "definition": "candidate: S1 with hysteresis — out under 97 % of the 200-day mean, back in only above 103 %",
+      "bars": 8214,
+      "opening_equity": 1000,
+      "closing_equity": 8795.587726,
+      "net_return_percent": 779.558773,
+      "annualised_return_percent": 78.620137,
+      "max_drawdown_percent": 57.911954,
+      "time_under_high_percent": 97.808619,
+      "longest_under_high_days": 1034.666667,
+      "fees_usd": 105.077257,
+      "slippage_usd": 52.525554,
+      "friction_usd": 157.602811,
+      "friction_percent_of_opening": 15.760281,
+      "traded_notional_usd": 105077.256656,
+      "turnover": 19.588681,
+      "turnover_by_cause": {
+        "drift_or_other": 2.778287,
+        "line_state_change": 4.848983,
+        "rule_exit": 6.410564,
+        "rule_entry": 5.550845
+      },
+      "exits": 35,
+      "exit_events": 33,
+      "rule_entries": 34,
+      "mean_cash_percent": 39.001431,
+      "fully_out_time_percent": 24.847821,
+      "rule_out_time_percent": {
+        "BNB": 39.152666,
+        "BTC": 39.371804,
+        "ETH": 33.601169,
+        "XRP": 47.272949
+      },
+      "a1_residual_bars_after_exit": 0,
+      "a1_max_residual_weight_percent": 0,
+      "exposure": {
+        "mean": 60.998569,
+        "median": 83.374137,
+        "q1": 13.89696,
+        "q3": 99.994842,
+        "p90": 100,
+        "time_in_zone_percent": {
+          "0-20": 30.034088,
+          "20-50": 4.954955,
+          "50-80": 11.93085,
+          "80-100": 53.080107
+        }
+      },
+      "capacity_shortfall_bars": 573,
+      "over_exposure_bars": 112,
+      "suppressed_legs": {
+        "dust": 8381,
+        "movement_floor": 14037,
+        "no_budget": 35
+      },
+      "pending_not_executed": 0,
+      "by_calendar_year": [
+        {
+          "year": "2020",
+          "bars": 552,
+          "return_percent": 84.992617,
+          "max_continuous_drawdown_percent": 19.227697,
+          "mean_exposure_percent": 98.228188,
+          "fees_usd": 2.836524,
+          "slippage_usd": 1.417821,
+          "stop_exits": 0
+        },
+        {
+          "year": "2021",
+          "bars": 2190,
+          "return_percent": 204.782959,
+          "max_continuous_drawdown_percent": 51.715608,
+          "mean_exposure_percent": 83.876046,
+          "fees_usd": 51.293977,
+          "slippage_usd": 25.640654,
+          "stop_exits": 0
+        },
+        {
+          "year": "2022",
+          "bars": 2190,
+          "return_percent": -22.754975,
+          "max_continuous_drawdown_percent": 55.68931,
+          "mean_exposure_percent": 5.782938,
+          "fees_usd": 16.2999,
+          "slippage_usd": 8.148357,
+          "stop_exits": 0
+        },
+        {
+          "year": "2023",
+          "bars": 2190,
+          "return_percent": 40.545397,
+          "max_continuous_drawdown_percent": 57.911954,
+          "mean_exposure_percent": 69.730354,
+          "fees_usd": 25.194235,
+          "slippage_usd": 12.593429,
+          "stop_exits": 0
+        },
+        {
+          "year": "2024",
+          "bars": 1092,
+          "return_percent": 43.692018,
+          "max_continuous_drawdown_percent": 42.283066,
+          "mean_exposure_percent": 89.521643,
+          "fees_usd": 9.45262,
+          "slippage_usd": 4.725293,
+          "stop_exits": 0
+        }
+      ],
+      "by_episode": [
+        {
+          "episode": 1,
+          "start": "2021-05-12T00:00:00.000Z",
+          "end": "2021-10-30T00:00:00.000Z",
+          "trough": "2021-07-21T00:00:00.000Z",
+          "return_percent": -28.872782,
+          "drawdown_within_percent": 51.715608,
+          "worst_continuous_drawdown_percent": 51.715608,
+          "rebuy_delay_days": 24.1667,
+          "rebuy_at": "2021-08-14T04:00:00.000Z"
+        },
+        {
+          "episode": 2,
+          "start": "2021-11-09T00:00:00.000Z",
+          "end": "2024-07-01T00:00:00.000Z",
+          "trough": "2022-06-19T00:00:00.000Z",
+          "return_percent": 14.140889,
+          "drawdown_within_percent": 46.865312,
+          "worst_continuous_drawdown_percent": 57.911954,
+          "rebuy_delay_days": 210.1667,
+          "rebuy_at": "2023-01-15T04:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "policy": "S3",
+      "definition": "candidate: out at a daily close <= 80 % of the highest daily close since the entry was filled; back in when the daily close re-crosses above its 50-day mean",
+      "bars": 8214,
+      "opening_equity": 1000,
+      "closing_equity": 10605.65948,
+      "net_return_percent": 960.565948,
+      "annualised_return_percent": 87.764745,
+      "max_drawdown_percent": 54.428342,
+      "time_under_high_percent": 96.761626,
+      "longest_under_high_days": 837.166667,
+      "fees_usd": 182.544432,
+      "slippage_usd": 91.249561,
+      "friction_usd": 273.793994,
+      "friction_percent_of_opening": 27.379399,
+      "traded_notional_usd": 182544.432407,
+      "turnover": 27.549391,
+      "turnover_by_cause": {
+        "drift_or_other": 1.873074,
+        "line_state_change": 4.809918,
+        "rule_exit": 10.764951,
+        "rule_entry": 10.101449
+      },
+      "exits": 45,
+      "exit_events": 37,
+      "rule_entries": 44,
+      "mean_cash_percent": 31.538698,
+      "fully_out_time_percent": 14.937911,
+      "rule_out_time_percent": {
+        "BNB": 29.44972,
+        "BTC": 30.46019,
+        "ETH": 26.734843,
+        "XRP": 45.14244
+      },
+      "a1_residual_bars_after_exit": 0,
+      "a1_max_residual_weight_percent": 0,
+      "exposure": {
+        "mean": 68.461302,
+        "median": 84.337601,
+        "q1": 47.611027,
+        "q3": 100,
+        "p90": 100,
+        "time_in_zone_percent": {
+          "0-20": 17.604091,
+          "20-50": 8.570733,
+          "50-80": 17.287558,
+          "80-100": 56.537619
+        }
+      },
+      "capacity_shortfall_bars": 663,
+      "over_exposure_bars": 167,
+      "suppressed_legs": {
+        "dust": 9363,
+        "movement_floor": 15666,
+        "no_budget": 55
+      },
+      "pending_not_executed": 1,
+      "by_calendar_year": [
+        {
+          "year": "2020",
+          "bars": 552,
+          "return_percent": 109.832931,
+          "max_continuous_drawdown_percent": 19.227697,
+          "mean_exposure_percent": 93.36829,
+          "fees_usd": 2.44216,
+          "slippage_usd": 1.220695,
+          "stop_exits": 0
+        },
+        {
+          "year": "2021",
+          "bars": 2190,
+          "return_percent": 277.269401,
+          "max_continuous_drawdown_percent": 25.816126,
+          "mean_exposure_percent": 53.56058,
+          "fees_usd": 65.370667,
+          "slippage_usd": 32.678121,
+          "stop_exits": 0
+        },
+        {
+          "year": "2022",
+          "bars": 2190,
+          "return_percent": -41.478398,
+          "max_continuous_drawdown_percent": 54.124574,
+          "mean_exposure_percent": 47.506048,
+          "fees_usd": 53.052992,
+          "slippage_usd": 26.519465,
+          "stop_exits": 0
+        },
+        {
+          "year": "2023",
+          "bars": 2190,
+          "return_percent": 79.277428,
+          "max_continuous_drawdown_percent": 54.428342,
+          "mean_exposure_percent": 89.081779,
+          "fees_usd": 28.841033,
+          "slippage_usd": 14.416339,
+          "stop_exits": 0
+        },
+        {
+          "year": "2024",
+          "bars": 1092,
+          "return_percent": 27.694041,
+          "max_continuous_drawdown_percent": 27.800598,
+          "mean_exposure_percent": 86.42567,
+          "fees_usd": 32.83758,
+          "slippage_usd": 16.414941,
+          "stop_exits": 0
+        }
+      ],
+      "by_episode": [
+        {
+          "episode": 1,
+          "start": "2021-05-12T00:00:00.000Z",
+          "end": "2021-10-30T00:00:00.000Z",
+          "trough": "2021-07-21T00:00:00.000Z",
+          "return_percent": 27.950922,
+          "drawdown_within_percent": 25.816126,
+          "worst_continuous_drawdown_percent": 25.816126,
+          "rebuy_delay_days": 7.8333,
+          "rebuy_at": "2021-07-28T20:00:00.000Z"
+        },
+        {
+          "episode": 2,
+          "start": "2021-11-09T00:00:00.000Z",
+          "end": "2024-07-01T00:00:00.000Z",
+          "trough": "2022-06-19T00:00:00.000Z",
+          "return_percent": 6.06051,
+          "drawdown_within_percent": 54.428342,
+          "worst_continuous_drawdown_percent": 54.428342,
+          "rebuy_delay_days": 31.1667,
+          "rebuy_at": "2022-07-20T04:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "policy": "S4",
+      "definition": "candidate: S3, with at least 10 days out of the market before any rebuy",
+      "bars": 8214,
+      "opening_equity": 1000,
+      "closing_equity": 12366.908,
+      "net_return_percent": 1136.6908,
+      "annualised_return_percent": 95.621195,
+      "max_drawdown_percent": 52.404881,
+      "time_under_high_percent": 96.505965,
+      "longest_under_high_days": 826.333333,
+      "fees_usd": 183.161974,
+      "slippage_usd": 91.55831,
+      "friction_usd": 274.720284,
+      "friction_percent_of_opening": 27.472028,
+      "traded_notional_usd": 183161.973779,
+      "turnover": 25.435023,
+      "turnover_by_cause": {
+        "drift_or_other": 1.916977,
+        "line_state_change": 4.213369,
+        "rule_exit": 9.920224,
+        "rule_entry": 9.384452
+      },
+      "exits": 42,
+      "exit_events": 35,
+      "rule_entries": 41,
+      "mean_cash_percent": 33.845576,
+      "fully_out_time_percent": 17.981495,
+      "rule_out_time_percent": {
+        "BNB": 32.736791,
+        "BTC": 32.724617,
+        "ETH": 29.145362,
+        "XRP": 46.092038
+      },
+      "a1_residual_bars_after_exit": 0,
+      "a1_max_residual_weight_percent": 0,
+      "exposure": {
+        "mean": 66.154424,
+        "median": 83.767973,
+        "q1": 45.446623,
+        "q3": 100,
+        "p90": 100,
+        "time_in_zone_percent": {
+          "0-20": 20.878987,
+          "20-50": 8.071585,
+          "50-80": 15.473582,
+          "80-100": 55.575846
+        }
+      },
+      "capacity_shortfall_bars": 535,
+      "over_exposure_bars": 193,
+      "suppressed_legs": {
+        "dust": 8958,
+        "movement_floor": 15143,
+        "no_budget": 38
+      },
+      "pending_not_executed": 1,
+      "by_calendar_year": [
+        {
+          "year": "2020",
+          "bars": 552,
+          "return_percent": 109.832931,
+          "max_continuous_drawdown_percent": 19.227697,
+          "mean_exposure_percent": 93.36829,
+          "fees_usd": 2.44216,
+          "slippage_usd": 1.220695,
+          "stop_exits": 0
+        },
+        {
+          "year": "2021",
+          "bars": 2190,
+          "return_percent": 301.616195,
+          "max_continuous_drawdown_percent": 22.814892,
+          "mean_exposure_percent": 50.524857,
+          "fees_usd": 58.740207,
+          "slippage_usd": 29.363782,
+          "stop_exits": 0
+        },
+        {
+          "year": "2022",
+          "bars": 2190,
+          "return_percent": -38.879937,
+          "max_continuous_drawdown_percent": 52.087626,
+          "mean_exposure_percent": 43.204451,
+          "fees_usd": 56.7044,
+          "slippage_usd": 28.344715,
+          "stop_exits": 0
+        },
+        {
+          "year": "2023",
+          "bars": 2190,
+          "return_percent": 80.838479,
+          "max_continuous_drawdown_percent": 52.404881,
+          "mean_exposure_percent": 88.065657,
+          "fees_usd": 32.76114,
+          "slippage_usd": 16.375838,
+          "stop_exits": 0
+        },
+        {
+          "year": "2024",
+          "bars": 1092,
+          "return_percent": 32.770512,
+          "max_continuous_drawdown_percent": 24.881073,
+          "mean_exposure_percent": 85.82616,
+          "fees_usd": 32.514068,
+          "slippage_usd": 16.25328,
+          "stop_exits": 0
+        }
+      ],
+      "by_episode": [
+        {
+          "episode": 1,
+          "start": "2021-05-12T00:00:00.000Z",
+          "end": "2021-10-30T00:00:00.000Z",
+          "trough": "2021-07-21T00:00:00.000Z",
+          "return_percent": 40.616071,
+          "drawdown_within_percent": 22.814892,
+          "worst_continuous_drawdown_percent": 22.814892,
+          "rebuy_delay_days": 7.8333,
+          "rebuy_at": "2021-07-28T20:00:00.000Z"
+        },
+        {
+          "episode": 2,
+          "start": "2021-11-09T00:00:00.000Z",
+          "end": "2024-07-01T00:00:00.000Z",
+          "trough": "2022-06-19T00:00:00.000Z",
+          "return_percent": 16.176297,
+          "drawdown_within_percent": 52.404881,
+          "worst_continuous_drawdown_percent": 52.404881,
+          "rebuy_delay_days": 31.1667,
+          "rebuy_at": "2022-07-20T04:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "policy": "S5",
+      "definition": "candidate: the synthetic basket index (32.5/32.5/20/15, rebalanced daily, close-to-close) with S2 hysteresis on its 200-day mean — all four assets out or in together",
+      "bars": 8214,
+      "opening_equity": 1000,
+      "closing_equity": 11691.296873,
+      "net_return_percent": 1069.129687,
+      "annualised_return_percent": 92.710949,
+      "max_drawdown_percent": 58.810049,
+      "time_under_high_percent": 97.443389,
+      "longest_under_high_days": 1027.166667,
+      "fees_usd": 113.120249,
+      "slippage_usd": 56.545884,
+      "friction_usd": 169.666133,
+      "friction_percent_of_opening": 16.966613,
+      "traded_notional_usd": 113120.249019,
+      "turnover": 17.144732,
+      "turnover_by_cause": {
+        "drift_or_other": 2.343188,
+        "line_state_change": 6.334037,
+        "rule_exit": 4.919796,
+        "rule_entry": 3.54771
+      },
+      "exits": 24,
+      "exit_events": 6,
+      "rule_entries": 24,
+      "mean_cash_percent": 33.516928,
+      "fully_out_time_percent": 33.028975,
+      "rule_out_time_percent": {
+        "BNB": 33.016801,
+        "BTC": 33.016801,
+        "ETH": 33.016801,
+        "XRP": 33.016801
+      },
+      "a1_residual_bars_after_exit": 0,
+      "a1_max_residual_weight_percent": 0,
+      "exposure": {
+        "mean": 66.483072,
+        "median": 98.115145,
+        "q1": 0,
+        "q3": 100,
+        "p90": 100,
+        "time_in_zone_percent": {
+          "0-20": 33.041149,
+          "20-50": 0.036523,
+          "50-80": 0.133918,
+          "80-100": 66.78841
+        }
+      },
+      "capacity_shortfall_bars": 397,
+      "over_exposure_bars": 0,
+      "suppressed_legs": {
+        "dust": 4649,
+        "movement_floor": 15330,
+        "no_budget": 98
+      },
+      "pending_not_executed": 1,
+      "by_calendar_year": [
+        {
+          "year": "2020",
+          "bars": 552,
+          "return_percent": 87.733161,
+          "max_continuous_drawdown_percent": 19.227697,
+          "mean_exposure_percent": 99.068347,
+          "fees_usd": 2.210624,
+          "slippage_usd": 1.104911,
+          "stop_exits": 0
+        },
+        {
+          "year": "2021",
+          "bars": 2190,
+          "return_percent": 256.564568,
+          "max_continuous_drawdown_percent": 58.810049,
+          "mean_exposure_percent": 94.596382,
+          "fees_usd": 55.052951,
+          "slippage_usd": 27.519627,
+          "stop_exits": 0
+        },
+        {
+          "year": "2022",
+          "bars": 2190,
+          "return_percent": -20.521499,
+          "max_continuous_drawdown_percent": 54.01649,
+          "mean_exposure_percent": 2.666672,
+          "fees_usd": 18.244251,
+          "slippage_usd": 9.120493,
+          "stop_exits": 0
+        },
+        {
+          "year": "2023",
+          "bars": 2190,
+          "return_percent": 51.140063,
+          "max_continuous_drawdown_percent": 55.044637,
+          "mean_exposure_percent": 77.610463,
+          "fees_usd": 25.084999,
+          "slippage_usd": 12.538705,
+          "stop_exits": 0
+        },
+        {
+          "year": "2024",
+          "bars": 1092,
+          "return_percent": 45.396597,
+          "max_continuous_drawdown_percent": 33.944006,
+          "mean_exposure_percent": 99.29782,
+          "fees_usd": 12.527424,
+          "slippage_usd": 6.262149,
+          "stop_exits": 0
+        }
+      ],
+      "by_episode": [
+        {
+          "episode": 1,
+          "start": "2021-05-12T00:00:00.000Z",
+          "end": "2021-10-30T00:00:00.000Z",
+          "trough": "2021-07-21T00:00:00.000Z",
+          "return_percent": -26.414102,
+          "drawdown_within_percent": 58.810049,
+          "worst_continuous_drawdown_percent": 58.810049,
+          "rebuy_delay_days": 7.5,
+          "rebuy_at": "2021-07-28T12:00:00.000Z"
+        },
+        {
+          "episode": 2,
+          "start": "2021-11-09T00:00:00.000Z",
+          "end": "2024-07-01T00:00:00.000Z",
+          "trough": "2022-06-19T00:00:00.000Z",
+          "return_percent": 27.624115,
+          "drawdown_within_percent": 44.908467,
+          "worst_continuous_drawdown_percent": 55.044637,
+          "rebuy_delay_days": 139.1667,
+          "rebuy_at": "2022-11-05T04:00:00.000Z"
+        }
+      ]
+    }
+  ],
+  "selection": {
+    "rule": [
+      "eliminated: continuous drawdown above 50 % (on 4h close equity, from the trajectory high)",
+      "eliminated: fees plus slippage, cumulated in dollars over the window, above half of E1's",
+      "among the rest, the best annualised net return; a candidate strictly less than 3 annualised points behind the best is preferred if simpler, in the order S1, S5, S2, S3, S4",
+      "none left: nothing goes to validation, no sealed opening, no production change; neither the thresholds nor the 50 % limit change after the results; any new attempt is a new pre-registered experiment (A2)"
+    ],
+    "e1_friction_usd": 707.663571,
+    "friction_ceiling_usd": 353.831786,
+    "lines": [
+      {
+        "candidate": "S1",
+        "max_drawdown_percent": 59.634097,
+        "drawdown_ok": false,
+        "friction_usd": 250.480064,
+        "friction_share_of_e1": 0.353954,
+        "friction_ok": true,
+        "annualised_return_percent": 76.739456,
+        "retained": false,
+        "gap_to_best_points": null
+      },
+      {
+        "candidate": "S2",
+        "max_drawdown_percent": 57.911954,
+        "drawdown_ok": false,
+        "friction_usd": 157.602811,
+        "friction_share_of_e1": 0.222709,
+        "friction_ok": true,
+        "annualised_return_percent": 78.620137,
+        "retained": false,
+        "gap_to_best_points": null
+      },
+      {
+        "candidate": "S3",
+        "max_drawdown_percent": 54.428342,
+        "drawdown_ok": false,
+        "friction_usd": 273.793994,
+        "friction_share_of_e1": 0.386899,
+        "friction_ok": true,
+        "annualised_return_percent": 87.764745,
+        "retained": false,
+        "gap_to_best_points": null
+      },
+      {
+        "candidate": "S4",
+        "max_drawdown_percent": 52.404881,
+        "drawdown_ok": false,
+        "friction_usd": 274.720284,
+        "friction_share_of_e1": 0.388207,
+        "friction_ok": true,
+        "annualised_return_percent": 95.621195,
+        "retained": false,
+        "gap_to_best_points": null
+      },
+      {
+        "candidate": "S5",
+        "max_drawdown_percent": 58.810049,
+        "drawdown_ok": false,
+        "friction_usd": 169.666133,
+        "friction_share_of_e1": 0.239755,
+        "friction_ok": true,
+        "annualised_return_percent": 92.710949,
+        "retained": false,
+        "gap_to_best_points": null
+      }
+    ],
+    "best": null,
+    "within_margin": [],
+    "selected": null,
+    "reason": "no candidate meets §11 (S1: drawdown 59.63 % > 50 %; S2: drawdown 57.91 % > 50 %; S3: drawdown 54.43 % > 50 %; S4: drawdown 52.40 % > 50 %; S5: drawdown 58.81 % > 50 %)",
+    "consequence": "A2: no sealed opening, no production change, no threshold change; a new attempt is a new pre-registered experiment"
+  },
+  "comparators_admissibility_on_development": {
+    "E0": {
+      "max_drawdown_percent": 75.515871,
+      "admissible": false
+    },
+    "E1": {
+      "max_drawdown_percent": 71.830776,
+      "admissible": false
+    },
+    "TC44": {
+      "max_drawdown_percent": 49.328997,
+      "admissible": true
+    }
+  },
+  "block_lengths": null
+}

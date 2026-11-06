@@ -23,7 +23,7 @@ import { isGenuineOpening, type VerificationOpening } from './opening.js';
  */
 
 export interface Window {
-  readonly name: 'development' | 'verification' | 'validation' | 'calibration';
+  readonly name: 'development' | 'verification' | 'validation' | 'calibration' | 'exit-development';
   readonly fromMs: number;
   /** EXCLUSIVE. */
   readonly toMs: number;
@@ -57,6 +57,24 @@ export const CALIBRATION: Window = Object.freeze({
   toMs: SEAL_INSTANT_MS,
 });
 
+/**
+ * THE DEVELOPMENT WINDOW OF THE EXIT EXPERIMENT — protocol `docs/PROTOCOLE-SORTIE-v0.3.md`, §6.
+ *
+ * Everything before the seal, from the first midnight at which every policy of that experiment has
+ * its indicators causally. That instant is COMPUTED (`developmentStart`, `src/bench/exit/daily.ts`)
+ * and pinned here once the audit published it; the exit run recomputes it and refuses to measure if
+ * the two ever differ. The binding requirement is SOL's 50-day mean, read by the regime classifier
+ * and the risk_off breadth: the grid only starts with SOL (2020-08-11T04:00Z).
+ *
+ * The whole period is CONSUMED (v1.3's internal verification was opened once, `1715f0f`): learning
+ * and sub-period reading only, never independent proof. The seal does not move.
+ */
+export const EXIT_DEVELOPMENT: Window = Object.freeze({
+  name: 'exit-development',
+  fromMs: Date.parse('2020-10-01T00:00:00.000Z'),
+  toMs: SEAL_INSTANT_MS,
+});
+
 export class ClosedWindowError extends Error {
   constructor(window: Window, why: string) {
     super(`window "${window.name}" is closed: ${why}`);
@@ -85,6 +103,12 @@ export function assertMeasurable(window: Window, opening?: VerificationOpening):
     }
     if (window.fromMs !== VERIFICATION.fromMs || window.toMs !== VERIFICATION.toMs) {
       throw new ClosedWindowError(window, 'a window named "verification" must have the verification bounds');
+    }
+    return;
+  }
+  if (window.name === 'exit-development') {
+    if (window.fromMs !== EXIT_DEVELOPMENT.fromMs || window.toMs !== EXIT_DEVELOPMENT.toMs) {
+      throw new ClosedWindowError(window, 'a window named "exit-development" must have the bounds the exit audit computed');
     }
     return;
   }
