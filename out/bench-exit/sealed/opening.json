@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "kind": "bench-exit-sealed-opening",
+  "note": "The sealed window [2024-07-01, 2026-06-01) was opened once, here. This record is written before any sealed file is read and is never removed.",
+  "openedAt": "2026-10-31T12:49:27.576Z",
+  "freezeCommit": "f2cc04830d556d1fea34dba5ff7911b1323167dc",
+  "freezeDecisionsSha256": "5b5b89b26e91d1e4e3f57e79860995e421f8836ba01dc68bf0278e2bebe27cc6",
+  "head": "f2cc04830d556d1fea34dba5ff7911b1323167dc",
+  "remoteBranch": "origin/feat/protocole-sortie-v0.4",
+  "remoteHead": "f2cc04830d556d1fea34dba5ff7911b1323167dc",
+  "sourceTreeSha": "34fb0338ab1ab848d1067787b7b81f6cd3fdf202",
+  "depsLockSha": "eb23e7e378e429f5db0d9689509d22c337c6389f"
+}

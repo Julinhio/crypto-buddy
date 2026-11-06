@@ -1,0 +1,645 @@
+{
+  "kind": "bench-exit-sealed",
+  "protocol": {
+    "file": "docs/PROTOCOLE-SORTIE-v0.4.md",
+    "git_blob_sha": "7db53ef222df0b7becb299e7ef68102c624304d5"
+  },
+  "freeze_decisions_sha256": "5b5b89b26e91d1e4e3f57e79860995e421f8836ba01dc68bf0278e2bebe27cc6",
+  "opening": {
+    "openedAt": "2026-10-31T12:49:27.576Z",
+    "freezeCommit": "f2cc04830d556d1fea34dba5ff7911b1323167dc",
+    "freezeDecisionsSha256": "5b5b89b26e91d1e4e3f57e79860995e421f8836ba01dc68bf0278e2bebe27cc6",
+    "head": "f2cc04830d556d1fea34dba5ff7911b1323167dc",
+    "remoteBranch": "origin/feat/protocole-sortie-v0.4",
+    "remoteHead": "f2cc04830d556d1fea34dba5ff7911b1323167dc",
+    "sourceTreeSha": "34fb0338ab1ab848d1067787b7b81f6cd3fdf202",
+    "depsLockSha": "eb23e7e378e429f5db0d9689509d22c337c6389f"
+  },
+  "note": "the single opening of the sealed window, for S4 alone; E0 and TC44 and the bootstrap are informative",
+  "prefix_tests": [
+    "start date and development episodes: unchanged on the full data",
+    "regime and sticky timelines: the full timeline cut at the split is the truncated one, bar for bar",
+    "daily table: identical rows up to the split",
+    "trajectories: S4, E0, E1, TC44 identical to their development replay up to the split, closing equities as frozen"
+  ],
+  "window": {
+    "from": "2024-07-01T00:00:00.000Z",
+    "to_exclusive": "2026-06-01T00:00:00.000Z",
+    "days": 700,
+    "rebased_to_usd": 1000
+  },
+  "crash_episodes_open_after_the_split": [
+    {
+      "start": "2021-11-09T00:00:00.000Z",
+      "crossed": "2022-01-06T00:00:00.000Z",
+      "trough": "2022-06-19T00:00:00.000Z",
+      "trough_in_window": false,
+      "depth_percent": 74.217749,
+      "end": "2024-11-12T00:00:00.000Z",
+      "recovered": true
+    },
+    {
+      "start": "2024-12-17T00:00:00.000Z",
+      "crossed": "2025-03-10T00:00:00.000Z",
+      "trough": "2025-04-09T00:00:00.000Z",
+      "trough_in_window": true,
+      "depth_percent": 40.042821,
+      "end": "2025-07-16T00:00:00.000Z",
+      "recovered": true
+    },
+    {
+      "start": "2025-10-07T00:00:00.000Z",
+      "crossed": "2025-11-21T00:00:00.000Z",
+      "trough": "2026-02-06T00:00:00.000Z",
+      "trough_in_window": true,
+      "depth_percent": 54.740614,
+      "end": "2026-06-01T00:00:00.000Z",
+      "recovered": false
+    }
+  ],
+  "policies": [
+    {
+      "policy": "S4",
+      "definition": "candidate: S3, with at least 10 days out of the market before any rebuy",
+      "bars": 4200,
+      "opening_equity": 1000,
+      "closing_equity": 1101.50456,
+      "net_return_percent": 10.150456,
+      "annualised_return_percent": 5.173869,
+      "max_drawdown_percent": 46.818108,
+      "time_under_high_percent": 98.952381,
+      "longest_under_high_days": 236.5,
+      "fees_usd": 15.748583,
+      "slippage_usd": 7.872305,
+      "friction_usd": 23.620888,
+      "friction_percent_of_opening": 2.362089,
+      "traded_notional_usd": 15748.583476,
+      "turnover": 13.658918,
+      "turnover_by_cause": {
+        "rule_exit": 5.530572,
+        "rule_entry": 5.071704,
+        "drift_or_other": 0.848475,
+        "line_state_change": 2.208167
+      },
+      "exits": 26,
+      "exit_events": 19,
+      "rule_entries": 27,
+      "mean_cash_percent": 32.301459,
+      "fully_out_time_percent": 17.309524,
+      "rule_out_time_percent": {
+        "BNB": 22.404762,
+        "BTC": 23.714286,
+        "ETH": 42.571429,
+        "XRP": 39.571429
+      },
+      "a1_residual_bars_after_exit": 0,
+      "a1_max_residual_weight_percent": 0,
+      "exposure": {
+        "mean": 67.698541,
+        "median": 85.742138,
+        "q1": 35.552505,
+        "q3": 100,
+        "p90": 100,
+        "time_in_zone_percent": {
+          "0-20": 20.5,
+          "20-50": 6.404762,
+          "50-80": 16.357143,
+          "80-100": 56.738095
+        }
+      },
+      "capacity_shortfall_bars": 309,
+      "over_exposure_bars": 36,
+      "suppressed_legs": {
+        "dust": 4495,
+        "movement_floor": 8013,
+        "no_budget": 44
+      },
+      "pending_not_executed": 1,
+      "by_calendar_year": [
+        {
+          "year": "2024",
+          "bars": 1104,
+          "return_percent": 19.582853,
+          "max_continuous_drawdown_percent": 46.818108,
+          "mean_exposure_percent": 77.67817,
+          "fees_usd": 4.28284,
+          "slippage_usd": 2.140882,
+          "stop_exits": 0
+        },
+        {
+          "year": "2025",
+          "bars": 2190,
+          "return_percent": 15.244097,
+          "max_continuous_drawdown_percent": 31.778744,
+          "mean_exposure_percent": 61.999585,
+          "fees_usd": 7.351562,
+          "slippage_usd": 3.675015,
+          "stop_exits": 0
+        },
+        {
+          "year": "2026",
+          "bars": 906,
+          "return_percent": -20.072045,
+          "max_continuous_drawdown_percent": 40.611313,
+          "mean_exposure_percent": 69.313553,
+          "fees_usd": 4.114181,
+          "slippage_usd": 2.056408,
+          "stop_exits": 0
+        }
+      ],
+      "by_episode": [
+        {
+          "episode": 1,
+          "start": "2021-11-09T00:00:00.000Z",
+          "end": "2024-11-12T00:00:00.000Z",
+          "trough": "2022-06-19T00:00:00.000Z",
+          "return_percent": 9.921737,
+          "drawdown_within_percent": 52.404881,
+          "worst_continuous_drawdown_percent": 52.404881,
+          "rebuy_delay_days": 31.1667,
+          "rebuy_at": "2022-07-20T04:00:00.000Z"
+        },
+        {
+          "episode": 2,
+          "start": "2024-12-17T00:00:00.000Z",
+          "end": "2025-07-16T00:00:00.000Z",
+          "trough": "2025-04-09T00:00:00.000Z",
+          "return_percent": -4.344622,
+          "drawdown_within_percent": 31.778744,
+          "worst_continuous_drawdown_percent": 31.778744,
+          "rebuy_delay_days": 18.1667,
+          "rebuy_at": "2025-04-27T04:00:00.000Z"
+        },
+        {
+          "episode": 3,
+          "start": "2025-10-07T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "trough": "2026-02-06T00:00:00.000Z",
+          "return_percent": -35.010559,
+          "drawdown_within_percent": 40.611313,
+          "worst_continuous_drawdown_percent": 40.611313,
+          "rebuy_delay_days": 38.3333,
+          "rebuy_at": "2026-03-16T08:00:00.000Z"
+        }
+      ],
+      "continuous_drawdown": {
+        "max_drawdown_percent": 46.818108,
+        "peak_close": "2024-03-14T00:00:00.000Z",
+        "trough_close": "2024-09-06T20:00:00.000Z",
+        "recovered_close": "2024-12-04T04:00:00.000Z"
+      },
+      "drawdown_from_window_high": {
+        "max_drawdown_percent": 40.611313,
+        "peak_close": "2025-10-07T12:00:00.000Z",
+        "trough_close": "2026-04-02T12:00:00.000Z",
+        "recovered_close": "non retrouvé"
+      }
+    },
+    {
+      "policy": "E1",
+      "definition": "reference: the current mechanism, exactly T100 of v1.3 — 10 % peak stop armed in transition, line barred until a confirmed trend_up or reversal_up; gate blind to the global risk_off",
+      "bars": 4200,
+      "opening_equity": 1000,
+      "closing_equity": 823.830353,
+      "net_return_percent": -17.616965,
+      "annualised_return_percent": -9.61729,
+      "max_drawdown_percent": 51.921245,
+      "time_under_high_percent": 100,
+      "longest_under_high_days": 700,
+      "fees_usd": 51.531088,
+      "slippage_usd": 25.759118,
+      "friction_usd": 77.290207,
+      "friction_percent_of_opening": 7.729021,
+      "traded_notional_usd": 51531.088451,
+      "turnover": 47.964185,
+      "turnover_by_cause": {
+        "release_after_stop": 22.729806,
+        "stop_exit": 22.104474,
+        "line_state_change": 2.100045,
+        "drift_or_other": 1.029859
+      },
+      "exits": 87,
+      "exit_events": 82,
+      "rule_entries": 0,
+      "mean_cash_percent": 18.869326,
+      "fully_out_time_percent": 3.119048,
+      "rule_out_time_percent": {
+        "BNB": 0,
+        "BTC": 0,
+        "ETH": 0,
+        "XRP": 0
+      },
+      "a1_residual_bars_after_exit": 0,
+      "a1_max_residual_weight_percent": 0,
+      "exposure": {
+        "mean": 81.130674,
+        "median": 97.68464,
+        "q1": 69.824791,
+        "q3": 100,
+        "p90": 100,
+        "time_in_zone_percent": {
+          "0-20": 5.809524,
+          "20-50": 8.071429,
+          "50-80": 16.666667,
+          "80-100": 69.452381
+        }
+      },
+      "capacity_shortfall_bars": 2158,
+      "over_exposure_bars": 0,
+      "suppressed_legs": {
+        "dust": 5384,
+        "movement_floor": 9267,
+        "no_budget": 15
+      },
+      "pending_not_executed": 1,
+      "by_calendar_year": [
+        {
+          "year": "2024",
+          "bars": 1104,
+          "return_percent": 36.565807,
+          "max_continuous_drawdown_percent": 46.618695,
+          "mean_exposure_percent": 84.953591,
+          "fees_usd": 12.843849,
+          "slippage_usd": 6.420404,
+          "stop_exits": 24
+        },
+        {
+          "year": "2025",
+          "bars": 2190,
+          "return_percent": -29.328762,
+          "max_continuous_drawdown_percent": 44.65393,
+          "mean_exposure_percent": 79.358311,
+          "fees_usd": 32.955236,
+          "slippage_usd": 16.473373,
+          "stop_exits": 50
+        },
+        {
+          "year": "2026",
+          "bars": 906,
+          "return_percent": -14.640254,
+          "max_continuous_drawdown_percent": 51.921245,
+          "mean_exposure_percent": 80.756475,
+          "fees_usd": 5.732004,
+          "slippage_usd": 2.865341,
+          "stop_exits": 13
+        }
+      ],
+      "by_episode": [
+        {
+          "episode": 1,
+          "start": "2021-11-09T00:00:00.000Z",
+          "end": "2024-11-12T00:00:00.000Z",
+          "trough": "2022-06-19T00:00:00.000Z",
+          "return_percent": -25.931598,
+          "drawdown_within_percent": 71.830776,
+          "worst_continuous_drawdown_percent": 71.830776,
+          "rebuy_delay_days": 6.3333,
+          "rebuy_at": "2022-06-25T08:00:00.000Z"
+        },
+        {
+          "episode": 2,
+          "start": "2024-12-17T00:00:00.000Z",
+          "end": "2025-07-16T00:00:00.000Z",
+          "trough": "2025-04-09T00:00:00.000Z",
+          "return_percent": -17.50656,
+          "drawdown_within_percent": 44.629908,
+          "worst_continuous_drawdown_percent": 44.65393,
+          "rebuy_delay_days": 4.1667,
+          "rebuy_at": "2025-04-13T04:00:00.000Z"
+        },
+        {
+          "episode": 3,
+          "start": "2025-10-07T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "trough": "2026-02-06T00:00:00.000Z",
+          "return_percent": -44.661733,
+          "drawdown_within_percent": 50.684098,
+          "worst_continuous_drawdown_percent": 51.921245,
+          "rebuy_delay_days": 8.8333,
+          "rebuy_at": "2026-02-14T20:00:00.000Z"
+        }
+      ],
+      "continuous_drawdown": {
+        "max_drawdown_percent": 51.921245,
+        "peak_close": "2021-11-10T16:00:00.000Z",
+        "trough_close": "2026-02-24T12:00:00.000Z",
+        "recovered_close": "non retrouvé"
+      },
+      "drawdown_from_window_high": {
+        "max_drawdown_percent": 51.900377,
+        "peak_close": "2024-12-17T12:00:00.000Z",
+        "trough_close": "2026-02-24T12:00:00.000Z",
+        "recovered_close": "non retrouvé"
+      }
+    },
+    {
+      "policy": "E0",
+      "definition": "reference: constant 100 % target, no stop at all (T100 of v1.3 with the peak stop disabled); gate blind to the global risk_off",
+      "bars": 4200,
+      "opening_equity": 1000,
+      "closing_equity": 1176.634364,
+      "net_return_percent": 17.663436,
+      "annualised_return_percent": 8.857847,
+      "max_drawdown_percent": 55.441585,
+      "time_under_high_percent": 98.071429,
+      "longest_under_high_days": 236.5,
+      "fees_usd": 4.658642,
+      "slippage_usd": 2.328743,
+      "friction_usd": 6.987385,
+      "friction_percent_of_opening": 0.698739,
+      "traded_notional_usd": 4658.64232,
+      "turnover": 3.315616,
+      "turnover_by_cause": {
+        "drift_or_other": 1.090883,
+        "line_state_change": 2.224733
+      },
+      "exits": 0,
+      "exit_events": 0,
+      "rule_entries": 0,
+      "mean_cash_percent": 0.536169,
+      "fully_out_time_percent": 0,
+      "rule_out_time_percent": {
+        "BNB": 0,
+        "BTC": 0,
+        "ETH": 0,
+        "XRP": 0
+      },
+      "a1_residual_bars_after_exit": 0,
+      "a1_max_residual_weight_percent": 0,
+      "exposure": {
+        "mean": 99.463831,
+        "median": 100,
+        "q1": 99.998478,
+        "q3": 100,
+        "p90": 100,
+        "time_in_zone_percent": {
+          "0-20": 0,
+          "20-50": 0,
+          "50-80": 0,
+          "80-100": 100
+        }
+      },
+      "capacity_shortfall_bars": 235,
+      "over_exposure_bars": 0,
+      "suppressed_legs": {
+        "dust": 3576,
+        "movement_floor": 11710,
+        "no_budget": 38
+      },
+      "pending_not_executed": 1,
+      "by_calendar_year": [
+        {
+          "year": "2024",
+          "bars": 1104,
+          "return_percent": 52.013291,
+          "max_continuous_drawdown_percent": 34.988579,
+          "mean_exposure_percent": 99.522429,
+          "fees_usd": 1.341723,
+          "slippage_usd": 0.670694,
+          "stop_exits": 0
+        },
+        {
+          "year": "2025",
+          "bars": 2190,
+          "return_percent": 0.349471,
+          "max_continuous_drawdown_percent": 42.574144,
+          "mean_exposure_percent": 99.548564,
+          "fees_usd": 2.584427,
+          "slippage_usd": 1.291896,
+          "stop_exits": 0
+        },
+        {
+          "year": "2026",
+          "bars": 906,
+          "return_percent": -22.866173,
+          "max_continuous_drawdown_percent": 55.441585,
+          "mean_exposure_percent": 99.187609,
+          "fees_usd": 0.732492,
+          "slippage_usd": 0.366153,
+          "stop_exits": 0
+        }
+      ],
+      "by_episode": [
+        {
+          "episode": 1,
+          "start": "2021-11-09T00:00:00.000Z",
+          "end": "2024-11-12T00:00:00.000Z",
+          "trough": "2022-06-19T00:00:00.000Z",
+          "return_percent": 2.299853,
+          "drawdown_within_percent": 75.515871,
+          "worst_continuous_drawdown_percent": 75.515871,
+          "rebuy_delay_days": 0,
+          "rebuy_at": "2022-06-19T00:00:00.000Z"
+        },
+        {
+          "episode": 2,
+          "start": "2024-12-17T00:00:00.000Z",
+          "end": "2025-07-16T00:00:00.000Z",
+          "trough": "2025-04-09T00:00:00.000Z",
+          "return_percent": -0.493033,
+          "drawdown_within_percent": 42.574144,
+          "worst_continuous_drawdown_percent": 42.574144,
+          "rebuy_delay_days": 0,
+          "rebuy_at": "2025-04-09T00:00:00.000Z"
+        },
+        {
+          "episode": 3,
+          "start": "2025-10-07T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "trough": "2026-02-06T00:00:00.000Z",
+          "return_percent": -48.167812,
+          "drawdown_within_percent": 55.441585,
+          "worst_continuous_drawdown_percent": 55.441585,
+          "rebuy_delay_days": 0,
+          "rebuy_at": "2026-02-06T00:00:00.000Z"
+        }
+      ],
+      "continuous_drawdown": {
+        "max_drawdown_percent": 55.441585,
+        "peak_close": "2025-10-07T12:00:00.000Z",
+        "trough_close": "2026-02-06T00:00:00.000Z",
+        "recovered_close": "non retrouvé"
+      },
+      "drawdown_from_window_high": {
+        "max_drawdown_percent": 55.441585,
+        "peak_close": "2025-10-07T12:00:00.000Z",
+        "trough_close": "2026-02-06T00:00:00.000Z",
+        "recovered_close": "non retrouvé"
+      }
+    },
+    {
+      "policy": "TC44",
+      "definition": "reference: constant 44.226403 % target, the rules of protocol v1.3 (stop, re-entry, gate seeing the global risk_off)",
+      "bars": 4200,
+      "opening_equity": 1000,
+      "closing_equity": 893.052794,
+      "net_return_percent": -10.694721,
+      "annualised_return_percent": -5.731111,
+      "max_drawdown_percent": 34.516616,
+      "time_under_high_percent": 99.547619,
+      "longest_under_high_days": 385.166667,
+      "fees_usd": 45.57924,
+      "slippage_usd": 22.783936,
+      "friction_usd": 68.363176,
+      "friction_percent_of_opening": 6.836318,
+      "traded_notional_usd": 45579.240285,
+      "turnover": 43.820996,
+      "turnover_by_cause": {
+        "release_after_stop": 18.297174,
+        "line_state_change": 6.015606,
+        "stop_exit": 18.993897,
+        "drift_or_other": 0.51432
+      },
+      "exits": 87,
+      "exit_events": 82,
+      "rule_entries": 0,
+      "mean_cash_percent": 58.728881,
+      "fully_out_time_percent": 3.119048,
+      "rule_out_time_percent": {
+        "BNB": 0,
+        "BTC": 0,
+        "ETH": 0,
+        "XRP": 0
+      },
+      "a1_residual_bars_after_exit": 0,
+      "a1_max_residual_weight_percent": 0,
+      "exposure": {
+        "mean": 41.271119,
+        "median": 44.027131,
+        "q1": 43.367998,
+        "q3": 44.534602,
+        "p90": 45.255287,
+        "time_in_zone_percent": {
+          "0-20": 6,
+          "20-50": 94,
+          "50-80": 0,
+          "80-100": 0
+        }
+      },
+      "capacity_shortfall_bars": 626,
+      "over_exposure_bars": 63,
+      "suppressed_legs": {
+        "dust": 5631,
+        "movement_floor": 9227,
+        "no_budget": 11
+      },
+      "pending_not_executed": 1,
+      "by_calendar_year": [
+        {
+          "year": "2024",
+          "bars": 1104,
+          "return_percent": 13.386071,
+          "max_continuous_drawdown_percent": 27.192145,
+          "mean_exposure_percent": 41.553573,
+          "fees_usd": 10.606164,
+          "slippage_usd": 5.301809,
+          "stop_exits": 24
+        },
+        {
+          "year": "2025",
+          "bars": 2190,
+          "return_percent": -12.248129,
+          "max_continuous_drawdown_percent": 23.639166,
+          "mean_exposure_percent": 41.253822,
+          "fees_usd": 28.683974,
+          "slippage_usd": 14.338357,
+          "stop_exits": 50
+        },
+        {
+          "year": "2026",
+          "bars": 906,
+          "return_percent": -10.244507,
+          "max_continuous_drawdown_percent": 34.516616,
+          "mean_exposure_percent": 40.968749,
+          "fees_usd": 6.289102,
+          "slippage_usd": 3.143769,
+          "stop_exits": 13
+        }
+      ],
+      "by_episode": [
+        {
+          "episode": 1,
+          "start": "2021-11-09T00:00:00.000Z",
+          "end": "2024-11-12T00:00:00.000Z",
+          "trough": "2022-06-19T00:00:00.000Z",
+          "return_percent": -14.675509,
+          "drawdown_within_percent": 49.328997,
+          "worst_continuous_drawdown_percent": 49.328997,
+          "rebuy_delay_days": "non revenu",
+          "rebuy_at": null
+        },
+        {
+          "episode": 2,
+          "start": "2024-12-17T00:00:00.000Z",
+          "end": "2025-07-16T00:00:00.000Z",
+          "trough": "2025-04-09T00:00:00.000Z",
+          "return_percent": -3.598965,
+          "drawdown_within_percent": 21.463878,
+          "worst_continuous_drawdown_percent": 22.218655,
+          "rebuy_delay_days": "non revenu",
+          "rebuy_at": null
+        },
+        {
+          "episode": 3,
+          "start": "2025-10-07T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "trough": "2026-02-06T00:00:00.000Z",
+          "return_percent": -29.924872,
+          "drawdown_within_percent": 34.516616,
+          "worst_continuous_drawdown_percent": 34.516616,
+          "rebuy_delay_days": "non revenu",
+          "rebuy_at": null
+        }
+      ],
+      "continuous_drawdown": {
+        "max_drawdown_percent": 34.516616,
+        "peak_close": "2025-10-07T12:00:00.000Z",
+        "trough_close": "2026-02-06T00:00:00.000Z",
+        "recovered_close": "non retrouvé"
+      },
+      "drawdown_from_window_high": {
+        "max_drawdown_percent": 34.516616,
+        "peak_close": "2025-10-07T12:00:00.000Z",
+        "trough_close": "2026-02-06T00:00:00.000Z",
+        "recovered_close": "non retrouvé"
+      }
+    }
+  ],
+  "bootstrap_for_information": [
+    {
+      "comparison": "S4 - E1",
+      "days": 700,
+      "mean_daily_log_difference": 0.000414954,
+      "frozen_block_length": 1.909708,
+      "lower_bound_95_one_sided": -0.000367442,
+      "draws": 10000,
+      "seed": 20261101
+    },
+    {
+      "comparison": "S4 - E0",
+      "days": 700,
+      "mean_daily_log_difference": -0.000094259,
+      "frozen_block_length": 8.673432,
+      "lower_bound_95_one_sided": -0.000918596,
+      "draws": 10000,
+      "seed": 20261101
+    },
+    {
+      "comparison": "S4 - TC44",
+      "days": 700,
+      "mean_daily_log_difference": 0.000299695,
+      "frozen_block_length": 1,
+      "lower_bound_95_one_sided": -0.000447268,
+      "draws": 10000,
+      "seed": 20261101
+    }
+  ],
+  "verdict": {
+    "rule": "\"Go pilote testnet\" if S4 net return > 0 AND > E1 net return on the sealed window; otherwise \"Non retenue\"",
+    "s4_net_return_percent": 10.150456,
+    "e1_net_return_percent": -17.616965,
+    "positive": true,
+    "ahead_of_e1": true,
+    "verdict": "Go pilote testnet"
+  }
+}

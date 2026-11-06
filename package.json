@@ -25,7 +25,7 @@
     "backfill:position-state": "tsx src/migrations/backfillPositionState.ts",
     "probe:v5": "tsx src/probes/v5Behaviour.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/test/invariants.ts && tsx src/test/scheduler.ts && tsx src/test/regime.ts && tsx src/test/lifecycle.ts && tsx src/test/strategyVersion.ts && tsx src/test/coherence.ts && tsx src/test/intentReference.ts && tsx src/test/stickyTransition.ts && tsx src/test/transitionLayer.ts && tsx src/test/effectiveTarget.ts && tsx src/test/transitionVector.ts && tsx src/test/marketDataOutage.ts && tsx src/test/transitionEnforce.ts && tsx src/test/llmResilience.ts && tsx src/test/exposureCalibration.ts && tsx src/test/benchExposure.ts && tsx src/test/benchExit.ts && tsx src/test/exposureObservation.ts && tsx src/test/gitSha.ts && tsx src/test/mandateExperiment.ts && tsx src/test/exposureBand.ts && tsx src/test/exposureCorrection.ts && tsx src/test/exposureWitness.ts && tsx src/test/exposurePilot.ts && tsx src/test/guardBandIncident.ts && tsx src/test/activityAttribution.ts",
+    "test": "tsx src/test/invariants.ts && tsx src/test/scheduler.ts && tsx src/test/regime.ts && tsx src/test/lifecycle.ts && tsx src/test/strategyVersion.ts && tsx src/test/coherence.ts && tsx src/test/intentReference.ts && tsx src/test/stickyTransition.ts && tsx src/test/transitionLayer.ts && tsx src/test/effectiveTarget.ts && tsx src/test/transitionVector.ts && tsx src/test/marketDataOutage.ts && tsx src/test/transitionEnforce.ts && tsx src/test/llmResilience.ts && tsx src/test/exposureCalibration.ts && tsx src/test/benchExposure.ts && tsx src/test/benchExit.ts && tsx src/test/benchExitSealed.ts && tsx src/test/exposureObservation.ts && tsx src/test/gitSha.ts && tsx src/test/mandateExperiment.ts && tsx src/test/exposureBand.ts && tsx src/test/exposureCorrection.ts && tsx src/test/exposureWitness.ts && tsx src/test/exposurePilot.ts && tsx src/test/guardBandIncident.ts && tsx src/test/activityAttribution.ts",
     "observe:exposure": "tsx src/observation/exposure/observe.ts",
     "experiment:mandate": "tsx src/experiment/mandate/runner.ts",
     "replay:band-bite": "tsx src/replay/exposureBandBite.ts",
@@ -35,7 +35,9 @@
     "bench:exposure:dev": "tsx src/bench/exposure/run.ts",
     "bench:exposure:verify": "tsx src/bench/exposure/verify.ts",
     "bench:exit:freeze": "tsx src/bench/exit/run.ts freeze",
-    "bench:exit:dev": "tsx src/bench/exit/run.ts dev"
+    "bench:exit:dev": "tsx src/bench/exit/run.ts dev",
+    "bench:exit:sealed-freeze": "tsx src/bench/exit/run.ts sealed-freeze",
+    "bench:exit:sealed": "tsx src/bench/exit/run.ts sealed"
   },
   "engines": {
     "node": ">=22"

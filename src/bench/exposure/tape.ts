@@ -133,12 +133,26 @@ export function prepareExitDevelopmentTape(rootDir: string): Tape {
 
 /** Both certified parts, truncated at `untilMs`, production's universe asserted by name. */
 function calibrationTapeUntil(rootDir: string, untilMs: number): Tape {
+  const universe = calibrationUniverse(rootDir, untilMs);
+  assertProductionUniverse(universe);
+  return buildTape(universe, productionUniverses().tradable, untilMs);
+}
+
+/** The candles of both certified parts that have CLOSED by `untilMs`, per asset. */
+export function calibrationUniverse(rootDir: string, untilMs: number): Record<string, { daily: BenchCandle[]; h4: BenchCandle[] }> {
   if (!(untilMs <= SEAL_INSTANT_MS)) throw new Error('bench tape: untilMs is past the seal');
   const core = loadCertifiedPart(CORE_PIN, rootDir);
   const sol = loadCertifiedPart(SOL_PIN, rootDir);
+  return universeOfParts([core, sol], untilMs);
+}
 
+/** Candles per asset from certified parts, keeping those that have CLOSED by `untilMs`. */
+export function universeOfParts(
+  parts: ReadonlyArray<{ series: Map<string, BenchCandle[]> }>,
+  untilMs: number,
+): Record<string, { daily: BenchCandle[]; h4: BenchCandle[] }> {
   const universe: Record<string, { daily: BenchCandle[]; h4: BenchCandle[] }> = {};
-  for (const part of [core, sol]) {
+  for (const part of parts) {
     for (const [key, candles] of part.series) {
       const [symbol, timeframe] = key.split(':');
       const asset = baseOf(symbol!);
@@ -149,7 +163,11 @@ function calibrationTapeUntil(rootDir: string, untilMs: number): Tape {
       else universe[asset]!.h4 = kept;
     }
   }
+  return universe;
+}
 
+/** Refuses a universe that is not production's regime universe, by name. */
+export function assertProductionUniverse(universe: Record<string, unknown>): void {
   const expected = productionUniverses();
   const loaded = Object.keys(universe).sort();
   if (loaded.join(',') !== expected.regime.join(',')) {
@@ -158,7 +176,6 @@ function calibrationTapeUntil(rootDir: string, untilMs: number): Tape {
         `[${expected.regime.join(', ')}] — the risk_off breadth would not be production's`,
     );
   }
-  return buildTape(universe, expected.tradable, untilMs);
 }
 
 /**

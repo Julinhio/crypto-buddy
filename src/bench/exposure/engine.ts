@@ -8,6 +8,7 @@ import { applyRebalanceThreshold, confirmedBullish, type Policy } from './policy
 import { executeAllocation } from './execute.js';
 import { assertMeasurable, type Window } from './windows.js';
 import type { VerificationOpening } from './opening.js';
+import type { SealedOpening } from '../exit/opening.js';
 
 const DAY_MS = 86_400_000;
 
@@ -196,6 +197,8 @@ export function runWindow(params: {
   unsafeSyntheticWindow?: boolean;
   /** Required for the internal verification. See `windows.ts`. */
   opening?: VerificationOpening;
+  /** Required for the exit experiment's continuous trajectory through the sealed window (v0.4). */
+  sealedOpening?: SealedOpening;
   /**
    * DIAGNOSTIC ONLY, outside the protocol: the peak stop never fires. A `stop_exit` verdict is
    * replaced by what production's ladder answers without it — `risk_off_reduction` under a
@@ -210,7 +213,7 @@ export function runWindow(params: {
   exitRule?: ExitRule;
 }): RunResult {
   const { tape, cfg, policy, window } = params;
-  if (!params.unsafeSyntheticWindow) assertMeasurable(window, params.opening);
+  if (!params.unsafeSyntheticWindow) assertMeasurable(window, params.opening, params.sealedOpening);
   const rule = params.exitRule ?? null;
   if (rule && params.resume) throw new Error('bench engine: an exit rule cannot resume a carried state');
   const stopDisabled = params.diagnosticWithoutStop === true || rule != null;
