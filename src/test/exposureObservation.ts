@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { toRegimeJournal, type AssetRegime, type RegimeJournal } from '../market/regime.js';
-import { prepareTape } from '../calibration/exposure/tape.js';
+import { prepareCalibrationTape } from '../bench/exposure/tape.js';
+import { DEVELOPMENT } from '../bench/exposure/windows.js';
 import { ARMS } from '../calibration/exposure/arms.js';
 import { bandFor, projectOntoBand, readContext } from '../calibration/exposure/controller.js';
 import { canonicalJson } from '../provenance/artefacts.js';
@@ -232,8 +233,9 @@ function windowOf(from: string, to: string): ObservationWindow {
 // ── PROOF 1 — the journal rehydrates into production's own reading ───────────────────
 console.log('Proof 1 — a journaled regime rehydrates into exactly the reading the controller produces:');
 {
-  const { shared } = prepareTape(ROOT);
-  const assets = [...shared.cfg.assets];
+  // The v1.3 calibration tape (v2 parts, five-asset regime). The v1 tape is retired.
+  const shared = prepareCalibrationTape(ROOT, DEVELOPMENT.toMs);
+  const assets = [...shared.tradable];
   // Spread across the whole timeline rather than the first N bars: the interesting points are
   // the ones where hysteresis has flipped a label and where an asset is missing.
   const step = Math.max(1, Math.floor(shared.points.length / 400));
@@ -259,8 +261,9 @@ console.log('Proof 1 — a journaled regime rehydrates into exactly the reading 
 // ── PROOF 2 — the historical bands, used ONLY as a test vector ───────────────────────
 console.log('Proof 2 — the historical bands prove the offline path reproduces the pure functions:');
 {
-  const { shared } = prepareTape(ROOT);
-  const assets = [...shared.cfg.assets];
+  // The v1.3 calibration tape (v2 parts, five-asset regime). The v1 tape is retired.
+  const shared = prepareCalibrationTape(ROOT, DEVELOPMENT.toMs);
+  const assets = [...shared.tradable];
   const step = Math.max(1, Math.floor(shared.points.length / 200));
   let checked = 0;
   let agreed = 0;

@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "bundle_id": "crypto-buddy-exposure-v1",
+  "bundle_id": "crypto-buddy-exposure-v2-core",
   "source": "https://data-api.binance.vision",
   "producer_repository": "github.com/Julinhio/crypto-lab",
   "fetch_start": "2020-01-01T00:00:00.000Z",
   "evaluation_start": "2021-01-01T00:00:00.000Z",
-  "as_of_exclusive": "2026-08-21T00:00:00.000Z",
-  "acquisition_config_sha256": "0b025d7d332abbabc2dc84da2afeab1d3ae4b2f46c2ae23a8548261313825f7a",
+  "as_of_exclusive": "2024-07-01T00:00:00.000Z",
+  "acquisition_config_sha256": "9d6c9e1493b6a51ec6c95385f0a936bac3fe6cb0e7a8b6ae1bb5560c557013e0",
   "producer_source_sha256": "b517acc2aa4f088199cd04612e68b9a9d8b22e5313990d441fb85bda3eba7e84",
   "producer_source_files": [
     {
@@ -42,35 +42,35 @@
       "sha256": "69a16a7484ce5c05fb43e38b1532e78f6431b3baa153282e0db0b7da73b4c1a9"
     }
   ],
-  "generation_git_commit": "6df9a43207f741717ab1cad451a5509b5434e4c1",
+  "generation_git_commit": "ed9bc04a7f150132cd197abff42fec1c6c78f89a",
   "generation_git_commit_authority": "informative only, never a proof of provenance. The bundle is committed together with the manifest and the branch is squash-merged, so this commit does not exist at generation time and changes again on merge. Use producer_source_sha256.",
   "series": [
     {
       "symbol": "BNBUSDT",
       "timeframe": "1d",
       "file": "raw/BNBUSDT-1d.json",
-      "rows": 2424,
+      "rows": 1643,
       "first_open_time": "2020-01-01T00:00:00.000Z",
       "first_close_time": "2020-01-01T23:59:59.999Z",
-      "last_open_time": "2026-08-20T00:00:00.000Z",
-      "last_close_time": "2026-08-20T23:59:59.999Z",
+      "last_open_time": "2024-06-30T00:00:00.000Z",
+      "last_close_time": "2024-06-30T23:59:59.999Z",
       "duplicate_open_times_returned_by_source": 0,
       "duplicates_ok": true,
       "strictly_ordered": true,
       "gap_count": 0,
       "gaps": [],
       "discarded_by_admissibility": 0,
-      "sha256": "bca06b54886e06fe1fdb921c92a31f8b88d3aefb03b1bd6f0b68b90c69776c8c"
+      "sha256": "cba2c66b96d3411cb976df403317f1ee47e54c52d14c7f9beb22decc58265ee8"
     },
     {
       "symbol": "BNBUSDT",
       "timeframe": "4h",
       "file": "raw/BNBUSDT-4h.json",
-      "rows": 14543,
+      "rows": 9857,
       "first_open_time": "2020-01-01T00:00:00.000Z",
       "first_close_time": "2020-01-01T03:59:59.999Z",
-      "last_open_time": "2026-08-20T20:00:00.000Z",
-      "last_close_time": "2026-08-20T23:59:59.999Z",
+      "last_open_time": "2024-06-30T20:00:00.000Z",
+      "last_close_time": "2024-06-30T23:59:59.999Z",
       "duplicate_open_times_returned_by_source": 0,
       "duplicates_ok": true,
       "strictly_ordered": true,
@@ -83,34 +83,34 @@
         }
       ],
       "discarded_by_admissibility": 0,
-      "sha256": "9812f31c8d579c88c98086282d407c3c1c76dca75efdaaab6daa629baf3ef3f9"
+      "sha256": "43b730248fcc8bcdacc39b6ae906804b251539b9296e88164291b0d863af6e31"
     },
     {
       "symbol": "BTCUSDT",
       "timeframe": "1d",
       "file": "raw/BTCUSDT-1d.json",
-      "rows": 2424,
+      "rows": 1643,
       "first_open_time": "2020-01-01T00:00:00.000Z",
       "first_close_time": "2020-01-01T23:59:59.999Z",
-      "last_open_time": "2026-08-20T00:00:00.000Z",
-      "last_close_time": "2026-08-20T23:59:59.999Z",
+      "last_open_time": "2024-06-30T00:00:00.000Z",
+      "last_close_time": "2024-06-30T23:59:59.999Z",
       "duplicate_open_times_returned_by_source": 0,
       "duplicates_ok": true,
       "strictly_ordered": true,
       "gap_count": 0,
       "gaps": [],
       "discarded_by_admissibility": 0,
-      "sha256": "69fdb060618f93126570e0e55d56f4817d73fded124516f8a2e612c14da975cc"
+      "sha256": "c18d30cf47a0405c5f54a921e26e14dff066885bda22674784db3f6d431d5323"
     },
     {
       "symbol": "BTCUSDT",
       "timeframe": "4h",
       "file": "raw/BTCUSDT-4h.json",
-      "rows": 14543,
+      "rows": 9857,
       "first_open_time": "2020-01-01T00:00:00.000Z",
       "first_close_time": "2020-01-01T03:59:59.999Z",
-      "last_open_time": "2026-08-20T20:00:00.000Z",
-      "last_close_time": "2026-08-20T23:59:59.999Z",
+      "last_open_time": "2024-06-30T20:00:00.000Z",
+      "last_close_time": "2024-06-30T23:59:59.999Z",
       "duplicate_open_times_returned_by_source": 0,
       "duplicates_ok": true,
       "strictly_ordered": true,
@@ -123,34 +123,34 @@
         }
       ],
       "discarded_by_admissibility": 0,
-      "sha256": "5edd7bb67fb7b8cb1bbc1cac15f14b2a05dee8f27205eee6994dde834459ca04"
+      "sha256": "d7e528922a68cd6bbdb97399ef6500c35742b4e373474e9ef2bebc801dec835f"
     },
     {
       "symbol": "ETHUSDT",
       "timeframe": "1d",
       "file": "raw/ETHUSDT-1d.json",
-      "rows": 2424,
+      "rows": 1643,
       "first_open_time": "2020-01-01T00:00:00.000Z",
       "first_close_time": "2020-01-01T23:59:59.999Z",
-      "last_open_time": "2026-08-20T00:00:00.000Z",
-      "last_close_time": "2026-08-20T23:59:59.999Z",
+      "last_open_time": "2024-06-30T00:00:00.000Z",
+      "last_close_time": "2024-06-30T23:59:59.999Z",
       "duplicate_open_times_returned_by_source": 0,
       "duplicates_ok": true,
       "strictly_ordered": true,
       "gap_count": 0,
       "gaps": [],
       "discarded_by_admissibility": 0,
-      "sha256": "7cf50dfed737caa0f006afadf3a8a7c56715d2b4dfa41f83c4a76cf1f13db913"
+      "sha256": "d922eaca0e8d50286e6cc544f68864c9ecef572319eb17d6281274187e197328"
     },
     {
       "symbol": "ETHUSDT",
       "timeframe": "4h",
       "file": "raw/ETHUSDT-4h.json",
-      "rows": 14543,
+      "rows": 9857,
       "first_open_time": "2020-01-01T00:00:00.000Z",
       "first_close_time": "2020-01-01T03:59:59.999Z",
-      "last_open_time": "2026-08-20T20:00:00.000Z",
-      "last_close_time": "2026-08-20T23:59:59.999Z",
+      "last_open_time": "2024-06-30T20:00:00.000Z",
+      "last_close_time": "2024-06-30T23:59:59.999Z",
       "duplicate_open_times_returned_by_source": 0,
       "duplicates_ok": true,
       "strictly_ordered": true,
@@ -163,34 +163,34 @@
         }
       ],
       "discarded_by_admissibility": 0,
-      "sha256": "93d747bc368f10f40d496d2182347816fab106aff69603c78535ed8edf0f65a0"
+      "sha256": "8c684a28261fcf922fec86837f9d3136b282c38c7240641e5b5003469fc4e4e7"
     },
     {
       "symbol": "XRPUSDT",
       "timeframe": "1d",
       "file": "raw/XRPUSDT-1d.json",
-      "rows": 2424,
+      "rows": 1643,
       "first_open_time": "2020-01-01T00:00:00.000Z",
       "first_close_time": "2020-01-01T23:59:59.999Z",
-      "last_open_time": "2026-08-20T00:00:00.000Z",
-      "last_close_time": "2026-08-20T23:59:59.999Z",
+      "last_open_time": "2024-06-30T00:00:00.000Z",
+      "last_close_time": "2024-06-30T23:59:59.999Z",
       "duplicate_open_times_returned_by_source": 0,
       "duplicates_ok": true,
       "strictly_ordered": true,
       "gap_count": 0,
       "gaps": [],
       "discarded_by_admissibility": 0,
-      "sha256": "d52655c729d5c7a58d2a96730c97bbd042219899acac646baf590c130176c6bb"
+      "sha256": "b63ca19770846920bf093d0fee63282b4274d8930db6e8264379abc398c6c297"
     },
     {
       "symbol": "XRPUSDT",
       "timeframe": "4h",
       "file": "raw/XRPUSDT-4h.json",
-      "rows": 14543,
+      "rows": 9857,
       "first_open_time": "2020-01-01T00:00:00.000Z",
       "first_close_time": "2020-01-01T03:59:59.999Z",
-      "last_open_time": "2026-08-20T20:00:00.000Z",
-      "last_close_time": "2026-08-20T23:59:59.999Z",
+      "last_open_time": "2024-06-30T20:00:00.000Z",
+      "last_close_time": "2024-06-30T23:59:59.999Z",
       "duplicate_open_times_returned_by_source": 0,
       "duplicates_ok": true,
       "strictly_ordered": true,
@@ -203,8 +203,8 @@
         }
       ],
       "discarded_by_admissibility": 0,
-      "sha256": "a8f020d4928b37f0feb5c5d6d3a02d4b541b3a5efbec36a3a4d5fa912ab88f45"
+      "sha256": "7ae9c9fb198a7d16b4395ae452610b3430640758cf03b45aacc8d77bb4628d32"
     }
   ],
-  "bundle_sha256": "517563c6a9ec9a29eba769049b7154a2a2a2b9c5ce6fd8730dfc019f17e487ce"
+  "bundle_sha256": "1ec86eba76046eca8fc27906d2f7e513a3b3cbce5fcde32facd9d1e258cb6ad2"
 }

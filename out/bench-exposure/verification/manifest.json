@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "kind": "bench-exposure-verification",
+  "freeze_commit": "77e3f70257a784b774a3ad46bfffdc361947e836",
+  "freeze_decisions_sha256": "0da173c7fd41deee00d9885764de16520b3201a433fb2ea5a52f4cdff5d4b16f",
+  "crypto_buddy_commit": "77e3f70257a784b774a3ad46bfffdc361947e836",
+  "crypto_buddy_tree_clean_outside_artefacts": true,
+  "crypto_buddy_src_tree_sha": "70f59b9ad9a2e9c1b4ff9fa27ab8f1182bf86c7e",
+  "crypto_buddy_deps_lock_sha": "eb23e7e378e429f5db0d9689509d22c337c6389f",
+  "regime_version": "r1",
+  "bench_config_sha256": "66eade6d76492c7ab8732a39188005e606ced888ef5abd80ee3baab52d30c47a",
+  "tape_truncated_at": "2024-07-01T00:00:00.000Z",
+  "outputs": [
+    {
+      "file": "summary.json",
+      "sha256": "1316bb7f549e20883538d9b5be643d972cb8d528de79461cc0520cbac52e3b53",
+      "bytes": 45812
+    }
+  ]
+}

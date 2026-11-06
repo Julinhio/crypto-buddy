@@ -22,6 +22,9 @@ import type { Candle } from '../../market/klines.js';
  * There is no degraded mode. A single failed check aborts the run.
  */
 
+/** The PR #36 harness no longer loads anything. See `loadVerifiedBundle`. */
+const RETIRED = true;
+
 /** Where the bundle lives, relative to the repository root. */
 export const BUNDLE_DIR = path.join('data', 'calibration', 'crypto-buddy-exposure-v1');
 
@@ -195,6 +198,17 @@ function readJson(file: string): { bytes: Buffer; value: unknown } {
  * can point at a deliberately corrupted copy without touching the real one.
  */
 export function loadVerifiedBundle(rootDir = process.cwd()): VerifiedBundle {
+  // RETIRED (bench v1.3, protocol v1.3 point 3). The v1 bundle carried the sealed validation
+  // window and this loader built the PR #36 tape over all of it. It now refuses before reading
+  // anything, whatever sits on disk: the v1.3 bench reads the v2 calibration parts through
+  // `src/bench/exposure/bundle.ts`, which refuses any candle opened from 2024-07-01.
+  // The PR #36 figures remain reproducible from history at c10adb9.
+  if (RETIRED) {
+    throw new BundleVerificationError(
+      'the PR #36 harness is retired — it must never run against crypto-buddy-exposure-v1, which ' +
+        'contains the sealed window. Use the v1.3 bench (src/bench/exposure).',
+    );
+  }
   const dir = path.resolve(rootDir, BUNDLE_DIR);
   const manifestPath = path.join(dir, 'manifest.json');
 

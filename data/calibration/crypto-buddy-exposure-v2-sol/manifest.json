@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "bundle_id": "crypto-buddy-exposure-v2-sol",
+  "source": "https://data-api.binance.vision",
+  "producer_repository": "github.com/Julinhio/crypto-lab",
+  "fetch_start": "2020-08-11T04:00:00.000Z",
+  "evaluation_start": "2021-01-01T00:00:00.000Z",
+  "as_of_exclusive": "2024-07-01T00:00:00.000Z",
+  "acquisition_config_sha256": "45bef8d4dd68cce511b64d8c38edd70830f4c4856b572cb8b292072f6c5e562a",
+  "producer_source_sha256": "b517acc2aa4f088199cd04612e68b9a9d8b22e5313990d441fb85bda3eba7e84",
+  "producer_source_files": [
+    {
+      "path": "src/binance-source.mjs",
+      "sha256": "f5db4082ba2823292529766e81c7308b03542455329f8cd1240e108dfac58667"
+    },
+    {
+      "path": "src/candle.mjs",
+      "sha256": "b6e78ba310c318644fa8ee54c5c927ec6e273012c044e9986378766ac993a298"
+    },
+    {
+      "path": "src/exposure-bundle.mjs",
+      "sha256": "1edc385dfddce79732965c96c68bb48e9b267bcbe8f7d20ea13cde70aa6cd18a"
+    },
+    {
+      "path": "src/exposure-config.mjs",
+      "sha256": "f353d4d7df0ac525eb205cdee2b534fa5becfd8ed3f696240e9bb1ca5cd18803"
+    },
+    {
+      "path": "src/klines.mjs",
+      "sha256": "5135926bd3a2091be4166a48dd063ee407e34e46694a7485dcf72fefe3b096d4"
+    },
+    {
+      "path": "src/lib.mjs",
+      "sha256": "63d2c0037b42c7058e0661363f213b16975074235945845c114d00a2107b8d56"
+    },
+    {
+      "path": "src/producer-source.mjs",
+      "sha256": "0d77f877ca5e7c69f23f486db5c357e50f6b698cb65a795cd1242018d0686b98"
+    },
+    {
+      "path": "src/timeframe.mjs",
+      "sha256": "69a16a7484ce5c05fb43e38b1532e78f6431b3baa153282e0db0b7da73b4c1a9"
+    }
+  ],
+  "generation_git_commit": "ed9bc04a7f150132cd197abff42fec1c6c78f89a",
+  "generation_git_commit_authority": "informative only, never a proof of provenance. The bundle is committed together with the manifest and the branch is squash-merged, so this commit does not exist at generation time and changes again on merge. Use producer_source_sha256.",
+  "series": [
+    {
+      "symbol": "SOLUSDT",
+      "timeframe": "1d",
+      "file": "raw/SOLUSDT-1d.json",
+      "rows": 1419,
+      "first_open_time": "2020-08-12T00:00:00.000Z",
+      "first_close_time": "2020-08-12T23:59:59.999Z",
+      "last_open_time": "2024-06-30T00:00:00.000Z",
+      "last_close_time": "2024-06-30T23:59:59.999Z",
+      "duplicate_open_times_returned_by_source": 0,
+      "duplicates_ok": true,
+      "strictly_ordered": true,
+      "gap_count": 0,
+      "gaps": [],
+      "discarded_by_admissibility": 0,
+      "sha256": "96b6654eb40921982b30f96e5b83f5560fd7745b641f373684feed4f786dd846"
+    },
+    {
+      "symbol": "SOLUSDT",
+      "timeframe": "4h",
+      "file": "raw/SOLUSDT-4h.json",
+      "rows": 8519,
+      "first_open_time": "2020-08-11T04:00:00.000Z",
+      "first_close_time": "2020-08-11T07:59:59.999Z",
+      "last_open_time": "2024-06-30T20:00:00.000Z",
+      "last_close_time": "2024-06-30T23:59:59.999Z",
+      "duplicate_open_times_returned_by_source": 0,
+      "duplicates_ok": true,
+      "strictly_ordered": true,
+      "gap_count": 0,
+      "gaps": [],
+      "discarded_by_admissibility": 0,
+      "sha256": "f2d4fbeacbc14f0f565a51213534ed973d1483c8ea19d54bc247cc06e11ae043"
+    }
+  ],
+  "bundle_sha256": "a1eee621bf9941a8acd7f0a7bf5b171477747bc19fa6e01f96b25e3f600415e5"
+}

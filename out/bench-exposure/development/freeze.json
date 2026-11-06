@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "kind": "bench-exposure-candidate-freeze",
+  "protocol": "docs/PROTOCOLE-EXPOSITION-v1.3.md, with the amendments of 17/10 (re-entry; TC44 and qualification)",
+  "source_tree_sha": "70f59b9ad9a2e9c1b4ff9fa27ab8f1182bf86c7e",
+  "deps_lock_sha": "eb23e7e378e429f5db0d9689509d22c337c6389f",
+  "bench_config_sha256": "66eade6d76492c7ab8732a39188005e606ced888ef5abd80ee3baab52d30c47a",
+  "bundles": [
+    {
+      "bundle_id": "crypto-buddy-exposure-v2-core",
+      "bundle_sha256": "1ec86eba76046eca8fc27906d2f7e513a3b3cbce5fcde32facd9d1e258cb6ad2"
+    },
+    {
+      "bundle_id": "crypto-buddy-exposure-v2-sol",
+      "bundle_sha256": "a1eee621bf9941a8acd7f0a7bf5b171477747bc19fa6e01f96b25e3f600415e5"
+    }
+  ],
+  "development_summary_sha256": "5735ae1cd20effa4c13c84f1fc3b2b130b6af79ed42e52308b304ce02edead3c",
+  "candidate": {
+    "name": "SCORE-C-linear",
+    "components": [
+      "trend_sma200",
+      "breadth_net",
+      "taker_buy_7d"
+    ],
+    "weights": "equal (simple mean of z-scores)",
+    "transform": {
+      "kind": "linear",
+      "zAtZeroPercent": -1,
+      "zAtHundredPercent": 1
+    },
+    "rebalance_threshold_points": 20,
+    "risk_off_forces_zero": false,
+    "normalisations": [
+      {
+        "component": "trend_sma200",
+        "mean": 0.05631142904781714,
+        "sd": 0.43206759188095073,
+        "n": 4380
+      },
+      {
+        "component": "breadth_net",
+        "mean": 0.029794520547945205,
+        "sd": 0.6930784962940482,
+        "n": 4380
+      },
+      {
+        "component": "taker_buy_7d",
+        "mean": -0.0031396293999488164,
+        "sd": 0.005325404534894686,
+        "n": 4380
+      }
+    ],
+    "development_mean_exposure_percent": 44.226403268898906
+  },
+  "comparators": {
+    "TC44": {
+      "target_percent": 44.226403,
+      "definition": "constant total target; same basket, caps, stops, re-entry rules, freezes, gate (risk_off seen) and execution as the candidate; a realised shortfall is never compensated"
+    },
+    "descriptive": [
+      "T100",
+      "R100/0",
+      "RPA"
+    ]
+  },
+  "development_reference": {
+    "T100": {
+      "closing_equity": 1418.9015023502818,
+      "bars": 4380
+    },
+    "R100/0": {
+      "closing_equity": 1510.4557670639056,
+      "bars": 4380
+    },
+    "RPA": {
+      "closing_equity": 1863.8594518405255,
+      "bars": 4380
+    },
+    "TC44": {
+      "closing_equity": 1171.4024700297102,
+      "bars": 4380
+    },
+    "SCORE-C-linear": {
+      "closing_equity": 2053.5453639361585,
+      "bars": 4380
+    }
+  },
+  "block_lengths": [
+    {
+      "comparison": "SCORE-C-linear - TC44",
+      "candidate": "SCORE-C-linear",
+      "comparator": "TC44",
+      "decisionalPossible": true,
+      "why": "possible: its admissibility is read on the whole calibration",
+      "developmentDays": 730,
+      "blockLength": 1.5391330547937845,
+      "cutoffLag": 0,
+      "bandwidth": 2
+    },
+    {
+      "comparison": "SCORE-C-linear - T100",
+      "candidate": "SCORE-C-linear",
+      "comparator": "T100",
+      "decisionalPossible": false,
+      "why": "not possible: its continuous drawdown already exceeds 50 % on development, and it enters a verdict only if it respects the limit itself",
+      "developmentDays": 730,
+      "blockLength": 2.6142684568775265,
+      "cutoffLag": 0,
+      "bandwidth": 2
+    },
+    {
+      "comparison": "SCORE-C-linear - R100/0",
+      "candidate": "SCORE-C-linear",
+      "comparator": "R100/0",
+      "decisionalPossible": false,
+      "why": "not possible: non admissible (arbitrated on the development drawdown)",
+      "developmentDays": 730,
+      "blockLength": 1,
+      "cutoffLag": 0,
+      "bandwidth": 2
+    },
+    {
+      "comparison": "SCORE-C-linear - RPA",
+      "candidate": "SCORE-C-linear",
+      "comparator": "RPA",
+      "decisionalPossible": false,
+      "why": "not possible: non admissible (arbitrated on the development drawdown, no exception)",
+      "developmentDays": 730,
+      "blockLength": 1,
+      "cutoffLag": 0,
+      "bandwidth": 2
+    }
+  ],
+  "bootstrap": {
+    "draws": 10000,
+    "seed": 20261101,
+    "one_sided_level": 0.95,
+    "statistic": "mean of the daily log-return difference candidate - comparator, on the window evaluated",
+    "method": "stationary bootstrap (Politis and Romano), circular, geometric blocks of the frozen mean length of that comparison",
+    "lower_bound": "5th percentile of the bootstrap means"
+  },
+  "qualification_rules": {
+    "candidate_max_drawdown_percent_on_calibration": 50,
+    "candidate_top_decile_min_median_exposure_percent": 80,
+    "candidate_top_decile_windows": [
+      "calibration",
+      "verification"
+    ],
+    "tc44_admissibility": "continuous maximum drawdown <= 50 % on the whole calibration [2021-01-01, 2024-07-01)",
+    "tc44_admissible_min_annualised_advantage_points_on_verification": 5,
+    "tc44_confidence_interval": "published, does not eliminate at this stage",
+    "tc44_not_admissible": "the comparison with TC44 is descriptive; the candidate qualifies on its own requirements, with a maximum verdict of \"viable sans comparateur admissible\" in validation",
+    "on_failure": "if the candidate fails any filter, the result is recorded and the bench stops",
+    "sealed_window": "not opened in this cycle, whatever the result",
+    "text": [
+      "F1: the candidate continuous maximum drawdown on the whole calibration is <= 50 %",
+      "F2: the candidate median realised exposure in its top conviction decile is >= 80 %, on the whole calibration AND separately on the internal verification (score at the close of t, exposure at the close of t+1)",
+      "F3: TC44 is admissible if its continuous maximum drawdown on the whole calibration is <= 50 %",
+      "F4: if TC44 is admissible, the candidate qualifies only if its annualised net return on the internal verification exceeds TC44 by at least 5 points; the bootstrap interval is published and does not eliminate",
+      "F4bis: if TC44 is not admissible, the comparison is descriptive and the candidate qualifies on F1 and F2, with a maximum verdict in validation of \"viable sans comparateur admissible\""
+    ]
+  },
+  "verdict_rules": [
+    "protocol v1.3, point 10: admissibility first; decisional comparisons only between admissible policies; T100 enters a verdict only if it respects 50 % itself",
+    "verdicts: preuve forte, avantage pratique, viable sans comparateur admissible, non retenue, as written in the protocol",
+    "no adjustment of parameter, rule, variant or comparator after the internal verification is read, whatever the results"
+  ],
+  "decisions_sha256": "0da173c7fd41deee00d9885764de16520b3201a433fb2ea5a52f4cdff5d4b16f"
+}
