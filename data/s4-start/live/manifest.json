@@ -1,0 +1,18 @@
+{
+  "kind": "s4-start-live-candles",
+  "source": "https://data-api.binance.vision",
+  "from": "2026-05-20T00:00:00.000Z",
+  "as_of_exclusive": "2026-11-14T20:00:00.000Z",
+  "files_sha256": {
+    "BNBUSDT-1d.json": "9bf722956b5d13bd4023b6918244020b624276314cfbf60d9a28a95f8a5630ff",
+    "BNBUSDT-4h.json": "9b8c0ab3a81e2a3b377831d38ca889d58471597e8a0363f850e7a2d5bf47c067",
+    "BTCUSDT-1d.json": "14d7e06e56602162af044e616d2409a628409e0b8a19d1da4cbc6c404a942dbb",
+    "BTCUSDT-4h.json": "ca27ed25d1579dff632c4ae4262bdb993f74784b1c27adcbb587b335044870f1",
+    "ETHUSDT-1d.json": "25c19800dbc28e2cd0149d4f723a2ff78f1cd99369cdbfb99f4401d29d543908",
+    "ETHUSDT-4h.json": "f937a6d7276e1b2ad756dcd5be4aed8d3b4a125d011c32f34095cd5dd3e30f5e",
+    "SOLUSDT-1d.json": "6b0649d7a7fd6205cf36ceb3b1e31563b6edd1aeec6b0eefab24eb4e73b00fbb",
+    "SOLUSDT-4h.json": "379bfebf6b653eb9c02339727ec7a95977c422fc88e19360a77a71d33b0c0945",
+    "XRPUSDT-1d.json": "2a61188e01f645c643a72897f8aff5717e79258f910aa4bdf68cb9797d5da87b",
+    "XRPUSDT-4h.json": "463e190a9aa9aaf3a79cea93d3d0f6ec76194182808538d8c3de4a7cb34d7816"
+  }
+}

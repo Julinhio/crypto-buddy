@@ -78,3 +78,8 @@ out/guard-band-incident/
 # cycles (targets, references, book) and the exact notifications, regenerable from the same
 # journals at any time.
 out/activity-attribution/
+
+# Start-conditions study (`npm run bench:start`): the per-process partial results, merged and
+# removed at the end of a run. `summary.json`, `weekly.json`, `pilot.json` and `tables.md` ARE
+# committed — they are what the report's figures and tables are drawn from.
+out/bench-start/.shards/

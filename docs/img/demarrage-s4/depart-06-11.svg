@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 470" width="1040" height="470" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" role="img" aria-label="Un départ le 06/11/2026, selon la façon de démarrer">
+<rect width="1040" height="470" fill="#fcfcfb"/>
+<text x="24" y="34" font-size="18" font-weight="600" fill="#0b0b0b">Un départ le 06/11/2026, selon la façon de démarrer</text>
+<text x="24" y="56" font-size="13" fill="#52514e">1 000 $ de cash le 06/11 à 08:00 UTC, premiers achats à 12:00 UTC. Capital à chaque clôture 4h, frais compris.</text>
+<line x1="24" y1="78" x2="42" y2="78" stroke="#2a78d6" stroke-width="3" stroke-linecap="round"/>
+<text x="48" y="82" font-size="12" fill="#52514e">A · en position</text>
+<line x1="171" y1="78" x2="189" y2="78" stroke="#eb6834" stroke-width="3" stroke-linecap="round"/>
+<text x="195" y="82" font-size="12" fill="#52514e">B · trajectoire continue</text>
+<line x1="377.4" y1="78" x2="395.4" y2="78" stroke="#1baf7a" stroke-width="3" stroke-linecap="round"/>
+<text x="401.4" y="82" font-size="12" fill="#52514e">B' · continue, depuis du cash</text>
+<line x1="616.8" y1="78" x2="634.8" y2="78" stroke="#eda100" stroke-width="3" stroke-linecap="round"/>
+<text x="640.8" y="82" font-size="12" fill="#52514e">C1 · hors marché armé, sans attente</text>
+<line x1="24" y1="98" x2="42" y2="98" stroke="#e87ba4" stroke-width="3" stroke-linecap="round"/>
+<text x="48" y="102" font-size="12" fill="#52514e">C2 · hors marché armé, 10 jours</text>
+<line x1="276.6" y1="98" x2="294.6" y2="98" stroke="#a3a29b" stroke-width="2" stroke-linecap="round"/>
+<text x="300.6" y="102" font-size="12" fill="#52514e">Panier conservé sans rien faire</text>
+<line x1="70" y1="389.9" x2="870" y2="389.9" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62" y="393.9" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">850 $</text>
+<line x1="70" y1="302.6" x2="870" y2="302.6" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62" y="306.6" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">900 $</text>
+<line x1="70" y1="215.3" x2="870" y2="215.3" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62" y="219.3" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">950 $</text>
+<line x1="70" y1="128.0" x2="870" y2="128.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62" y="132.0" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">1000 $</text>
+<line x1="70" y1="418" x2="870" y2="418" stroke="#c3c2b7" stroke-width="1"/>
+<line x1="118.0" y1="418" x2="118.0" y2="423" stroke="#c3c2b7" stroke-width="1"/>
+<text x="118.0" y="437" font-size="11" fill="#898781" text-anchor="middle">07/11</text>
+<line x1="214.0" y1="418" x2="214.0" y2="423" stroke="#c3c2b7" stroke-width="1"/>
+<text x="214.0" y="437" font-size="11" fill="#898781" text-anchor="middle">08/11</text>
+<line x1="310.0" y1="418" x2="310.0" y2="423" stroke="#c3c2b7" stroke-width="1"/>
+<text x="310.0" y="437" font-size="11" fill="#898781" text-anchor="middle">09/11</text>
+<line x1="406.0" y1="418" x2="406.0" y2="423" stroke="#c3c2b7" stroke-width="1"/>
+<text x="406.0" y="437" font-size="11" fill="#898781" text-anchor="middle">10/11</text>
+<line x1="502.0" y1="418" x2="502.0" y2="423" stroke="#c3c2b7" stroke-width="1"/>
+<text x="502.0" y="437" font-size="11" fill="#898781" text-anchor="middle">11/11</text>
+<line x1="598.0" y1="418" x2="598.0" y2="423" stroke="#c3c2b7" stroke-width="1"/>
+<text x="598.0" y="437" font-size="11" fill="#898781" text-anchor="middle">12/11</text>
+<line x1="694.0" y1="418" x2="694.0" y2="423" stroke="#c3c2b7" stroke-width="1"/>
+<text x="694.0" y="437" font-size="11" fill="#898781" text-anchor="middle">13/11</text>
+<line x1="790.0" y1="418" x2="790.0" y2="423" stroke="#c3c2b7" stroke-width="1"/>
+<text x="790.0" y="437" font-size="11" fill="#898781" text-anchor="middle">14/11</text>
+<text x="470" y="456" font-size="12" fill="#52514e" text-anchor="middle">Clôtures 4h, novembre 2026 (UTC)</text>
+<path d="M70.0 128.0 L86.0 138.4 L102.0 138.5 L118.0 139.8 L134.0 141.6 L150.0 136.2 L166.0 137.8 L182.0 145.0 L198.0 142.9 L214.0 141.2 L230.0 141.7 L246.0 137.9 L262.0 138.4 L278.0 139.7 L294.0 144.5 L310.0 193.8 L326.0 189.6 L342.0 220.5 L358.0 208.9 L374.0 180.5 L390.0 195.9 L406.0 188.0 L422.0 201.6 L438.0 197.6 L454.0 211.1 L470.0 251.8 L486.0 240.3 L502.0 235.2 L518.0 231.2 L534.0 227.5 L550.0 231.8 L566.0 222.7 L582.0 220.8 L598.0 234.0 L614.0 237.4 L630.0 242.5 L646.0 261.1 L662.0 281.3 L678.0 277.3 L694.0 276.1 L710.0 335.6 L726.0 335.9 L742.0 320.1 L758.0 332.5 L774.0 322.7 L790.0 342.2 L806.0 376.9 L822.0 372.1 L838.0 364.9 L854.0 408.2 L870.0 418.0" fill="none" stroke="#a3a29b" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M70.0 128.0 L86.0 138.4 L102.0 138.5 L118.0 139.8 L134.0 141.6 L150.0 136.2 L166.0 137.8 L182.0 145.0 L198.0 142.9 L214.0 141.2 L230.0 141.7 L246.0 137.9 L262.0 138.4 L278.0 139.7 L294.0 144.5 L310.0 193.8 L326.0 189.6 L342.0 220.5 L358.0 208.9 L374.0 180.5 L390.0 195.9 L406.0 188.0 L422.0 201.6 L438.0 197.6 L454.0 211.1 L470.0 251.8 L486.0 240.3 L502.0 235.2 L518.0 231.2 L534.0 227.5 L550.0 231.8 L566.0 222.7 L582.0 220.8 L598.0 234.0 L614.0 237.4 L630.0 242.5 L646.0 261.1 L662.0 281.3 L678.0 277.3 L694.0 276.1 L710.0 335.6 L726.0 335.9 L742.0 320.1 L758.0 332.5 L774.0 322.7 L790.0 342.2 L806.0 376.9 L822.0 372.1 L838.0 364.9 L854.0 408.2 L870.0 418.0" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M70.0 128.0 L86.0 135.8 L102.0 135.5 L118.0 135.2 L134.0 133.0 L150.0 130.9 L166.0 131.9 L182.0 136.1 L198.0 134.6 L214.0 133.4 L230.0 133.5 L246.0 130.2 L262.0 131.0 L278.0 130.2 L294.0 134.0 L310.0 174.9 L326.0 174.4 L342.0 187.7 L358.0 180.2 L374.0 167.8 L390.0 174.1 L406.0 168.8 L422.0 175.9 L438.0 172.8 L454.0 177.2 L470.0 192.0 L486.0 191.0 L502.0 185.9 L518.0 184.8 L534.0 183.1 L550.0 184.0 L566.0 182.6 L582.0 178.6 L598.0 184.7 L614.0 186.9 L630.0 190.1 L646.0 200.3 L662.0 214.5 L678.0 214.0 L694.0 215.1 L710.0 245.5 L726.0 250.0 L742.0 239.9 L758.0 245.7 L774.0 242.2 L790.0 251.9 L806.0 253.1 L822.0 253.1 L838.0 253.1 L854.0 253.1 L870.0 253.1" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M70.0 128.0 L86.0 135.8 L102.0 135.5 L118.0 135.2 L134.0 133.0 L150.0 130.9 L166.0 131.9 L182.0 136.1 L198.0 134.6 L214.0 133.4 L230.0 133.5 L246.0 130.2 L262.0 131.0 L278.0 130.2 L294.0 134.0 L310.0 174.9 L326.0 170.2 L342.0 195.3 L358.0 183.0 L374.0 161.9 L390.0 172.9 L406.0 166.0 L422.0 178.3 L438.0 174.9 L454.0 184.7 L470.0 217.3 L486.0 211.1 L502.0 203.9 L518.0 200.4 L534.0 196.9 L550.0 201.0 L566.0 194.9 L582.0 190.2 L598.0 201.9 L614.0 204.3 L630.0 208.5 L646.0 225.9 L662.0 243.6 L678.0 240.9 L694.0 241.5 L710.0 293.4 L726.0 297.9 L742.0 281.6 L758.0 293.5 L774.0 285.2 L790.0 301.0 L806.0 331.2 L822.0 324.7 L838.0 320.2 L854.0 358.4 L870.0 364.2" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M70.0 128.0 L86.0 128.0 L102.0 128.0 L118.0 128.0 L134.0 128.0 L150.0 128.0 L166.0 128.0 L182.0 128.0 L198.0 128.0 L214.0 128.0 L230.0 128.0 L246.0 128.0 L262.0 128.0 L278.0 128.0 L294.0 128.0 L310.0 128.0 L326.0 128.0 L342.0 128.0 L358.0 128.0 L374.0 128.0 L390.0 128.0 L406.0 128.0 L422.0 128.0 L438.0 128.0 L454.0 128.0 L470.0 128.0 L486.0 128.0 L502.0 128.0 L518.0 128.0 L534.0 128.0 L550.0 128.0 L566.0 128.0 L582.0 128.0 L598.0 128.0 L614.0 128.0 L630.0 128.0 L646.0 128.0 L662.0 128.0 L678.0 128.0 L694.0 128.0 L710.0 128.0 L726.0 128.0 L742.0 128.0 L758.0 128.0 L774.0 128.0 L790.0 128.0 L806.0 128.0 L822.0 128.0 L838.0 128.0 L854.0 128.0 L870.0 128.0" fill="none" stroke="#eda100" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M70.0 128.0 L86.0 128.0 L102.0 128.0 L118.0 128.0 L134.0 128.0 L150.0 128.0 L166.0 128.0 L182.0 128.0 L198.0 128.0 L214.0 128.0 L230.0 128.0 L246.0 128.0 L262.0 128.0 L278.0 128.0 L294.0 128.0 L310.0 128.0 L326.0 128.0 L342.0 128.0 L358.0 128.0 L374.0 128.0 L390.0 128.0 L406.0 128.0 L422.0 128.0 L438.0 128.0 L454.0 128.0 L470.0 128.0 L486.0 128.0 L502.0 128.0 L518.0 128.0 L534.0 128.0 L550.0 128.0 L566.0 128.0 L582.0 128.0 L598.0 128.0 L614.0 128.0 L630.0 128.0 L646.0 128.0 L662.0 128.0 L678.0 128.0 L694.0 128.0 L710.0 128.0 L726.0 128.0 L742.0 128.0 L758.0 128.0 L774.0 128.0 L790.0 128.0 L806.0 128.0 L822.0 128.0 L838.0 128.0 L854.0 128.0 L870.0 128.0" fill="none" stroke="#e87ba4" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="870.0" cy="128.0" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<line x1="875.0" y1="128.0" x2="884.0" y2="120.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="887.0" y="124.0" font-size="11" fill="#52514e">C1 1000 $</text>
+<circle cx="870.0" cy="128.0" r="4" fill="#e87ba4" stroke="#fcfcfb" stroke-width="2"/>
+<line x1="875.0" y1="128.0" x2="884.0" y2="134.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="887.0" y="138.0" font-size="11" fill="#52514e">C2 1000 $</text>
+<circle cx="870.0" cy="253.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<line x1="875.0" y1="253.1" x2="884.0" y2="239.1" stroke="#c3c2b7" stroke-width="1"/>
+<text x="887.0" y="243.1" font-size="11" fill="#52514e">B 928 $</text>
+<circle cx="870.0" cy="364.2" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<line x1="875.0" y1="364.2" x2="884.0" y2="350.2" stroke="#c3c2b7" stroke-width="1"/>
+<text x="887.0" y="354.2" font-size="11" fill="#52514e">B' 865 $</text>
+<circle cx="870.0" cy="418.0" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<line x1="875.0" y1="418.0" x2="884.0" y2="404.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="887.0" y="408.0" font-size="11" fill="#52514e">A 834 $</text>
+<circle cx="870.0" cy="418.0" r="4" fill="#a3a29b" stroke="#fcfcfb" stroke-width="2"/>
+<line x1="875.0" y1="418.0" x2="884.0" y2="418.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="887.0" y="422.0" font-size="11" fill="#52514e">Panier conservé 834 $</text>
+</svg>
