@@ -1,6 +1,6 @@
 # S4 en production (pilote testnet) — exploitation
 
-Depuis le 06/11/2026, S4 décide seul de l'état cible du portefeuille. S4 est la règle validée par le protocole de sortie v0.4 (gel `f2cc048`, « Go pilote testnet »). Le modèle n'écrit plus que l'explication Telegram d'un mouvement déjà exécuté.
+Depuis le 06/11/2026, S4 décide seul de l'état cible du portefeuille. S4 est la règle validée par le protocole de sortie v0.4 (gel `f2cc048`, « Go pilote testnet »). Depuis le 14/11/2026, plus aucun modèle n'intervient : le motif Telegram d'un mouvement est écrit par le code (voir « Ce que le bot affiche »).
 
 ## Ce qui tourne
 
@@ -17,6 +17,20 @@ Depuis le 06/11/2026, S4 décide seul de l'état cible du portefeuille. S4 est l
   - porte de transition aveugle au risk_off global, stop de 10 % neutralisé ;
   - une sortie S4 passe un gel, un rachat l'attend ;
   - plancher de 2 % et rééquilibrage de dérive dans `planMovements`.
+
+## Ce que le bot affiche
+
+Trois affichages, tous construits par le code à partir de valeurs enregistrées (chantier du 14/11/2026).
+
+- **Notification d'un mouvement.** Chaque mouvement porte son motif, écrit par `formatS4Motif` (`src/s4/motif.ts`) :
+  - la cause est celle que le cycle attribue (`s4MoveReason`) : transition initiale, sortie S4, rachat S4 ou rééquilibrage ;
+  - les valeurs sont celles de la clôture qui a décidé, telles que le journal `s4_close_decisions` les a enregistrées. Exemple : « BTC vendu : clôture 68 314 sous le seuil de sortie 69 296 (20 % sous le plus-haut 86 620). »
+  - un mouvement qui exécute une décision prise par un cycle précédent (ordre non rempli, rachat qui attendait un gel) relit le journal après le cycle et nomme la clôture qui a décidé ;
+  - si le journal ne peut pas être relu, le motif le dit. Aucun chiffre n'est jamais reconstitué.
+- **Bilan du jour.** Une ligne « Pilote S4 (depuis le …) » mesurée depuis `s4_pilot.starting_equity_usd`, et une ligne « Historique (base …$) » mesurée depuis `bot_state.starting_capital_usd`. Le capital indique l'heure de sa valorisation : c'est la photo du dernier cycle, qui peut dater de quatre heures. Une lecture en échec est retentée une fois, puis la ligne affiche « indisponible (lecture en échec) », distinct de « pas de photo de référence ».
+- **Photo du portefeuille** (`equity_snapshots`). La photo d'un cycle est le portefeuille après ses ordres et leurs frais (`photoBookOf`). Le portefeuille d'avant les ordres reste dans la ligne de décision (`market_context.book`). Les photos écrites avant le 14/11/2026 montrent le portefeuille d'avant les ordres de leur cycle ; elles n'ont pas été réécrites.
+
+`npm run replay:display` rejoue ces trois affichages sur les valeurs enregistrées en base, en lecture seule (par défaut les cycles 3278, 3293 et 3323).
 
 ## Coupe-circuit
 

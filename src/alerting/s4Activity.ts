@@ -2,35 +2,31 @@ import type { VirtualPortfolio } from '../portfolio/derive.js';
 import type { S4Line, S4MoveReason } from '../s4/core.js';
 import { S4_TRAILING_STOP_PERCENT } from '../s4/core.js';
 import type { S4Report } from '../s4/cycle.js';
+import { decidingFromEvent, formatS4Motif, type S4DecidingClose, type S4MotifFacts } from '../s4/motif.js';
 import { formatAllocation, orderedAllocation, type AllocationSlice } from './allocation.js';
 
 /**
- * THE S4 MOVEMENT NOTIFICATION — facts first, prose second.
+ * THE S4 MOVEMENT NOTIFICATION — what moved, and WHY, both written by the code.
  *
  * The cycle has already decided, booked and sent its orders when this is prepared: it reads the
- * cycle's report and nothing else. The explanation is produced in `beat.ts`, AFTER the cycle and
- * outside its timeout, by `explainS4` (the model, when it answers) or by `fallbackExplanation`
- * (the code, always). Nothing here can delay or change a movement.
+ * cycle's report and nothing else. Nothing here can delay or change a movement.
+ *
+ * NO MODEL (chantier du 14/11/2026). Until then a model wrote the explanation from facts the code
+ * handed it, and on 14/11 it gave a cause that was not the rule's (see `s4/motif.ts`). The motif
+ * of each movement is now `formatS4Motif`: the cause the cycle attributed, with the values the
+ * deciding close recorded. A paraphrase on top of it could add no fact and could only bring a
+ * wrong cause back, so there is none.
+ *
+ * Two steps, because one of them may need a read:
+ *   - `prepareS4Notification` (pure, called by the heartbeat) takes everything the cycle already
+ *     holds — including the deciding close when THIS cycle consumed it;
+ *   - `completeS4Notification` (called by `beat.ts`, after the run-lock is released) reads the
+ *     journal for a movement whose decision was taken by an EARLIER cycle: an exit whose order
+ *     did not fill, a rebuy that waited for a freeze to lift.
  */
 
-export interface S4MovementFacts {
-  asset: string;
-  side: 'buy' | 'sell';
+export interface S4MovementFacts extends S4MotifFacts {
   usd: number;
-  reason: S4MoveReason;
-  status: 'in' | 'out';
-  /** The daily close S4 last read for this asset, and its 50-day mean. */
-  close: number | null;
-  sma50: number | null;
-  /** In market: the high since entry and the exit threshold under it. */
-  high: number | null;
-  exitThreshold: number | null;
-  entryDate: string | null;
-  /** Out of market: the exit close and the days spent out. */
-  exitDate: string | null;
-  daysOut: number | null;
-  armed: boolean;
-  targetPercent: number | null;
 }
 
 export interface S4Notification {
@@ -44,37 +40,57 @@ export interface S4Notification {
   totalUsd: number;
 }
 
-const DAY_MS = 86_400_000;
-const day = (ms: number | null): string | null => (ms == null ? null : new Date(ms).toISOString().slice(0, 10));
+/**
+ * The close a movement executes the decision of — the key of its journal row. An exit is keyed
+ * by the line's exit close; a rebuy by the close that let the line back in, which the rule
+ * stamps on the line (`lastMoveAtMs`) and which stays there until the buy fills.
+ */
+function decidingCloseOf(reason: S4MoveReason, line: S4Line | undefined): number | null {
+  if (line == null) return null;
+  if (reason === 'sortie_s4') return line.status === 'out' ? line.exitAtMs : null;
+  if (reason === 'rachat_s4') return line.lastMoveReason === 'rachat_s4' ? line.lastMoveAtMs : null;
+  return null;
+}
 
-/** Null when nothing moved and nothing was withheld: no message, and no model call. */
+/** Null when nothing moved and nothing was withheld: no message at all. */
 export function prepareS4Notification(report: S4Report, after: VirtualPortfolio | null, timestamp: string): S4Notification | null {
   if (report.movements.length === 0 && report.withheld.length === 0) return null;
   if (after == null) return null;
-  const lineOf = new Map<string, S4Line>(report.lines.map((l) => [l.asset, l]));
-  const lastEvent = new Map<string, { close: number; sma50: number; closeMs: number }>();
-  for (const e of report.events) lastEvent.set(e.asset, { close: e.close, sma50: e.sma50, closeMs: e.closeMs });
-  const targetOf = new Map(report.plan.map((p) => [p.asset, p.targetPercent]));
+  // The line as the decision row recorded it, BEFORE the fills: an exit's key is its exit close,
+  // and the post-fill line has already lost the entry a rebuy's key is read from.
+  const lineOf = new Map<string, S4Line>(report.linesAtDecision.map((l) => [l.asset, l]));
+  const lineBefore = new Map<string, S4Line>(report.linesBefore.map((l) => [l.asset, l]));
+  const planOf = new Map(report.plan.map((p) => [p.asset, p]));
   const stop = 1 - S4_TRAILING_STOP_PERCENT / 100;
+
+  const decidingInCycle = (asset: string, kind: 'exit' | 'rebuy', closeMs: number): S4DecidingClose | null => {
+    const event = report.events.find((e) => e.asset === asset && e.kind === kind && e.closeMs === closeMs);
+    if (!event) return null;
+    // A rebuy's days out run from the exit close: an exit decided earlier in this same catch-up,
+    // else the exit the line carried when the cycle started.
+    const exitInCycle = report.events.filter((e) => e.asset === asset && e.kind === 'exit' && e.closeMs < closeMs).at(-1);
+    return decidingFromEvent(event, exitInCycle?.closeMs ?? lineBefore.get(asset)?.exitAtMs ?? null);
+  };
+
   const movements: S4MovementFacts[] = report.movements.map((m) => {
     const line = lineOf.get(m.asset);
-    const ev = lastEvent.get(m.asset) ?? null;
-    const atMs = ev?.closeMs ?? null;
+    const plan = planOf.get(m.asset);
+    const decidingCloseMs = decidingCloseOf(m.reason, line);
+    const kind = m.reason === 'sortie_s4' ? 'exit' : 'rebuy';
     return {
       asset: m.asset,
       side: m.side,
       usd: m.usd,
       reason: m.reason,
-      status: line?.status ?? 'in',
-      close: ev?.close ?? null,
-      sma50: ev?.sma50 ?? null,
+      decidingCloseMs,
+      deciding: decidingCloseMs != null ? decidingInCycle(m.asset, kind, decidingCloseMs) : null,
+      decidedThisCycle: decidingCloseMs != null && report.closesDecided.includes(decidingCloseMs),
+      lineStatus: line?.status ?? 'in',
       high: line?.status === 'in' ? line.high : null,
       exitThreshold: line?.status === 'in' && line.high != null ? line.high * stop : null,
-      entryDate: line?.status === 'in' ? day(line.entryAtMs) : null,
-      exitDate: line?.status === 'out' ? day(line.exitAtMs) : null,
-      daysOut: line?.status === 'out' && line.exitAtMs != null && atMs != null ? Math.floor((atMs - line.exitAtMs) / DAY_MS) : null,
-      armed: line?.armed ?? false,
-      targetPercent: targetOf.get(m.asset) ?? null,
+      exitAtMs: line?.status === 'out' ? line.exitAtMs : null,
+      currentPercent: plan?.currentPercent ?? null,
+      targetPercent: plan?.targetPercent ?? null,
     };
   });
   const equityPositive = after.equity.gt(0);
@@ -93,30 +109,35 @@ export function prepareS4Notification(report: S4Report, after: VirtualPortfolio 
   };
 }
 
-const fmtUsd = (v: number): string => `${v.toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} $`;
-const fmtPrice = (v: number): string => v.toLocaleString('fr-FR', { maximumFractionDigits: v >= 100 ? 0 : 4 });
-const ofAsset = (asset: string): string => ('AEIOU'.includes(asset[0] ?? '') ? `d'${asset}` : `de ${asset}`);
+/** Reads one deciding close from the journal. Null = not on record, or the read failed. */
+export type DecidingCloseReader = (asset: string, kind: 'exit' | 'rebuy', closeMs: number) => Promise<S4DecidingClose | null>;
 
-/** The explanation the CODE writes — sent whenever the model does not answer in time. */
-export function fallbackExplanation(n: S4Notification): string {
-  const parts = n.movements.map((m) => {
-    switch (m.reason) {
-      case 'transition_initiale':
-        return m.status === 'out'
-          ? `${m.asset} est hors marché pour S4 depuis le ${m.exitDate} : sa part reste en cash`
-          : `${m.asset} est en marché pour S4 (plus-haut ${m.high != null ? fmtPrice(m.high) : '—'}, sortie sous ${m.exitThreshold != null ? fmtPrice(m.exitThreshold) : '—'}) : la ligne rejoint sa cible de ${m.targetPercent?.toFixed(1) ?? '—'} %`;
-      case 'sortie_s4':
-        return `${m.asset} a clôturé à ${m.close != null ? fmtPrice(m.close) : '—'}, au moins ${S4_TRAILING_STOP_PERCENT} % sous son plus-haut depuis l'entrée : S4 sort entièrement la ligne, sa part reste en cash`;
-      case 'rachat_s4':
-        return `${m.asset} est resté au moins 10 jours hors marché puis a reclôturé au-dessus de sa moyenne 50 jours (${m.close != null ? fmtPrice(m.close) : '—'} contre ${m.sma50 != null ? fmtPrice(m.sma50) : '—'}) : S4 le rachète`;
-      default:
-        return `${m.asset} est ramené vers sa cible de ${m.targetPercent?.toFixed(1) ?? '—'} % après une dérive de plus de 2 %`;
-    }
-  });
-  return `${parts.join('. ')}.`;
+/**
+ * Fills, from the journal, the deciding close of every exit or rebuy that this cycle executed
+ * without having decided it. Best-effort and TOTAL: a read that fails or throws leaves the
+ * movement without its values, and the motif then says they were not read — the notification
+ * leaves either way, and never with a number nobody recorded.
+ */
+export async function completeS4Notification(n: S4Notification, read: DecidingCloseReader): Promise<S4Notification> {
+  const movements = await Promise.all(
+    n.movements.map(async (m): Promise<S4MovementFacts> => {
+      if (m.deciding != null || m.decidingCloseMs == null) return m;
+      if (m.reason !== 'sortie_s4' && m.reason !== 'rachat_s4') return m;
+      try {
+        return { ...m, deciding: await read(m.asset, m.reason === 'sortie_s4' ? 'exit' : 'rebuy', m.decidingCloseMs) };
+      } catch (err) {
+        console.warn(`[warn] s4 notification: deciding close of ${m.asset} not read (${err instanceof Error ? err.message : String(err)}) — best-effort.`);
+        return m;
+      }
+    }),
+  );
+  return { ...n, movements };
 }
 
-export function formatS4Activity(n: S4Notification, explanation: string): string {
+const fmtUsd = (v: number): string => `${v.toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} $`;
+const ofAsset = (asset: string): string => ('AEIOU'.includes(asset[0] ?? '') ? `d'${asset}` : `de ${asset}`);
+
+export function formatS4Activity(n: S4Notification): string {
   const time = (() => {
     const d = new Date(n.timestamp);
     return Number.isFinite(d.getTime()) ? `${String(d.getUTCHours()).padStart(2, '0')}h${String(d.getUTCMinutes()).padStart(2, '0')}` : '—';
@@ -128,7 +149,8 @@ export function formatS4Activity(n: S4Notification, explanation: string): string
   }
   if (n.movements.length > 0) {
     lines.push('');
-    lines.push(explanation.trim());
+    if (n.firstCycle) lines.push('Premier cycle du pilote : le portefeuille rejoint l\'état S4.');
+    for (const m of n.movements) lines.push(formatS4Motif(m));
   }
   lines.push('');
   lines.push(`Allocation : ${formatAllocation(n.allocation)}`);

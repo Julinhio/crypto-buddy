@@ -63,10 +63,11 @@ export interface CycleOutcome {
   /** Did this cycle see the market? See MarketDataState — 'unknown' is meaningful. */
   marketData: MarketDataState;
   /**
-   * The equity photo to write best-effort AFTER the verdict is sealed. PREPARED
-   * here (pure, no I/O — safe inside the timed wrapper) but WRITTEN outside it, so
-   * the stall-capable write can never lose the timeout race. Null when the wake-up
-   * warrants none (skipped) or the cycle didn't return a valued book (timeout/throw).
+   * The equity photo to write best-effort AFTER the verdict is sealed — the book AFTER
+   * the cycle's orders and their fees (see `photoBookOf`). PREPARED here (pure, no I/O —
+   * safe inside the timed wrapper) but WRITTEN outside it, so the stall-capable write can
+   * never lose the timeout race. Null when the wake-up warrants none (skipped) or the
+   * cycle didn't return a valued book (timeout/throw).
    */
   equitySnapshot: EquitySnapshotInsert | null;
   /**
@@ -142,7 +143,7 @@ export async function runCycleWithTimeout(
       marketData: raced.marketData,
       // PURE prepare only (object mapping, no I/O). The WRITE happens outside this
       // raced promise (beat.ts / CLI), so it can never weigh on the verdict above.
-      equitySnapshot: prepareEquitySnapshot(raced.status, raced.decisionId, raced.portfolio),
+      equitySnapshot: prepareEquitySnapshot(raced.status, raced.decisionId, photoBookOf(raced)),
       // Relayed, not re-derived. decide() classified it once, at the only place that held
       // the real error object; this file just carries the structure to the scheduler.
       llmFailure: raced.llmFailure,
@@ -168,6 +169,26 @@ export async function runCycleWithTimeout(
     // keep the event loop alive long after the cycle finished.
     if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * THE BOOK A CYCLE'S PHOTO SHOWS: the one it LEFT, after its orders and their fees.
+ *
+ * Until 14/11/2026 the photo was taken on `portfolio`, the book the cycle read before trading.
+ * On a cycle that traded it therefore showed lines already sold and a capital that did not yet
+ * carry the fees: cycle 3323 sold all of BTC and BNB and its photo still held both, at 961,49 $,
+ * while the next cycle's read 961,00 $, all cash. Everything that reads the photo as "what the
+ * bot holds after this wake-up" — the dashboard's drill-down says so in words, the daily summary
+ * takes its capital from it — was one cycle late on every trade.
+ *
+ * `portfolioAfter` is the same derivation over the ledger PLUS the legs this cycle booked, valued
+ * at the same prices; it IS `portfolio` when nothing was booked. The pre-trade book is not lost:
+ * the decision row keeps it (`market_context.book`). A result that carries no post-trade book
+ * (a path that returned before the orders) falls back to the book it read, which is then also
+ * the book it left.
+ */
+export function photoBookOf(result: Pick<CycleResult, 'portfolio' | 'portfolioAfter'>): CycleResult['portfolio'] {
+  return result.portfolioAfter ?? result.portfolio;
 }
 
 /** A cycle run plus whether it SETTLED (returned/threw → no orphan) and the full result. */

@@ -50,6 +50,11 @@ const n8 = (d: Decimal): number => Number(d.toFixed(8));
  * Projects the already-derived virtual portfolio into a snapshot row. Pure: it
  * reuses the existing derivation's output (equity, cash, valued positions) — no
  * re-derivation, no second source of prices, no parallel accounting.
+ *
+ * WHICH book is the caller's choice, and since 14/11/2026 it is the book the cycle LEFT —
+ * after its orders and their fees (`photoBookOf`, scheduler/cycleGuard.ts) — valued at the
+ * prices the cycle read. Photos written before that date show the book BEFORE the orders
+ * of their own cycle; they were not rewritten.
  */
 export function buildEquitySnapshot(
   decisionId: number,

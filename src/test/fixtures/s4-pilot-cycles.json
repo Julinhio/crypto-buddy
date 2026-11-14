@@ -1,0 +1,604 @@
+{
+  "source": "npm run replay:display -- --fixture",
+  "readAt": "2026-11-14T20:16:40.088Z",
+  "cycles": [
+    {
+      "id": 3278,
+      "createdAt": "2026-11-06T12:15:05.041932+00:00",
+      "reserveAsset": "USDT",
+      "pilot": {
+        "label": "S4 testnet",
+        "firstCycle": true,
+        "ordersEnabled": true
+      },
+      "closesDecided": [],
+      "lines": [
+        {
+          "high": 799.41,
+          "armed": false,
+          "asset": "BNB",
+          "status": "in",
+          "exitAtMs": null,
+          "entryAtMs": 1785456000000,
+          "entryPrice": 591.99,
+          "lastMoveAtMs": 1793952000000,
+          "lastMoveReason": "reprise_etat_banc"
+        },
+        {
+          "high": 86620,
+          "armed": false,
+          "asset": "BTC",
+          "status": "in",
+          "exitAtMs": null,
+          "entryAtMs": 1784073600000,
+          "entryPrice": 65043.99,
+          "lastMoveAtMs": 1793952000000,
+          "lastMoveReason": "reprise_etat_banc"
+        },
+        {
+          "high": 2776.19,
+          "armed": false,
+          "asset": "ETH",
+          "status": "in",
+          "exitAtMs": null,
+          "entryAtMs": 1783728000000,
+          "entryPrice": 1796.85,
+          "lastMoveAtMs": 1793952000000,
+          "lastMoveReason": "reprise_etat_banc"
+        },
+        {
+          "high": null,
+          "armed": true,
+          "asset": "XRP",
+          "status": "out",
+          "exitAtMs": 1793318400000,
+          "entryAtMs": null,
+          "entryPrice": null,
+          "lastMoveAtMs": 1793952000000,
+          "lastMoveReason": "reprise_etat_banc"
+        }
+      ],
+      "plan": [
+        {
+          "gate": "actionable",
+          "hold": false,
+          "asset": "BNB",
+          "state": "free",
+          "targetPercent": 20,
+          "currentPercent": 5.048169169048565
+        },
+        {
+          "gate": "actionable",
+          "hold": false,
+          "asset": "BTC",
+          "state": "free",
+          "targetPercent": 32.5,
+          "currentPercent": 5.077878255075245
+        },
+        {
+          "gate": "actionable",
+          "hold": false,
+          "asset": "ETH",
+          "state": "free",
+          "targetPercent": 32.5,
+          "currentPercent": 4.963974434616097
+        },
+        {
+          "gate": "actionable",
+          "hold": false,
+          "asset": "XRP",
+          "state": "excluded",
+          "targetPercent": 0,
+          "currentPercent": 5.002568311914009
+        }
+      ],
+      "book": {
+        "cash": 826.6055888703,
+        "equity": 1034.4542397703,
+        "positions": [
+          {
+            "qty": "0.00069",
+            "asset": "BTC",
+            "price": 76128.01,
+            "stale": false,
+            "value": 52.5283269
+          },
+          {
+            "qty": "0.075",
+            "asset": "BNB",
+            "price": 696.28,
+            "stale": false,
+            "value": 52.221
+          },
+          {
+            "qty": "43.2",
+            "asset": "XRP",
+            "price": 1.1979,
+            "stale": false,
+            "value": 51.74928
+          },
+          {
+            "qty": "0.0229",
+            "asset": "ETH",
+            "price": 2242.36,
+            "stale": false,
+            "value": 51.350044
+          }
+        ]
+      },
+      "intents": [
+        {
+          "id": 3860,
+          "symbol": "XRP/USDT",
+          "side": "sell",
+          "valuation_price": 1.1979,
+          "ledger_base_delta": -43.2,
+          "ledger_quote_delta": 51.69753072,
+          "fee": 0.05174928
+        },
+        {
+          "id": 3862,
+          "symbol": "BNB/USDT",
+          "side": "buy",
+          "valuation_price": 696.28,
+          "ledger_base_delta": 0.221,
+          "ledger_quote_delta": -154.03175788,
+          "fee": 0.15387788
+        },
+        {
+          "id": 3864,
+          "symbol": "BTC/USDT",
+          "side": "buy",
+          "valuation_price": 76128.01,
+          "ledger_base_delta": 0.00372,
+          "ledger_quote_delta": -283.4793933972,
+          "fee": 0.2831961972
+        },
+        {
+          "id": 3866,
+          "symbol": "ETH/USDT",
+          "side": "buy",
+          "valuation_price": 2242.36,
+          "ledger_base_delta": 0.1268,
+          "ledger_quote_delta": -284.615579248,
+          "fee": 0.284331248
+        }
+      ],
+      "photo": {
+        "decision_id": 3278,
+        "equity_usd": 1034.45,
+        "cash_usd": 826.61,
+        "positions": [
+          {
+            "qty": 0.00069,
+            "asset": "BTC",
+            "price": 76128.01,
+            "value_usd": 52.53,
+            "price_stale": false
+          },
+          {
+            "qty": 0.075,
+            "asset": "BNB",
+            "price": 696.28,
+            "value_usd": 52.22,
+            "price_stale": false
+          },
+          {
+            "qty": 43.2,
+            "asset": "XRP",
+            "price": 1.2,
+            "value_usd": 51.75,
+            "price_stale": false
+          },
+          {
+            "qty": 0.0229,
+            "asset": "ETH",
+            "price": 2242.36,
+            "value_usd": 51.35,
+            "price_stale": false
+          }
+        ]
+      },
+      "nextPhoto": {
+        "decision_id": 3279,
+        "equity_usd": 1029.22,
+        "cash_usd": 156.18,
+        "positions": [
+          {
+            "qty": 0.00441,
+            "asset": "BTC",
+            "price": 75700,
+            "value_usd": 333.84,
+            "price_stale": false
+          },
+          {
+            "qty": 0.1497,
+            "asset": "ETH",
+            "price": 2227.17,
+            "value_usd": 333.41,
+            "price_stale": false
+          },
+          {
+            "qty": 0.296,
+            "asset": "BNB",
+            "price": 695.27,
+            "value_usd": 205.8,
+            "price_stale": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 3293,
+      "createdAt": "2026-11-09T00:06:03.72902+00:00",
+      "reserveAsset": "USDT",
+      "pilot": {
+        "label": "S4 testnet",
+        "firstCycle": false,
+        "ordersEnabled": true
+      },
+      "closesDecided": [
+        "2026-11-09T00:00:00.000Z"
+      ],
+      "lines": [
+        {
+          "high": 799.41,
+          "armed": false,
+          "asset": "BNB",
+          "status": "in",
+          "exitAtMs": null,
+          "entryAtMs": 1785456000000,
+          "entryPrice": 591.99,
+          "lastMoveAtMs": 1793967304908,
+          "lastMoveReason": "transition_initiale"
+        },
+        {
+          "high": 86620,
+          "armed": false,
+          "asset": "BTC",
+          "status": "in",
+          "exitAtMs": null,
+          "entryAtMs": 1784073600000,
+          "entryPrice": 65043.99,
+          "lastMoveAtMs": 1793967304908,
+          "lastMoveReason": "transition_initiale"
+        },
+        {
+          "high": null,
+          "armed": true,
+          "asset": "ETH",
+          "status": "out",
+          "exitAtMs": 1794182400000,
+          "entryAtMs": null,
+          "entryPrice": null,
+          "lastMoveAtMs": 1794182400000,
+          "lastMoveReason": "sortie_s4"
+        },
+        {
+          "high": null,
+          "armed": true,
+          "asset": "XRP",
+          "status": "out",
+          "exitAtMs": 1793318400000,
+          "entryAtMs": null,
+          "entryPrice": null,
+          "lastMoveAtMs": 1793967304908,
+          "lastMoveReason": "transition_initiale"
+        }
+      ],
+      "plan": [
+        {
+          "gate": "frozen",
+          "hold": true,
+          "asset": "BNB",
+          "state": "fixed",
+          "targetPercent": 20.143946268728143,
+          "currentPercent": 20.143946268728143
+        },
+        {
+          "gate": "actionable",
+          "hold": false,
+          "asset": "BTC",
+          "state": "free",
+          "targetPercent": 32.35605373127186,
+          "currentPercent": 32.72931160810859
+        },
+        {
+          "gate": "actionable",
+          "hold": false,
+          "asset": "ETH",
+          "state": "excluded",
+          "targetPercent": 0,
+          "currentPercent": 31.577676854778275
+        },
+        {
+          "gate": "actionable",
+          "hold": false,
+          "asset": "XRP",
+          "state": "excluded",
+          "targetPercent": 0,
+          "currentPercent": 0
+        }
+      ],
+      "book": {
+        "cash": 156.1763890651,
+        "equity": 1004.4101453651,
+        "positions": [
+          {
+            "qty": "0.00441",
+            "asset": "BTC",
+            "price": 74543.43,
+            "stale": false,
+            "value": 328.7365263
+          },
+          {
+            "qty": "0.1497",
+            "asset": "ETH",
+            "price": 2118.7,
+            "stale": false,
+            "value": 317.16939
+          },
+          {
+            "qty": "0.296",
+            "asset": "BNB",
+            "price": 683.54,
+            "stale": false,
+            "value": 202.32784
+          }
+        ]
+      },
+      "intents": [
+        {
+          "id": 3868,
+          "symbol": "ETH/USDT",
+          "side": "sell",
+          "valuation_price": 2118.7,
+          "ledger_base_delta": -0.1497,
+          "ledger_quote_delta": 316.85222061,
+          "fee": 0.31716939
+        }
+      ],
+      "photo": {
+        "decision_id": 3293,
+        "equity_usd": 1004.41,
+        "cash_usd": 156.18,
+        "positions": [
+          {
+            "qty": 0.00441,
+            "asset": "BTC",
+            "price": 74543.43,
+            "value_usd": 328.74,
+            "price_stale": false
+          },
+          {
+            "qty": 0.1497,
+            "asset": "ETH",
+            "price": 2118.7,
+            "value_usd": 317.17,
+            "price_stale": false
+          },
+          {
+            "qty": 0.296,
+            "asset": "BNB",
+            "price": 683.54,
+            "value_usd": 202.33,
+            "price_stale": false
+          }
+        ]
+      },
+      "nextPhoto": {
+        "decision_id": 3294,
+        "equity_usd": 1006.69,
+        "cash_usd": 473.03,
+        "positions": [
+          {
+            "qty": 0.00441,
+            "asset": "BTC",
+            "price": 74844.54,
+            "value_usd": 330.06,
+            "price_stale": false
+          },
+          {
+            "qty": 0.296,
+            "asset": "BNB",
+            "price": 687.82,
+            "value_usd": 203.59,
+            "price_stale": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 3323,
+      "createdAt": "2026-11-14T00:05:16.374882+00:00",
+      "reserveAsset": "USDT",
+      "pilot": {
+        "label": "S4 testnet",
+        "firstCycle": false,
+        "ordersEnabled": true
+      },
+      "closesDecided": [
+        "2026-11-14T00:00:00.000Z"
+      ],
+      "lines": [
+        {
+          "high": null,
+          "armed": true,
+          "asset": "BNB",
+          "status": "out",
+          "exitAtMs": 1794614400000,
+          "entryAtMs": null,
+          "entryPrice": null,
+          "lastMoveAtMs": 1794614400000,
+          "lastMoveReason": "sortie_s4"
+        },
+        {
+          "high": null,
+          "armed": true,
+          "asset": "BTC",
+          "status": "out",
+          "exitAtMs": 1794614400000,
+          "entryAtMs": null,
+          "entryPrice": null,
+          "lastMoveAtMs": 1794614400000,
+          "lastMoveReason": "sortie_s4"
+        },
+        {
+          "high": null,
+          "armed": true,
+          "asset": "ETH",
+          "status": "out",
+          "exitAtMs": 1794182400000,
+          "entryAtMs": null,
+          "entryPrice": null,
+          "lastMoveAtMs": 1794182763499,
+          "lastMoveReason": "sortie_s4"
+        },
+        {
+          "high": null,
+          "armed": true,
+          "asset": "XRP",
+          "status": "out",
+          "exitAtMs": 1793318400000,
+          "entryAtMs": null,
+          "entryPrice": null,
+          "lastMoveAtMs": 1793967304908,
+          "lastMoveReason": "transition_initiale"
+        }
+      ],
+      "plan": [
+        {
+          "gate": "actionable",
+          "hold": false,
+          "asset": "BNB",
+          "state": "excluded",
+          "targetPercent": 0,
+          "currentPercent": 19.43769108586646
+        },
+        {
+          "gate": "actionable",
+          "hold": false,
+          "asset": "BTC",
+          "state": "excluded",
+          "targetPercent": 0,
+          "currentPercent": 31.364849738681215
+        },
+        {
+          "gate": "actionable",
+          "hold": false,
+          "asset": "ETH",
+          "state": "excluded",
+          "targetPercent": 0,
+          "currentPercent": 0
+        },
+        {
+          "gate": "actionable",
+          "hold": false,
+          "asset": "XRP",
+          "state": "excluded",
+          "targetPercent": 0,
+          "currentPercent": 0
+        }
+      ],
+      "book": {
+        "cash": 473.0286096751,
+        "equity": 961.4899175751,
+        "positions": [
+          {
+            "qty": "0.00441",
+            "asset": "BTC",
+            "price": 68383.19,
+            "stale": false,
+            "value": 301.5698679
+          },
+          {
+            "qty": "0.296",
+            "asset": "BNB",
+            "price": 631.39,
+            "stale": false,
+            "value": 186.89144
+          }
+        ]
+      },
+      "intents": [
+        {
+          "id": 3870,
+          "symbol": "BNB/USDT",
+          "side": "sell",
+          "valuation_price": 631.39,
+          "ledger_base_delta": -0.296,
+          "ledger_quote_delta": 186.70454856,
+          "fee": 0.18689144
+        },
+        {
+          "id": 3872,
+          "symbol": "BTC/USDT",
+          "side": "sell",
+          "valuation_price": 68383.19,
+          "ledger_base_delta": -0.00441,
+          "ledger_quote_delta": 301.2682980321,
+          "fee": 0.3015698679
+        }
+      ],
+      "photo": {
+        "decision_id": 3323,
+        "equity_usd": 961.49,
+        "cash_usd": 473.03,
+        "positions": [
+          {
+            "qty": 0.00441,
+            "asset": "BTC",
+            "price": 68383.19,
+            "value_usd": 301.57,
+            "price_stale": false
+          },
+          {
+            "qty": 0.296,
+            "asset": "BNB",
+            "price": 631.39,
+            "value_usd": 186.89,
+            "price_stale": false
+          }
+        ]
+      },
+      "nextPhoto": {
+        "decision_id": 3324,
+        "equity_usd": 961,
+        "cash_usd": 961,
+        "positions": []
+      }
+    }
+  ],
+  "journal": [
+    {
+      "close_at": "2026-11-09T00:00:00+00:00",
+      "event": "exit",
+      "close": 2127.46,
+      "sma50": 2483.1396,
+      "high_after": 2776.19,
+      "threshold_price": 2220.952,
+      "days_out": 0,
+      "asset": "ETH"
+    },
+    {
+      "close_at": "2026-11-14T00:00:00+00:00",
+      "event": "exit",
+      "close": 630.31,
+      "sma50": 732.4184,
+      "high_after": 799.41,
+      "threshold_price": 639.528,
+      "days_out": 0,
+      "asset": "BNB"
+    },
+    {
+      "close_at": "2026-11-14T00:00:00+00:00",
+      "event": "exit",
+      "close": 68314,
+      "sma50": 80624.4102,
+      "high_after": 86620,
+      "threshold_price": 69296,
+      "days_out": 0,
+      "asset": "BTC"
+    }
+  ]
+}

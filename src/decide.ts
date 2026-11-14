@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { randomUUID } from 'node:crypto';
 import { config } from './config/index.js';
-import { armCycleWatchdog, runGuardedCycle } from './scheduler/cycleGuard.js';
+import { armCycleWatchdog, photoBookOf, runGuardedCycle } from './scheduler/cycleGuard.js';
 import { getSupabaseClient } from './persistence/supabase.js';
 import { claimManualRun, releaseManualRun } from './persistence/schedulerState.js';
 import { prepareEquitySnapshot, writeEquitySnapshot } from './persistence/equitySnapshots.js';
@@ -35,7 +35,7 @@ async function runCycle(): Promise<CycleRun> {
   for (const m of result.s4?.movements ?? []) console.log(`[decide]   ${m.side} ${m.asset} ${m.usd.toFixed(2)} $ (${m.reason})`);
   await writeEquitySnapshot(
     getSupabaseClient(),
-    prepareEquitySnapshot(result.status, result.decisionId, result.portfolio),
+    prepareEquitySnapshot(result.status, result.decisionId, photoBookOf(result)),
   );
   return { exitCode: 0, settled: true };
 }

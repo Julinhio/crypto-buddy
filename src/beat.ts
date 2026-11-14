@@ -2,8 +2,8 @@ import 'dotenv/config';
 import { runHeartbeat } from './scheduler/heartbeat.js';
 import { formatAlert } from './alerting/messages.js';
 import { formatActivity } from './alerting/activity.js';
-import { formatS4Activity } from './alerting/s4Activity.js';
-import { explainS4 } from './s4/explain.js';
+import { completeS4Notification, formatS4Activity } from './alerting/s4Activity.js';
+import { readDecidingClose } from './persistence/s4State.js';
 import { maybeSendDailySummary } from './alerting/dailySummary.js';
 import { sendTelegram } from './alerting/telegram.js';
 import { pingHealthchecks } from './alerting/healthchecks.js';
@@ -48,19 +48,19 @@ async function main(): Promise<number> {
     await sendTelegram(formatActivity(result.activityNotification));
   }
 
-  // S4's movement notification. The movements are already booked and sent: the explanation is
-  // written NOW, after the cycle and outside its timeout, by the model when it answers within
-  // its own bound and by the code otherwise — the message leaves either way. No movement, no
-  // notification, no model call (`prepareS4Notification` returned null).
+  // S4's movement notification. The movements are already booked and sent, and the motif of each
+  // is written by the CODE from the values its deciding close recorded (`s4/motif.ts`) — no model.
+  // A movement decided by this very cycle carries those values already; one that executes an
+  // earlier decision (an exit whose order had not filled, a rebuy that waited for a freeze) reads
+  // them from the journal HERE, after the run-lock is released and outside the cycle's timeout.
+  // That read is bounded and best-effort: without it the motif says its values were not read, and
+  // the message leaves either way. No movement, no notification (`prepareS4Notification` → null).
   if (result.s4Notification) {
-    const explained = await explainS4(result.s4Notification);
-    console.log(
-      `[s4] explanation: ${explained.source}` +
-        (explained.source === 'model'
-          ? ` (${explained.model}, ${explained.inputTokens ?? '?'} in / ${explained.outputTokens ?? '?'} out tokens)`
-          : ` — ${explained.error}`),
+    const supabase = getSupabaseClient();
+    const notification = await completeS4Notification(result.s4Notification, async (asset, kind, closeMs) =>
+      supabase ? readDecidingClose(supabase, asset, kind, closeMs) : null,
     );
-    await sendTelegram(formatS4Activity(result.s4Notification, explained.text));
+    await sendTelegram(formatS4Activity(notification));
   }
 
   // Equity photo — observability, fully decoupled from the cycle's verdict. The
