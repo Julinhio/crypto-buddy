@@ -68,6 +68,12 @@ Elle écrit `out/s4/reconstruction.json`, `out/s4/seed.sql` (l'amorçage de `s4_
 
 `npm run s4:dry-run -- --book <livre.json>` rejoue un cycle sur le marché réel sans rien écrire.
 
+Le lot scellé 2024-2026 est versionné depuis le 14/11/2026 dans `data/calibration/crypto-buddy-exposure-v2-validation` (sa fenêtre a été ouverte une fois, pour la validation de S4). Il reste vérifié octet pour octet contre son empreinte.
+
+## Façon de démarrer
+
+Le démarrage ci-dessus reprend l'état de la trajectoire continue. Ce n'est pas la seule façon de faire, et depuis 100 % de cash le code efface le plus-haut d'une ligne qu'il ne détient pas. L'étude `docs/RAPPORT-DEMARRAGE-S4.md` (`npm run bench:start`) compare cinq façons de démarrer sur 320 dates de départ. Elle est descriptive et ne change rien à la production.
+
 ## L'ancien pilote
 
 `exposure_pilot` (A.1, clos le 01/11/2026) n'est ni lu ni écrit par S4. Le pilote « S4 testnet » est la ligne unique de `s4_pilot`. Son identité (début, cycle, SHA, capital de départ) est écrite par le premier cycle autorisé à trader.

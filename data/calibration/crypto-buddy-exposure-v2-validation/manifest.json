@@ -1,0 +1,220 @@
+{
+  "schema_version": 1,
+  "bundle_id": "crypto-buddy-exposure-v2-validation",
+  "source": "https://data-api.binance.vision",
+  "producer_repository": "github.com/Julinhio/crypto-lab",
+  "fetch_start": "2024-06-30T20:00:00.000Z",
+  "evaluation_start": "2024-07-01T00:00:00.000Z",
+  "as_of_exclusive": "2026-06-01T00:00:00.000Z",
+  "acquisition_config_sha256": "7e7c89b4429ec964f21a84ed9e0fe3c88ad66c1877063800f49ddc0ed00f3751",
+  "producer_source_sha256": "b517acc2aa4f088199cd04612e68b9a9d8b22e5313990d441fb85bda3eba7e84",
+  "producer_source_files": [
+    {
+      "path": "src/binance-source.mjs",
+      "sha256": "f5db4082ba2823292529766e81c7308b03542455329f8cd1240e108dfac58667"
+    },
+    {
+      "path": "src/candle.mjs",
+      "sha256": "b6e78ba310c318644fa8ee54c5c927ec6e273012c044e9986378766ac993a298"
+    },
+    {
+      "path": "src/exposure-bundle.mjs",
+      "sha256": "1edc385dfddce79732965c96c68bb48e9b267bcbe8f7d20ea13cde70aa6cd18a"
+    },
+    {
+      "path": "src/exposure-config.mjs",
+      "sha256": "f353d4d7df0ac525eb205cdee2b534fa5becfd8ed3f696240e9bb1ca5cd18803"
+    },
+    {
+      "path": "src/klines.mjs",
+      "sha256": "5135926bd3a2091be4166a48dd063ee407e34e46694a7485dcf72fefe3b096d4"
+    },
+    {
+      "path": "src/lib.mjs",
+      "sha256": "63d2c0037b42c7058e0661363f213b16975074235945845c114d00a2107b8d56"
+    },
+    {
+      "path": "src/producer-source.mjs",
+      "sha256": "0d77f877ca5e7c69f23f486db5c357e50f6b698cb65a795cd1242018d0686b98"
+    },
+    {
+      "path": "src/timeframe.mjs",
+      "sha256": "69a16a7484ce5c05fb43e38b1532e78f6431b3baa153282e0db0b7da73b4c1a9"
+    }
+  ],
+  "generation_git_commit": "ed9bc04a7f150132cd197abff42fec1c6c78f89a",
+  "generation_git_commit_authority": "informative only, never a proof of provenance. The bundle is committed together with the manifest and the branch is squash-merged, so this commit does not exist at generation time and changes again on merge. Use producer_source_sha256.",
+  "series": [
+    {
+      "symbol": "BNBUSDT",
+      "timeframe": "1d",
+      "file": "raw/BNBUSDT-1d.json",
+      "rows": 700,
+      "first_open_time": "2024-07-01T00:00:00.000Z",
+      "first_close_time": "2024-07-01T23:59:59.999Z",
+      "last_open_time": "2026-05-31T00:00:00.000Z",
+      "last_close_time": "2026-05-31T23:59:59.999Z",
+      "duplicate_open_times_returned_by_source": 0,
+      "duplicates_ok": true,
+      "strictly_ordered": true,
+      "gap_count": 0,
+      "gaps": [],
+      "discarded_by_admissibility": 0,
+      "sha256": "15a06d43af2cd43f7c3990014f8e415ad7d6d8d8c09348b6eed513da84640df3"
+    },
+    {
+      "symbol": "BNBUSDT",
+      "timeframe": "4h",
+      "file": "raw/BNBUSDT-4h.json",
+      "rows": 4201,
+      "first_open_time": "2024-06-30T20:00:00.000Z",
+      "first_close_time": "2024-06-30T23:59:59.999Z",
+      "last_open_time": "2026-05-31T20:00:00.000Z",
+      "last_close_time": "2026-05-31T23:59:59.999Z",
+      "duplicate_open_times_returned_by_source": 0,
+      "duplicates_ok": true,
+      "strictly_ordered": true,
+      "gap_count": 0,
+      "gaps": [],
+      "discarded_by_admissibility": 0,
+      "sha256": "bf8ce10db4489409fdc06c2efceaf7643b111de99e98bb12f07bc14a9c119a19"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "timeframe": "1d",
+      "file": "raw/BTCUSDT-1d.json",
+      "rows": 700,
+      "first_open_time": "2024-07-01T00:00:00.000Z",
+      "first_close_time": "2024-07-01T23:59:59.999Z",
+      "last_open_time": "2026-05-31T00:00:00.000Z",
+      "last_close_time": "2026-05-31T23:59:59.999Z",
+      "duplicate_open_times_returned_by_source": 0,
+      "duplicates_ok": true,
+      "strictly_ordered": true,
+      "gap_count": 0,
+      "gaps": [],
+      "discarded_by_admissibility": 0,
+      "sha256": "b025150ed2eddaf02176abd220ffd1dc7805abf41ab5d9d2d4ae5f1cb831f7ef"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "timeframe": "4h",
+      "file": "raw/BTCUSDT-4h.json",
+      "rows": 4201,
+      "first_open_time": "2024-06-30T20:00:00.000Z",
+      "first_close_time": "2024-06-30T23:59:59.999Z",
+      "last_open_time": "2026-05-31T20:00:00.000Z",
+      "last_close_time": "2026-05-31T23:59:59.999Z",
+      "duplicate_open_times_returned_by_source": 0,
+      "duplicates_ok": true,
+      "strictly_ordered": true,
+      "gap_count": 0,
+      "gaps": [],
+      "discarded_by_admissibility": 0,
+      "sha256": "7e25ae4a5b60ba0a39ccb4c211ac0203a099dfe65a2d2ba286a21775142aeffa"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "timeframe": "1d",
+      "file": "raw/ETHUSDT-1d.json",
+      "rows": 700,
+      "first_open_time": "2024-07-01T00:00:00.000Z",
+      "first_close_time": "2024-07-01T23:59:59.999Z",
+      "last_open_time": "2026-05-31T00:00:00.000Z",
+      "last_close_time": "2026-05-31T23:59:59.999Z",
+      "duplicate_open_times_returned_by_source": 0,
+      "duplicates_ok": true,
+      "strictly_ordered": true,
+      "gap_count": 0,
+      "gaps": [],
+      "discarded_by_admissibility": 0,
+      "sha256": "2c99988520917886deecee456a2986d2c11c091989c6ff08821e8794b93207bb"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "timeframe": "4h",
+      "file": "raw/ETHUSDT-4h.json",
+      "rows": 4201,
+      "first_open_time": "2024-06-30T20:00:00.000Z",
+      "first_close_time": "2024-06-30T23:59:59.999Z",
+      "last_open_time": "2026-05-31T20:00:00.000Z",
+      "last_close_time": "2026-05-31T23:59:59.999Z",
+      "duplicate_open_times_returned_by_source": 0,
+      "duplicates_ok": true,
+      "strictly_ordered": true,
+      "gap_count": 0,
+      "gaps": [],
+      "discarded_by_admissibility": 0,
+      "sha256": "42838e41e09ff4c3cc16ae352b2a7e8a0f7aa98120895ea146a5f1f37a0dc2a9"
+    },
+    {
+      "symbol": "SOLUSDT",
+      "timeframe": "1d",
+      "file": "raw/SOLUSDT-1d.json",
+      "rows": 700,
+      "first_open_time": "2024-07-01T00:00:00.000Z",
+      "first_close_time": "2024-07-01T23:59:59.999Z",
+      "last_open_time": "2026-05-31T00:00:00.000Z",
+      "last_close_time": "2026-05-31T23:59:59.999Z",
+      "duplicate_open_times_returned_by_source": 0,
+      "duplicates_ok": true,
+      "strictly_ordered": true,
+      "gap_count": 0,
+      "gaps": [],
+      "discarded_by_admissibility": 0,
+      "sha256": "eaa2b75c5998f11092c93840a1c64d9b0fa8a2cd9cba65ba135487cba31019a3"
+    },
+    {
+      "symbol": "SOLUSDT",
+      "timeframe": "4h",
+      "file": "raw/SOLUSDT-4h.json",
+      "rows": 4201,
+      "first_open_time": "2024-06-30T20:00:00.000Z",
+      "first_close_time": "2024-06-30T23:59:59.999Z",
+      "last_open_time": "2026-05-31T20:00:00.000Z",
+      "last_close_time": "2026-05-31T23:59:59.999Z",
+      "duplicate_open_times_returned_by_source": 0,
+      "duplicates_ok": true,
+      "strictly_ordered": true,
+      "gap_count": 0,
+      "gaps": [],
+      "discarded_by_admissibility": 0,
+      "sha256": "0f2375f1679da9903fd72bb023edfcdb08d525dfeefa64d6d6614e138dd707fd"
+    },
+    {
+      "symbol": "XRPUSDT",
+      "timeframe": "1d",
+      "file": "raw/XRPUSDT-1d.json",
+      "rows": 700,
+      "first_open_time": "2024-07-01T00:00:00.000Z",
+      "first_close_time": "2024-07-01T23:59:59.999Z",
+      "last_open_time": "2026-05-31T00:00:00.000Z",
+      "last_close_time": "2026-05-31T23:59:59.999Z",
+      "duplicate_open_times_returned_by_source": 0,
+      "duplicates_ok": true,
+      "strictly_ordered": true,
+      "gap_count": 0,
+      "gaps": [],
+      "discarded_by_admissibility": 0,
+      "sha256": "a8e59bd3f22d16b87c827306144904abaeb2d5f7ae4e1c0e2fd8415ca97692ef"
+    },
+    {
+      "symbol": "XRPUSDT",
+      "timeframe": "4h",
+      "file": "raw/XRPUSDT-4h.json",
+      "rows": 4201,
+      "first_open_time": "2024-06-30T20:00:00.000Z",
+      "first_close_time": "2024-06-30T23:59:59.999Z",
+      "last_open_time": "2026-05-31T20:00:00.000Z",
+      "last_close_time": "2026-05-31T23:59:59.999Z",
+      "duplicate_open_times_returned_by_source": 0,
+      "duplicates_ok": true,
+      "strictly_ordered": true,
+      "gap_count": 0,
+      "gaps": [],
+      "discarded_by_admissibility": 0,
+      "sha256": "ff386251b719b02c6e717a2ba8c3345c5144ffff9811365ffb0f896a73d28bc1"
+    }
+  ],
+  "bundle_sha256": "7f79f1db46b855170fe62ae29ef4068f4aa49efa0ea3d73b136387fcf91ac9a5"
+}
