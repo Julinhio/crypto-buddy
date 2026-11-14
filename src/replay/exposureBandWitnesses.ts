@@ -200,6 +200,8 @@ function allocationOf(raw: unknown): Record<string, number> | null {
  * book BEFORE the cycle's orders. Proven on the corpus: cycle 1807 sold its entire ETH line
  * and the snapshot still carries that line at its pre-trade quantity. Targeting E on it made
  * E follow the book the bot was SHOWN while every comment and every criterion said post-cycle.
+ * (True of every photo written before 14/11/2026, which is the whole period this replay covers.
+ * Since then the photo is the post-trade book — `photoBookOf`, scheduler/cycleGuard.ts.)
  *
  * So the post-trade book is derived the way production derives it: the pre-trade book plus
  * that cycle's SOVEREIGN ledger entries — `event_type='intent'` and

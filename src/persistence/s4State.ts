@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { S4CloseEvent, S4Line, S4MoveReason, S4PendingExecution } from '../s4/core.js';
+import { decidingFromJournal, type S4DecidingClose, type S4JournalRow } from '../s4/motif.js';
 
 /**
  * THE S4 PILOT'S PERSISTENT STATE (migration 0040). Every read is bounded and every failure is
@@ -209,5 +210,75 @@ export async function linkCloseDecisions(supabase: SupabaseClient, closesMs: num
       .abortSignal(signal());
   } catch {
     // The journal row stands on its own (close, asset, git SHA); the link is a convenience.
+  }
+}
+
+/** Shorter than the state reads: this one only feeds a notification, after the cycle. */
+const DISPLAY_READ_TIMEOUT_MS = 5_000;
+
+/** The raw journal rows of one deciding close: its own, and for a rebuy the last out-of-market row before it. */
+export interface DecidingRows {
+  row: S4JournalRow;
+  previousOut: S4JournalRow | null;
+}
+
+/**
+ * READ-ONLY. Keyed exactly (asset, close, event): the journal is unique per (close, asset), so
+ * this is the row of that decision and never "the latest one that looks like it". A rebuy row
+ * carries no days-out count (the line is back in); it is rebuilt from the last out-of-market row
+ * before it (`decidingFromJournal`). Null = no such row. THROWS on a failed read of the row
+ * itself; a failed read of the previous row costs the day count only.
+ */
+export async function readDecidingRows(
+  supabase: SupabaseClient,
+  asset: string,
+  kind: 'exit' | 'rebuy',
+  closeMs: number,
+): Promise<DecidingRows | null> {
+  const closeAt = new Date(closeMs).toISOString();
+  const { data, error } = await supabase
+    .from('s4_close_decisions')
+    .select('close_at, event, close, sma50, high_after, threshold_price, days_out')
+    .eq('asset', asset)
+    .eq('close_at', closeAt)
+    .eq('event', kind)
+    .abortSignal(AbortSignal.timeout(DISPLAY_READ_TIMEOUT_MS))
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!data) return null;
+  let previousOut: DecidingRows['previousOut'] = null;
+  if (kind === 'rebuy') {
+    const prev = await supabase
+      .from('s4_close_decisions')
+      .select('close_at, event, close, sma50, high_after, threshold_price, days_out')
+      .eq('asset', asset)
+      .lt('close_at', closeAt)
+      .not('days_out', 'is', null)
+      .order('close_at', { ascending: false })
+      .limit(1)
+      .abortSignal(AbortSignal.timeout(DISPLAY_READ_TIMEOUT_MS))
+      .maybeSingle();
+    if (!prev.error && prev.data) previousOut = prev.data as S4JournalRow;
+  }
+  return { row: data as S4JournalRow, previousOut };
+}
+
+/**
+ * The journal's record of ONE deciding close — the values a movement's motif is written from when
+ * the cycle that executes it is not the cycle that decided it. Bounded, and it NEVER throws: null
+ * means "not on record, or not readable", and the motif then says its values were not read.
+ */
+export async function readDecidingClose(
+  supabase: SupabaseClient,
+  asset: string,
+  kind: 'exit' | 'rebuy',
+  closeMs: number,
+): Promise<S4DecidingClose | null> {
+  try {
+    const rows = await readDecidingRows(supabase, asset, kind, closeMs);
+    return rows ? decidingFromJournal(rows.row, rows.previousOut) : null;
+  } catch (err) {
+    console.warn(`[warn] s4 journal: deciding close of ${asset} not read (${err instanceof Error ? err.message : String(err)}) — best-effort.`);
+    return null;
   }
 }

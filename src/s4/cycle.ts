@@ -61,8 +61,8 @@ import {
  *   4. the decision row, then the orders (unless the breaker `orders_enabled` is off), then the
  *      entries the fills opened or closed.
  *
- * NO MODEL ANYWHERE ON THIS PATH. The explanation sent to Telegram is written after the cycle,
- * outside its timeout, from the facts this report carries (`beat.ts`).
+ * NO MODEL ANYWHERE ON THIS PATH — nor, since 14/11/2026, anywhere in the bot. The motif sent to
+ * Telegram is written by the code from the facts this report carries (`s4/motif.ts`).
  */
 
 export const S4_PROMPT_VERSION = 's4-v1';
@@ -86,7 +86,16 @@ export interface S4Report {
   firstCycle: boolean;
   closesDecided: number[];
   events: S4CloseEvent[];
+  /** The lines once the cycle is over: after the closes AND after the fills. */
   lines: S4Line[];
+  /**
+   * The lines as the cycle found them (after the start-of-cycle repair, before any close), and as
+   * the decision row recorded them (after the closes, before the fills). Display only — read by
+   * the notification, which needs the exit a rebuy ended and the close a movement executes; no
+   * decision reads them back.
+   */
+  linesBefore: S4Line[];
+  linesAtDecision: S4Line[];
   plan: S4LinePlan[];
   movements: S4Movement[];
   /** Planned legs the breaker kept from being sent (orders disabled). */
@@ -179,6 +188,7 @@ export async function s4Cycle(nowFn: () => number = Date.now): Promise<S4CycleRe
   const repaired = reconcileEntries({ lines: stateRead.lines, held: heldBefore, atMs: nowMs, pending: pilot.pending });
   const anomalies = [...repaired.anomalies];
   if (pilot.pending) anomalies.unshift(`exécution du cycle ${pilot.pending.decisionId} interrompue avant son enregistrement — entrées rapprochées depuis le livre`);
+  const linesBefore = repaired.lines;
   let lines = repaired.lines;
 
   // ── 2. THE STATE DECISION ──────────────────────────────────────────────────────────────
@@ -247,6 +257,9 @@ export async function s4Cycle(nowFn: () => number = Date.now): Promise<S4CycleRe
 
   // ── 4. THE DECISION ROW, THE ORDERS, THE ENTRIES ───────────────────────────────────────
   const delay = nextCycleDelayMinutes(nowMs, barMs, S4_CYCLE_OFFSET_MINUTES);
+  // What the decision row records below, kept for the notification: `lines` is reassigned once
+  // the fills are known.
+  const linesAtDecision = lines;
   const exits = events.filter((e) => e.kind === 'exit');
   const summary = describeCycle({ closes, events, plan, movements, ordersEnabled: pilot.ordersEnabled, firstCycle });
   const row = makeS4Row(context, gitSha, {
@@ -295,7 +308,7 @@ export async function s4Cycle(nowFn: () => number = Date.now): Promise<S4CycleRe
       await observeOutage(id);
       return baseResult('decided', persisted, id, row, marketData, portfolio, portfolio, movements, emptyExecutionSummary(), {
         ...emptyReport(pilot, firstCycle, lines, [...anomalies, 'exécution en attente non enregistrée — ordres reportés au cycle suivant'], null),
-        closesDecided: closes, events, plan, nextDelayMinutes: S4_RETRY_DELAY_MINUTES,
+        closesDecided: closes, events, linesBefore, plan, nextDelayMinutes: S4_RETRY_DELAY_MINUTES,
       });
     }
     execution = await executeMovements(movements, {
@@ -322,14 +335,7 @@ export async function s4Cycle(nowFn: () => number = Date.now): Promise<S4CycleRe
   for (const e of bookedLedger) {
     const asset = e.symbol.split('/')[0]!;
     const side = e.baseDelta.gt(0) ? 'buy' : 'sell';
-    const line = lines.find((l) => l.asset === asset);
-    const reason: S4MoveReason = firstCycle
-      ? 'transition_initiale'
-      : side === 'sell' && line?.status === 'out'
-        ? 'sortie_s4'
-        : side === 'buy' && !heldBefore[asset] && line?.lastMoveReason === 'rachat_s4'
-          ? 'rachat_s4'
-          : 'reequilibrage';
+    const reason = s4MoveReason({ firstCycle, side, line: lines.find((l) => l.asset === asset), heldBefore: heldBefore[asset] === true });
     const prev = byAsset.get(asset);
     if (prev) prev.usd += e.quoteDelta.abs().toNumber();
     else byAsset.set(asset, { asset, side, usd: e.quoteDelta.abs().toNumber(), reason });
@@ -377,6 +383,8 @@ export async function s4Cycle(nowFn: () => number = Date.now): Promise<S4CycleRe
     closesDecided: closes,
     events,
     lines,
+    linesBefore,
+    linesAtDecision,
     plan,
     movements: moved,
     withheld,
@@ -389,9 +397,37 @@ export async function s4Cycle(nowFn: () => number = Date.now): Promise<S4CycleRe
 
 // ── helpers ──────────────────────────────────────────────────────────────────────────────
 
+/**
+ * WHY a booked leg moved — the cause the notification states, attributed from the book and the
+ * line state and from nothing else. The body the cycle has always run, extracted unchanged
+ * (14/11/2026) so the replay of a past cycle attributes its legs with this very function.
+ *
+ *   - the pilot's first cycle: the book joins the S4 state, whatever each leg does;
+ *   - a sell on a line the rule holds out: the S4 exit;
+ *   - a buy that opens a line the rule just let back in: the S4 rebuy;
+ *   - anything else: the drift rebalancing.
+ *
+ * Written to `s4_line_state.last_move_reason` and read back here only — never by the rule.
+ */
+export function s4MoveReason(p: {
+  firstCycle: boolean;
+  side: 'buy' | 'sell';
+  line: Pick<S4Line, 'status' | 'lastMoveReason'> | undefined;
+  heldBefore: boolean;
+}): S4MoveReason {
+  return p.firstCycle
+    ? 'transition_initiale'
+    : p.side === 'sell' && p.line?.status === 'out'
+      ? 'sortie_s4'
+      : p.side === 'buy' && !p.heldBefore && p.line?.lastMoveReason === 'rachat_s4'
+        ? 'rachat_s4'
+        : 'reequilibrage';
+}
+
 function emptyReport(pilot: { label: string; ordersEnabled: boolean }, firstCycle: boolean, lines: S4Line[], anomalies: string[], blocked: string | null): S4Report {
   return {
-    label: pilot.label, ordersEnabled: pilot.ordersEnabled, firstCycle, closesDecided: [], events: [], lines, plan: [],
+    label: pilot.label, ordersEnabled: pilot.ordersEnabled, firstCycle, closesDecided: [], events: [], lines,
+    linesBefore: lines, linesAtDecision: lines, plan: [],
     movements: [], withheld: [], anomalies, blocked, nextDelayMinutes: S4_RETRY_DELAY_MINUTES,
   };
 }

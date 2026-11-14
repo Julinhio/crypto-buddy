@@ -26,8 +26,7 @@ import {
   s4Gate,
   type S4Line,
 } from '../s4/core.js';
-import { explainS4 } from '../s4/explain.js';
-import { fallbackExplanation, formatS4Activity, prepareS4Notification } from '../alerting/s4Activity.js';
+import { formatS4Activity, prepareS4Notification } from '../alerting/s4Activity.js';
 import type { S4Report } from '../s4/cycle.js';
 import { seedLinesOf, type Reconstruction } from '../s4/reconstruct.js';
 
@@ -38,7 +37,7 @@ import { seedLinesOf, type Reconstruction } from '../s4/reconstruct.js';
  *      bench's S4 run EXACTLY (every bar's out-set, line states, weights and equity);
  *   2. the transition gate: an exit passes a freeze, a rebuy waits for it;
  *   3. a full exit leaves no residue and nothing recreates the line;
- *   4. a model failure has no effect on the orders;
+ *   4. no model: neither on the order path nor, since 14/11/2026, in the notification;
  *   5. a missing or incomplete daily candle blocks the decision without consuming it;
  *   6. a restart never decides the same close twice;
  *   7. the reconstructed start: the seed is the bench's state, and topping a line up keeps its high.
@@ -174,29 +173,32 @@ console.log('Proof 3 — an S4 exit sells everything and nothing buys it back (A
   ok('the next cycle buys no XRP back while S4 holds it out — no band, floor or correction exists to recreate it', !again.some((m) => m.asset === 'XRP'));
 }
 
-// ── PROOF 4 — THE MODEL OUT OF THE ORDER PATH ───────────────────────────────────────────────
-console.log('Proof 4 — a model failure changes nothing to the orders:');
+// ── PROOF 4 — NO MODEL: NOT ON THE ORDER PATH, NOT IN THE NOTIFICATION ──────────────────────
+console.log('Proof 4 — no model on the order path, and none left in the notification:');
 {
-  const cycleSource = readFileSync(path.join(process.cwd(), 'src/s4/cycle.ts'), 'utf8');
-  ok('the S4 cycle imports no model code (llm, prompt, coherence, explain)', !/from '\.\.\/decision\/(llm|prompt|promptV5|coherence|llmFailure)\.js'|from '\.\/explain\.js'/.test(cycleSource));
-  const guard = readFileSync(path.join(process.cwd(), 'src/scheduler/cycleGuard.ts'), 'utf8');
+  const strip = (file: string) => readFileSync(path.join(process.cwd(), file), 'utf8');
+  const cycleSource = strip('src/s4/cycle.ts');
+  ok('the S4 cycle imports no model code (llm, prompt, coherence)', !/from '\.\.\/decision\/(llm|prompt|promptV5|coherence|llmFailure)\.js'/.test(cycleSource));
+  const guard = strip('src/scheduler/cycleGuard.ts');
   ok('the scheduler\'s cycle is S4, and decide() is no longer called', /s4Cycle\(\)/.test(guard) && !/\bdecide\(\)/.test(guard.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '')));
+  // 14/11/2026: the explanation is the code's. Nothing between the cycle and Telegram can reach a model.
+  const noModel = (file: string) => !/@anthropic-ai\/sdk|decision\/llm\.js|s4\/explain\.js|\.\/explain\.js/.test(strip(file));
+  ok('the beat, the notification and the motif import no model client', ['src/beat.ts', 'src/alerting/s4Activity.ts', 'src/s4/motif.ts', 'src/scheduler/heartbeat.ts'].every(noModel));
+  const exitClose = Date.parse('2026-11-07T00:00:00Z');
+  const before: S4Line = { asset: 'ETH', status: 'in', entryAtMs: 1, high: 2776.19, exitAtMs: null, armed: false, entryPrice: 1796.85, lastMoveReason: 'reprise_etat_banc', lastMoveAtMs: 0 };
+  const out: S4Line = { asset: 'ETH', status: 'out', entryAtMs: null, high: null, exitAtMs: exitClose, armed: true, entryPrice: null, lastMoveReason: 'sortie_s4', lastMoveAtMs: exitClose };
   const report: S4Report = {
-    label: 'S4 testnet', ordersEnabled: true, firstCycle: false, closesDecided: [Date.parse('2026-11-07T00:00:00Z')],
-    events: [{ closeMs: Date.parse('2026-11-07T00:00:00Z'), asset: 'ETH', kind: 'exit', close: 2200, sma50: 2500, statusBefore: 'in', statusAfter: 'out', highBefore: 2776.19, highAfter: 2776.19, thresholdPrice: 2220.95, armedAfter: true, daysOut: 0 }],
-    lines: [{ asset: 'ETH', status: 'out', entryAtMs: null, high: null, exitAtMs: Date.parse('2026-11-07T00:00:00Z'), armed: true, entryPrice: null, lastMoveReason: 'sortie_s4', lastMoveAtMs: 0 }],
+    label: 'S4 testnet', ordersEnabled: true, firstCycle: false, closesDecided: [exitClose],
+    events: [{ closeMs: exitClose, asset: 'ETH', kind: 'exit', close: 2200, sma50: 2500, statusBefore: 'in', statusAfter: 'out', highBefore: 2776.19, highAfter: 2776.19, thresholdPrice: 2220.952, armedAfter: true, daysOut: 0 }],
+    lines: [out], linesBefore: [before], linesAtDecision: [out],
     plan: [], movements: [{ asset: 'ETH', side: 'sell', usd: 330, reason: 'sortie_s4' }], withheld: [], anomalies: [], blocked: null, nextDelayMinutes: 240,
   };
   const after = derivePortfolio([], { startingCapital: new Decimal(1000), reserveAsset: 'USDT', priceOf: () => null });
   const n = prepareS4Notification(report, after, '2026-11-07T00:03:00Z')!;
-  const failing = { messages: { create: async () => { throw new Error('529 overloaded'); } } } as never;
-  const res = await explainS4(n, { client: failing });
-  ok('an API failure falls back to the code\'s own sentence', res.source === 'fallback' && res.text === fallbackExplanation(n) && /ETH a clôturé à 2.?200/.test(res.text));
-  ok('and the notification still leaves, with the movement and the code\'s explanation', formatS4Activity(n, res.text).includes('Vente 330,00 $ d\'ETH') && formatS4Activity(n, res.text).includes(res.text));
-  const answering = { messages: { create: async () => ({ stop_reason: 'end_turn', model: 'claude-haiku-5-5', usage: { input_tokens: 600, output_tokens: 60 }, content: [{ type: 'text', text: 'ETH est vendu.' }] }) } } as never;
-  const fine = await explainS4(n, { client: answering });
-  ok('when the model answers, its sentence is used — and it is pinned to claude-haiku-5-5', fine.source === 'model' && fine.text === 'ETH est vendu.' && fine.model === 'claude-haiku-5-5');
-  ok('no movement, no notification and therefore no model call', prepareS4Notification({ ...report, movements: [], withheld: [] }, after, 'x') == null);
+  const text = formatS4Activity(n);
+  ok('the notification states the movement', text.includes('Vente 330,00 $ d\'ETH'));
+  ok('and its motif is the rule\'s, with the recorded close, threshold and high — never the 50-day mean', /ETH vendu : clôture 2.?200 sous le seuil de sortie 2.?220,95 \(20 % sous le plus-haut 2.?776,19\)\./.test(text) && !/moyenne/.test(text));
+  ok('no movement, no notification', prepareS4Notification({ ...report, movements: [], withheld: [] }, after, 'x') == null);
 }
 
 // ── PROOF 5 — A MISSING OR INCOMPLETE DAILY CANDLE ──────────────────────────────────────────

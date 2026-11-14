@@ -645,10 +645,11 @@ console.log('\nDaily summary — local-time trigger, variation fallbacks, French
   passed += 1;
 }
 {
-  // formatDailySummary matches the validated mockup, incl. the "—" fallbacks.
+  // formatDailySummary: each base named on its line, each missing number explained
+  // (the pilot line and the failed-read wording are proven in test/displayReliability.ts).
   const full = formatDailySummary({
-    dateLabel: '8 juin', currentUsd: 503,
-    change24h: { usd: 2.1, pct: 0.42 }, changeSinceStart: { usd: 3, pct: 0.6 },
+    dateLabel: '8 juin', currentUsd: 503, valuedAtLabel: '05h05',
+    change24h: { usd: 2.1, pct: 0.42 }, pilot: null, history: { baseUsd: 500, change: { usd: 3, pct: 0.6 } },
     allocation: [
       { label: 'BTC', weight: 22 }, { label: 'ETH', weight: 12 },
       { label: 'BNB', weight: 8 }, { label: 'cash', weight: 58 },
@@ -656,21 +657,23 @@ console.log('\nDaily summary — local-time trigger, variation fallbacks, French
     wakeups: 3, trades: 2,
   });
   assert.ok(full.includes('📊 Bilan du jour · 8 juin'), 'header with the local date');
-  assert.ok(full.includes('Capital : 503$'), 'current capital');
+  assert.ok(full.includes('Capital : 503$ (valorisé à 05h05)'), 'current capital, with the time it was valued');
   assert.ok(full.includes('Sur 24h : +2.10$ (+0.42%)'), '24h variation — signed, 2dp');
-  assert.ok(full.includes('Depuis le début : +3.00$ (+0.60%)'), 'since-start variation');
+  assert.ok(full.includes('Historique (base 500$) : +3.00$ (+0.60%)'), 'the historical line names its base');
+  assert.ok(!full.includes('Pilote'), 'no pilot started → no pilot line');
   assert.ok(full.includes('Alloc : 22% BTC · 12% ETH · 8% BNB · 58% cash'), 'allocation, cash last (shared helper)');
   assert.ok(full.includes('Activité : 3 réveils, 2 trades'), 'activity counts, pluralized');
 
-  // First bilan (no references) → clean dashes, singular forms, no crash.
+  // First bilan (no references) → a dash WITH its reason, singular forms, no crash.
   const firstDay = formatDailySummary({
-    dateLabel: '8 juin', currentUsd: 500, change24h: null, changeSinceStart: null,
+    dateLabel: '8 juin', currentUsd: 500, valuedAtLabel: null, change24h: 'absent', pilot: null, history: 'absent',
     allocation: [{ label: 'cash', weight: 100 }], wakeups: 1, trades: 0,
   });
-  assert.ok(firstDay.includes('Sur 24h : —'), 'no 24h reference → dash');
-  assert.ok(firstDay.includes('Depuis le début : —'), 'no starting capital → dash');
+  assert.ok(firstDay.includes('Capital : 500$\n'), 'no readable photo time → the capital alone');
+  assert.ok(firstDay.includes('Sur 24h : — (pas de photo de référence à 24h)'), 'no 24h reference → dash, and why');
+  assert.ok(firstDay.includes('Historique : — (capital de départ non renseigné)'), 'no starting capital → dash, and why');
   assert.ok(firstDay.includes('Activité : 1 réveil, 0 trade'), 'singular réveil / trade (1 and 0)');
-  console.log('  ok: formatDailySummary matches the mockup, with clean — fallbacks on the first bilan');
+  console.log('  ok: formatDailySummary names each base, and a line without a number says why');
   passed += 1;
 }
 {
@@ -694,7 +697,7 @@ console.log('\nDaily summary — local-time trigger, variation fallbacks, French
   // (atomic double-send guard), but a non-delivery (send=false, or no data) RELEASES the
   // mark so the next beat retries — a daily message must not lose the day on a hiccup.
   const sample = {
-    dateLabel: '8 juin', currentUsd: 503, change24h: null, changeSinceStart: null,
+    dateLabel: '8 juin', currentUsd: 503, valuedAtLabel: null, change24h: 'absent', pilot: null, history: 'absent',
     allocation: [{ label: 'cash', weight: 100 }], wakeups: 1, trades: 0,
   } as DailySummary;
   const harness = (over: { won?: boolean; summary?: DailySummary | null; delivered?: boolean }) => {
